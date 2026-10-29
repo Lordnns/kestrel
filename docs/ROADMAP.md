@@ -1,0 +1,93 @@
+# Roadmap
+
+The plan of record is [PLAN.md](../PLAN.md). This file tracks where the code
+stands against it.
+
+## Status (audit of 2026-10-29, commit 3e2bfd7)
+
+### Verified in this audit
+
+Host: Windows 10 x86_64, rustc 1.93.1.
+
+| Check | Result |
+|-------|--------|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | pass: 23 tests (core 4, cpu 17, loader 1, embedded suite 1) |
+| `kestrel selftest` (source build) | 6/6, ~142 MIPS on `interp` |
+| `kestrel selftest` (downloaded `v0.1.4` Windows x86_64 package) | 6/6 |
+| C test programs rebuilt with NEON allowed (`-O2`/`-O3`, no `-mgeneral-regs-only`) | hello, vm, bigint pass; `algos` stops at `cmgt v3.2d` (`4ee63463`); `sha256 -O2` stops at `ld4 {v0.16b-v3.16b}` (`4c400100`) |
+
+Release `v0.1.4` (GitHub Actions) built and published all five packages;
+CI ran natively on Linux x86_64, macOS ARM and Windows x86_64, and under
+qemu for Linux ARM64.
+
+### Phase 0: Foundation: **partial** (code done; platform coverage short)
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| Workspace split | done | crates `kestrel-core`, `-cpu`, `-loader`, `-hle`, `-testsuite`, `-cli` |
+| Portable interpreter (integer, branches, all load/store forms, exclusives, atomics, user sysregs, SIMD moves) | done | `interp/{dp_imm,dp_reg,branch,ldst,system,simd}.rs`; CASP, LDAPR and PAC branches stop as undefined |
+| ELF loader, process layout, first SVCs | done | `load_elf` (static ET_EXEC); fixed `hle::layout`; SVCs 0x01 0x07 0x0b 0x1e 0x26 0x27 |
+| Embedded suite with independent expected output | partial | 6 programs embedded, all pass; the Python that produced `guest/expected/*.txt` is not in the repo, so the values cannot be re-derived |
+| Self-test command | done | `kestrel selftest [-v]`, exit code 2 on failure |
+| CI on all platforms | partial | native: Linux x86_64, macOS ARM, Windows x86_64; Linux ARM64 only under qemu; no Windows ARM64 or macOS Intel job; runs only on release tags and manual dispatch |
+| Release packaging | partial | 5 packages with `TESTING.md` and report file; Windows ARM64 never self-tested in CI; macOS Intel slice only best-effort under Rosetta |
+
+### Phase 1: Complete CPU: **not started** (apart from SIMD moves)
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| 1A Scalar floating point | not started | `fadd d0, d1, d2` is the unit test for an undefined encoding |
+| 1B NEON | partial | only FMOV general, DUP/INS/UMOV, vector logic, MOVI/MVNI (`simd.rs`); first gaps `cmgt`, `ld4` (see probe above) |
+| 1C Phase 1 tests | not started | guests built with `-mgeneral-regs-only`; no FP or NEON test program |
+| 1D Real-hardware oracle | not started | no host build mode for `guest/src` |
+
+### Phase 2: Homebrew: **not started**
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| Homebrew executable loader | not started | only ELF |
+| Process layout reporting | not started | fixed constants in `hle::layout`; no svcGetInfo |
+| Memory SVCs | not started | only SetHeapSize |
+| Handle table and kernel objects | not started | none |
+| Threads | not started | one thread; SleepThread returns at once |
+| Synchronisation | not started | none |
+| IPC | not started | none |
+| First services | not started | none |
+| SD folder option, unimplemented-call log | not started | unknown SVCs stop with their number; no service layer yet |
+| `docs/SWITCH2_NOTES.md` | not started | file missing |
+
+### Phase 3: Native execution on ARM hosts: **not started**
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| Memory arena refactor | not started | `Memory` is a `BTreeMap` of `Vec<u8>` regions |
+| Native backend | not started | `create_backend(Native)` returns "not implemented yet" |
+| Differential tester | not started | none |
+| Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
+| Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
+
+### Phases 4 to 7: **not started**
+
+- Phase 4 x86_64 recompiler: `create_backend(Jit)` returns "not implemented yet".
+- Phase 5 graphics, phase 6 commercial software, phase 7 polish: no code.
+
+### Deviations from the hard rules found in the audit
+
+- "Every instruction has a unit test": `interp/tests.rs` plus the 91 checks in
+  `asm_checks.S` cover most implemented instructions, but not all (for
+  example BIT/BIF, REV32, CCMN, SMADDL/UMADDL, LDSMIN/LDUMAX).
+- "Never silently ignore": `system.rs` treats every MSR (immediate) and every
+  SYS/SYSL other than `DC ZVA` as a no-op, and SYSL leaves Rt unwritten.
+  `svcOutputDebugString` silently truncates at 1 MiB.
+
+### Owner decisions from the audit
+
+- CI stays release-only (tags and manual runs); `PLAN.md` section 3 updated.
+- Fix the platform coverage gap, the missing expected-output generator and
+  the silently ignored system instructions, then start phase 1A.
+
+## Next task
+
+Phase 1A, scalar floating point.
