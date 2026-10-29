@@ -34,11 +34,11 @@ qemu for Linux ARM64.
 | CI on all platforms | done, awaiting first run | `ci.yml` native jobs on `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2022`, `windows-11-arm`, `macos-14`, `macos-15-intel`, plus the qemu fallback; release tags and manual dispatch only |
 | Release packaging | done, awaiting first run | every package built and self-tested on its own OS and CPU; the macOS universal binary is also self-tested on `macos-15-intel` |
 
-### Phase 1: Complete CPU: **not started** (apart from SIMD moves)
+### Phase 1: Complete CPU: **in progress**
 
 | Task | Status | Evidence |
 |------|--------|----------|
-| 1A Scalar floating point | not started | `fadd d0, d1, d2` is the unit test for an undefined encoding |
+| 1A Scalar floating point | done, with the gaps below | `float.rs` (Arm pseudocode) + `interp/fp.rs`; 13 test groups in `interp/fp_tests.rs`; a compiler-generated FP smoke program matches x86 host results bit for bit |
 | 1B NEON | partial | only FMOV general, DUP/INS/UMOV, vector logic, MOVI/MVNI (`simd.rs`); first gaps `cmgt`, `ld4` (see probe above) |
 | 1C Phase 1 tests | not started | guests built with `-mgeneral-regs-only`; no FP or NEON test program |
 | 1D Real-hardware oracle | not started | no host build mode for `guest/src` |
@@ -90,6 +90,35 @@ qemu for Linux ARM64.
 - Fix the platform coverage gap, the missing expected-output generator and
   the silently ignored system instructions, then start phase 1A.
 
+### Phase 1A notes
+
+Implemented for single and double precision: FADD, FSUB, FMUL, FDIV,
+FNMUL, FMAX, FMIN, FMAXNM, FMINNM, FMADD, FMSUB, FNMADD, FNMSUB, FMOV
+(register, immediate, general), FABS, FNEG, FSQRT, FCVT between single and
+double, FRINTN/P/M/Z/A/X/I, FCMP, FCMPE, FCCMP, FCCMPE, FCSEL, FCVT{N,P,M,Z,A}{S,U}
+(integer and fixed point), SCVTF, UCVTF (integer and fixed point), FRECPE,
+FRSQRTE, FRECPX, FRECPS, FRSQRTS. NaN propagation, default NaN (FPCR.DN) and
+flush-to-zero (FPCR.FZ, judged on the exact value as Arm does) follow the
+pseudocode; conversions and FRINT honour every rounding mode.
+
+Remaining gaps, each reported as `Exit::Unsupported` rather than guessed:
+
+- Half precision (per the plan's provision).
+- FPCR.RMode other than round-to-nearest for host-computed arithmetic
+  (add, sub, mul, div, sqrt, FMA, FRECPS, FRSQRTS). Conversions and FRINT
+  already honour it.
+- Under FZ, a double-precision FMA whose result rounds to exactly the
+  smallest normal (the exact value is not recoverable on the host).
+
+Not modelled: the FPSR cumulative exception flags (IOC, DZC, OFC, UFC, IXC,
+IDC) are never set. FRINT32*/FRINT64* (Armv8.5) decode as undefined, as on
+the Armv8.2 target CPU.
+
+Expected values: hand-worked from the Arm pseudocode (NaN rules, FZ, the
+estimates) or IEEE results from Python; a check against real ARM hardware
+is task 1D.
+
 ## Next task
 
-Phase 1A, scalar floating point.
+Phase 1B, NEON. First gaps hit by compiled code: `cmgt v3.2d` (`4ee63463`),
+`ld4 {v0.16b-v3.16b}` (`4c400100`), vector `fmov v1.2d, #imm` (`6f03f601`).

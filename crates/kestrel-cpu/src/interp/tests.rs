@@ -10,7 +10,7 @@ const CODE: u64 = 0x1_0000;
 const STACK_BASE: u64 = 0x20_0000;
 const SP: u64 = STACK_BASE + 0x8000;
 
-fn setup(words: &[u32]) -> (CpuState, Memory) {
+pub(super) fn setup(words: &[u32]) -> (CpuState, Memory) {
     let mut m = Memory::new();
     m.map(CODE, 0x1000, Perm::RX, "code").unwrap();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -250,14 +250,14 @@ fn unsupported_system_instructions_are_reported() {
 
 #[test]
 fn unknown_encoding_is_reported() {
-    // fadd d0, d1, d2 (FP arithmetic is not implemented yet)
-    let (mut s, mut m) = setup(&[0x1e622820]);
+    // add v0.4s, v1.4s, v2.4s (NEON integer arithmetic is not implemented yet)
+    let (mut s, mut m) = setup(&[0x4ea28420]);
     let exit = Interpreter::new().run(&mut s, &mut m, 10);
     assert_eq!(
         exit,
         Exit::Undefined {
             pc: CODE,
-            insn: 0x1e622820
+            insn: 0x4ea28420
         }
     );
 }

@@ -1,19 +1,23 @@
 //! SIMD and floating point.
 //!
-//! Only the handful of operations integer code commonly needs are here:
-//! register moves (FMOV general<->FP, UMOV, INS, DUP), vector logic
-//! (AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF) and MOVI/MVNI. Arithmetic FP and the
-//! rest of NEON are the next big chunk of work; until then they surface as
-//! `Exit::Undefined` with the exact encoding so they are easy to prioritise.
+//! Scalar floating point lives in `fp.rs`. Of Advanced SIMD (NEON), only the
+//! operations integer code commonly needs are here: register moves (UMOV,
+//! INS, DUP), vector logic (AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF) and MOVI/MVNI.
+//! The rest of NEON surfaces as `Exit::Undefined` with the exact encoding so
+//! it is easy to prioritise.
 
 use super::bits::*;
-use super::{Ctx, Flow, Step};
+use super::{fp, Ctx, Flow, Step};
 
 pub fn exec(c: &mut Ctx) -> Step {
     let i = c.insn;
-    // FMOV between general and FP registers (integer<->FP conversion group).
-    if field(i, 30, 24) == 0b001_1110 && bit(i, 21) && field(i, 15, 10) == 0 {
-        return fmov_general(c);
+    // Scalar floating point: bit 30 clear, bits 28..25 = 0b1111.
+    if !bit(i, 30) && field(i, 28, 25) == 0b1111 {
+        return fp::exec(c);
+    }
+    // Advanced SIMD scalar: bits 31..30 = 0b01, bits 28..24 = 0b11110.
+    if field(i, 31, 30) == 0b01 && field(i, 28, 24) == 0b11110 {
+        return fp::scalar_simd(c);
     }
     // Advanced SIMD copy: DUP (general), INS (general), UMOV.
     if field(i, 31, 31) == 0 && field(i, 29, 21) == 0b0_0111_0000 && bit(i, 10) && !bit(i, 15) {
@@ -28,30 +32,6 @@ pub fn exec(c: &mut Ctx) -> Step {
         return modified_imm(c);
     }
     Err(c.undef())
-}
-
-fn fmov_general(c: &mut Ctx) -> Step {
-    let i = c.insn;
-    let sf = bit(i, 31);
-    let ftype = field(i, 23, 22);
-    let rmode = field(i, 20, 19);
-    let opcode = field(i, 18, 16);
-    let rn = field(i, 9, 5);
-    let rd = field(i, 4, 0);
-    match (sf, ftype, rmode, opcode) {
-        (false, 0b00, 0b00, 0b110) => c.s.set_xr(rd, c.s.v[rn as usize] as u32 as u64), // FMOV Wd, Sn
-        (false, 0b00, 0b00, 0b111) => c.s.v[rd as usize] = c.s.xr(rn) as u32 as u128, // FMOV Sd, Wn
-        (true, 0b01, 0b00, 0b110) => c.s.set_xr(rd, c.s.v[rn as usize] as u64),       // FMOV Xd, Dn
-        (true, 0b01, 0b00, 0b111) => c.s.v[rd as usize] = c.s.xr(rn) as u128,         // FMOV Dd, Xn
-        (true, 0b10, 0b01, 0b110) => c.s.set_xr(rd, (c.s.v[rn as usize] >> 64) as u64), // FMOV Xd, Vn.D[1]
-        (true, 0b10, 0b01, 0b111) => {
-            // FMOV Vd.D[1], Xn: upper half only, lower half preserved.
-            let lo = c.s.v[rd as usize] & u64::MAX as u128;
-            c.s.v[rd as usize] = lo | ((c.s.xr(rn) as u128) << 64);
-        }
-        _ => return Err(c.undef()),
-    }
-    Ok(Flow::Next)
 }
 
 /// Element size in bytes and index, from the imm5 field.

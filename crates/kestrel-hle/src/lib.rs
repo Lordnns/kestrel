@@ -100,6 +100,13 @@ impl Process {
                         backend.name()
                     ))
                 }
+                Exit::Unsupported { pc, insn, what } => {
+                    return Stop::Error(format!(
+                        "unsupported: {} (instruction {insn:08x} at {pc:#x}, backend: {})",
+                        what.describe(),
+                        backend.name()
+                    ))
+                }
                 Exit::Fault { pc, fault } => {
                     return Stop::Error(format!("guest fault at pc {pc:#x}: {fault}"))
                 }

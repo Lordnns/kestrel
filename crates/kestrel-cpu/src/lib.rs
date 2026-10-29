@@ -12,6 +12,7 @@
 //! The interpreter is the reference implementation: it runs everywhere, and
 //! the faster backends are tested against it instruction by instruction.
 
+pub mod float;
 pub mod interp;
 pub mod state;
 
@@ -27,10 +28,45 @@ pub enum Exit {
     Breakpoint(u16),
     /// Encoding the backend does not implement (yet). PC points at it.
     Undefined { pc: u64, insn: u32 },
+    /// Instruction the backend recognises but deliberately does not run,
+    /// because `what` is not modelled yet. PC points at it.
+    Unsupported {
+        pc: u64,
+        insn: u32,
+        what: Unmodelled,
+    },
     /// Data or instruction fetch fault. PC points at the faulting instruction.
     Fault { pc: u64, fault: MemFault },
     /// The step budget passed to [`CpuBackend::run`] ran out.
     StepLimit,
+}
+
+/// Architecture features a backend recognises but does not model yet.
+///
+/// A one-byte code rather than a message so [`Exit`], which every
+/// interpreter step returns, stays small.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unmodelled {
+    HalfPrecision,
+    /// FPCR.RMode other than round-to-nearest in host-computed arithmetic.
+    FpRoundingMode,
+    /// Flush-to-zero of a double-precision fused multiply-add whose result
+    /// rounds to exactly the smallest normal number.
+    FpFlushedFmaEdge,
+}
+
+impl Unmodelled {
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Unmodelled::HalfPrecision => "half-precision floating point",
+            Unmodelled::FpRoundingMode => {
+                "FPCR rounding mode other than round-to-nearest in floating-point arithmetic"
+            }
+            Unmodelled::FpFlushedFmaEdge => {
+                "flush-to-zero of a double-precision fused multiply-add that rounds to the smallest normal"
+            }
+        }
+    }
 }
 
 /// One way of executing guest ARM64 code.

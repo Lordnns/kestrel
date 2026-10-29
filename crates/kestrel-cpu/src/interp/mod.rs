@@ -6,14 +6,16 @@
 //!
 //! Coverage today: integer data processing, branches, loads/stores
 //! (including pairs, exclusives and SIMD register load/store), system
-//! registers and the handful of SIMD ops compilers emit for memset/memcpy.
-//! Floating point and most NEON are TODO; they raise `Exit::Undefined` so the
-//! gap is visible instead of silently wrong.
+//! registers, scalar single and double precision floating point, and the
+//! handful of SIMD ops compilers emit for memset/memcpy. Most NEON is TODO;
+//! it raises `Exit::Undefined` so the gap is visible instead of silently
+//! wrong.
 
 mod bits;
 mod branch;
 mod dp_imm;
 mod dp_reg;
+mod fp;
 mod ldst;
 mod simd;
 mod system;
@@ -45,6 +47,15 @@ impl Ctx<'_> {
         Exit::Undefined {
             pc: self.pc,
             insn: self.insn,
+        }
+    }
+
+    #[inline]
+    pub fn unsupported(&self, what: crate::Unmodelled) -> Exit {
+        Exit::Unsupported {
+            pc: self.pc,
+            insn: self.insn,
+            what,
         }
     }
 
@@ -119,5 +130,7 @@ pub(crate) fn execute(c: &mut Ctx) -> Step {
     }
 }
 
+#[cfg(test)]
+mod fp_tests;
 #[cfg(test)]
 mod tests;

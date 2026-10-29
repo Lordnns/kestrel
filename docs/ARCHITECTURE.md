@@ -32,6 +32,20 @@ The HLE layer handles the exit and calls `run` again.
 `crates/kestrel-cpu/src/interp/` decodes by the top-level A64 encoding group
 (bits 28..25), one file per group. Unsupported encodings return
 `Exit::Undefined { pc, insn }` rather than guessing, so gaps are explicit.
+Encodings that decode but use something not modelled yet (half precision,
+for example) return `Exit::Unsupported` with an `Unmodelled` reason. Both
+variants keep `Exit` at 24 bytes, because every interpreter step returns it.
+
+### Floating point
+
+`crates/kestrel-cpu/src/float.rs` implements the Arm floating-point
+pseudocode on raw bit patterns, independent of any backend: NaN processing,
+default NaN, flush-to-zero, FPRound, conversions, round-to-integral and the
+reciprocal estimates. IEEE arithmetic runs on the host in round-to-nearest,
+which matches Arm for finite results; everything around it (NaN choice,
+host-generated NaNs, FZ) is applied here, so x86 and ARM hosts give the same
+bits. Future backends should call the same functions, or be differentially
+tested against them.
 
 ### Native (aarch64 hosts, planned)
 

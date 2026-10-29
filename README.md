@@ -11,8 +11,10 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
 
 - **Portable ARM64 interpreter** — integer data processing, branches, all
   load/store addressing modes, pairs, exclusives, acquire/release, CAS, ARMv8.1
-  LSE atomics, user system registers, and the SIMD register moves compilers
-  emit for integer code. ~45 MIPS on a modern x86 core.
+  LSE atomics, user system registers, scalar single and double precision
+  floating point (Arm NaN, default-NaN and flush-to-zero rules, bit-identical
+  on every host), and the SIMD register moves compilers emit for integer
+  code. ~140 MIPS on a modern x86 core.
 - **Guest address space** with permissions and fault reporting.
 - **ELF loader** for the test programs in `guest/`.
 - **HLE kernel stub** answering a first set of supervisor calls
@@ -121,8 +123,8 @@ reference: faster backends are differentially tested against it. See
 
 ## Roadmap
 
-1. **NEON and floating point** in the interpreter (first gap hit by compiled
-   code: `cmgt v3.2d, v3.2d, v6.2d`).
+1. **NEON** in the interpreter (scalar floating point is done; first gap hit
+   by compiled code: `cmgt v3.2d, v3.2d, v6.2d`).
 2. Homebrew executable loader, threads, handles and synchronisation SVCs.
 3. IPC and the first OS services, from public documentation.
 4. `native` backend on aarch64 hosts; `jit` backend on x86_64.
