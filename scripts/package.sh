@@ -20,7 +20,7 @@ cp "$root"/guest/bin/*.elf "$stage/examples/"
 cp "$root/packaging/TESTING.md" "$root/README.md" "$root/LICENSE" "$stage/"
 
 case "$name" in
-macos-*)
+*macos-*)
     cp "$root/packaging/macos/Run self-test.command" "$stage/"
     chmod +x "$stage/Run self-test.command"
     ;;

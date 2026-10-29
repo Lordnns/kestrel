@@ -71,6 +71,35 @@ git tag v0.1.0 && git push origin v0.1.0
 | `kestrel-windows-x86_64`   | Windows                 | natively                  |
 | `kestrel-windows-arm64`    | Windows (cross)         | by testers                |
 
+### Download the latest release and self-test
+
+These links always point at the newest release.
+
+macOS (Apple Silicon or Intel):
+
+```
+curl -LO https://github.com/Lordnns/kestrel/releases/latest/download/kestrel-macos-universal.tar.gz
+tar xzf kestrel-macos-universal.tar.gz && cd kestrel-macos-universal
+xattr -dr com.apple.quarantine .
+./kestrel selftest -v
+```
+
+Linux (`x86_64` or `aarch64`):
+
+```
+curl -LO https://github.com/Lordnns/kestrel/releases/latest/download/kestrel-linux-x86_64.tar.gz
+tar xzf kestrel-linux-x86_64.tar.gz && cd kestrel-linux-x86_64
+./kestrel selftest -v
+```
+
+Windows PowerShell (`x86_64` or `arm64`):
+
+```
+Invoke-WebRequest https://github.com/Lordnns/kestrel/releases/latest/download/kestrel-windows-x86_64.zip -OutFile kestrel.zip
+Expand-Archive kestrel.zip -DestinationPath .; cd kestrel-windows-x86_64
+.\kestrel.exe selftest -v
+```
+
 Each package has `TESTING.md` with step-by-step instructions. You can also
 run the workflow by hand from the Actions tab to get the packages as
 artifacts without making a release.

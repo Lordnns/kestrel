@@ -136,4 +136,6 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
-          prerelease: true
+          # A full (non-pre) release so /releases/latest/download/<file> always
+          # points at the newest tag; package names carry no version for the same reason.
+          make_latest: true
