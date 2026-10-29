@@ -31,8 +31,8 @@ qemu for Linux ARM64.
 | ELF loader, process layout, first SVCs | done | `load_elf` (static ET_EXEC); fixed `hle::layout`; SVCs 0x01 0x07 0x0b 0x1e 0x26 0x27 |
 | Embedded suite with independent expected output | partial | 6 programs embedded, all pass; the Python that produced `guest/expected/*.txt` is not in the repo, so the values cannot be re-derived |
 | Self-test command | done | `kestrel selftest [-v]`, exit code 2 on failure |
-| CI on all platforms | partial | native: Linux x86_64, macOS ARM, Windows x86_64; Linux ARM64 only under qemu; no Windows ARM64 or macOS Intel job; runs only on release tags and manual dispatch |
-| Release packaging | partial | 5 packages with `TESTING.md` and report file; Windows ARM64 never self-tested in CI; macOS Intel slice only best-effort under Rosetta |
+| CI on all platforms | done, awaiting first run | `ci.yml` native jobs on `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2022`, `windows-11-arm`, `macos-14`, `macos-15-intel`, plus the qemu fallback; release tags and manual dispatch only |
+| Release packaging | done, awaiting first run | every package built and self-tested on its own OS and CPU; the macOS universal binary is also self-tested on `macos-15-intel` |
 
 ### Phase 1: Complete CPU: **not started** (apart from SIMD moves)
 

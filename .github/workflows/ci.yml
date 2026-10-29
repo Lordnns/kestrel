@@ -15,10 +15,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # One native job per host target in PLAN.md section 3.
         include:
-          - { name: "Linux x86_64",           os: ubuntu-24.04 }
-          - { name: "macOS aarch64 (native)", os: macos-14 }
-          - { name: "Windows x86_64",         os: windows-2022 }
+          - { name: "Linux x86_64",   os: ubuntu-24.04 }
+          - { name: "Linux aarch64",  os: ubuntu-24.04-arm }
+          - { name: "Windows x86_64", os: windows-2022 }
+          - { name: "Windows arm64",  os: windows-11-arm }
+          - { name: "macOS aarch64",  os: macos-14 }
+          - { name: "macOS x86_64",   os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,7 +39,8 @@ jobs:
           cargo run -q --release -p kestrel-cli -- info
           cargo run -q --release -p kestrel-cli -- selftest
 
-  linux-aarch64:
+  # Fallback for Linux ARM in case the native ARM runner is unavailable.
+  linux-aarch64-qemu:
     name: Linux aarch64 (cross + qemu)
     runs-on: ubuntu-24.04
     env:

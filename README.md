@@ -63,13 +63,13 @@ publishes them as a GitHub Release:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-| Package                    | Built on               | Self-tested in CI         |
-|----------------------------|------------------------|---------------------------|
-| `kestrel-macos-universal`  | macOS 14, Apple Silicon | natively; Intel slice under Rosetta |
-| `kestrel-linux-x86_64`     | Ubuntu                  | natively                  |
-| `kestrel-linux-aarch64`    | Ubuntu (cross)          | under qemu                |
-| `kestrel-windows-x86_64`   | Windows                 | natively                  |
-| `kestrel-windows-arm64`    | Windows (cross)         | by testers                |
+| Package                    | Built on                | Self-tested natively on     |
+|----------------------------|-------------------------|-----------------------------|
+| `kestrel-macos-universal`  | macOS 14, Apple Silicon | Apple Silicon and Intel Macs |
+| `kestrel-linux-x86_64`     | Ubuntu x86_64           | Ubuntu x86_64               |
+| `kestrel-linux-aarch64`    | Ubuntu ARM64            | Ubuntu ARM64                |
+| `kestrel-windows-x86_64`   | Windows x86_64          | Windows x86_64              |
+| `kestrel-windows-arm64`    | Windows 11 ARM64        | Windows 11 ARM64            |
 
 ### Download the latest release and self-test
 
