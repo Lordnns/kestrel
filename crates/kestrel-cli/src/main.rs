@@ -6,6 +6,13 @@ use kestrel_hle::{Process, Stop};
 use std::process::ExitCode;
 use std::time::Instant;
 
+/// Release builds get the git tag (e.g. `v0.1.4`) from the Release workflow;
+/// local builds report the Cargo version with a `-dev` suffix.
+const VERSION: &str = match option_env!("KESTREL_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
+};
+
 const USAGE: &str = "\
 kestrel - experimental ARM64 console emulator
 
@@ -64,7 +71,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 }
 
 fn info() {
-    println!("kestrel {}", env!("CARGO_PKG_VERSION"));
+    println!("kestrel {VERSION}");
     println!("host architecture : {}", kestrel_core::host_arch());
     println!("host OS           : {}", std::env::consts::OS);
     println!("portable backend  : interp (available)");
@@ -82,7 +89,7 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
     let cases = kestrel_testsuite::CASES;
     println!(
         "kestrel {} self-test on {} / {}",
-        env!("CARGO_PKG_VERSION"),
+        VERSION,
         std::env::consts::OS,
         kestrel_core::host_arch()
     );

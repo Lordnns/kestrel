@@ -19,6 +19,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Baked into the binary so `kestrel info` / `selftest` report the release tag.
+  # Empty on manual runs, which then report "<cargo version>-dev".
+  KESTREL_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
   ci:
