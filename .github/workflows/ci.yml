@@ -58,5 +58,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y clang lld
-      - run: ./scripts/build-guest.sh
+      - run: bash scripts/build-guest.sh
       - run: cargo run -q --release -p kestrel-cli -- selftest

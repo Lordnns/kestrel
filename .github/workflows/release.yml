@@ -48,7 +48,7 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 dist/kestrel selftest
       - name: Package
-        run: scripts/package.sh dist/kestrel kestrel-macos-universal
+        run: bash scripts/package.sh dist/kestrel kestrel-macos-universal
       - uses: actions/upload-artifact@v4
         with:
           name: kestrel-macos-universal
@@ -78,7 +78,7 @@ jobs:
       - name: Self-test
         run: ${{ matrix.run }} target/${{ matrix.target }}/release/kestrel selftest
       - name: Package
-        run: scripts/package.sh target/${{ matrix.target }}/release/kestrel kestrel-linux-${{ matrix.arch }}
+        run: bash scripts/package.sh target/${{ matrix.target }}/release/kestrel kestrel-linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
           name: kestrel-linux-${{ matrix.arch }}
@@ -107,7 +107,7 @@ jobs:
         if: matrix.selftest
         run: target/${{ matrix.target }}/release/kestrel.exe selftest
       - name: Package
-        run: scripts/package.sh target/${{ matrix.target }}/release/kestrel.exe kestrel-windows-${{ matrix.arch }}
+        run: bash scripts/package.sh target/${{ matrix.target }}/release/kestrel.exe kestrel-windows-${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
           name: kestrel-windows-${{ matrix.arch }}
