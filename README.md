@@ -41,7 +41,8 @@ cargo run --release -p kestrel-cli -- selftest
 
 `kestrel selftest` runs six ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
-(Python, hashlib, zlib), so testers need nothing but the executable:
+by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
+nothing but the executable:
 
 | Program      | Exercises                                                        |
 |--------------|------------------------------------------------------------------|

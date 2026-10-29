@@ -61,6 +61,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Expected output matches the independent Python model
+        run: python3 scripts/gen-expected.py --check
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y clang lld
       - run: bash scripts/build-guest.sh
