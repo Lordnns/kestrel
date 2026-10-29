@@ -1,8 +1,8 @@
 name: CI
 
+# Runs as the first stage of the Release workflow, or manually from the Actions tab.
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
 
 env:

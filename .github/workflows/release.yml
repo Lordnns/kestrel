@@ -4,6 +4,7 @@
 # - Run manually (Actions tab -> Release -> Run workflow) -> builds everything
 #   and attaches the packages to the workflow run as artifacts.
 #
+# The full CI suite (ci.yml) runs first; packages are only built if it passes.
 # Every package that can run on the build machine runs `kestrel selftest`
 # before it is published.
 name: Release
@@ -20,8 +21,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   macos:
     name: macOS universal (Apple Silicon + Intel)
+    needs: ci
     runs-on: macos-14 # Apple Silicon
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +62,7 @@ jobs:
 
   linux:
     name: Linux ${{ matrix.arch }}
+    needs: ci
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -86,6 +93,7 @@ jobs:
 
   windows:
     name: Windows ${{ matrix.arch }}
+    needs: ci
     runs-on: windows-2022
     strategy:
       fail-fast: false
