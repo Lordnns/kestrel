@@ -1,0 +1,123 @@
+//! Portable ARM64 interpreter.
+//!
+//! Decoding follows the top-level A64 encoding groups (bits 28..25). Each
+//! group lives in its own file. Handlers return `Ok(Flow)` to say how the PC
+//! moves, or `Err(Exit)` to stop the run loop.
+//!
+//! Coverage today: integer data processing, branches, loads/stores
+//! (including pairs, exclusives and SIMD register load/store), system
+//! registers and the handful of SIMD ops compilers emit for memset/memcpy.
+//! Floating point and most NEON are TODO; they raise `Exit::Undefined` so the
+//! gap is visible instead of silently wrong.
+
+mod bits;
+mod branch;
+mod dp_imm;
+mod dp_reg;
+mod ldst;
+mod simd;
+mod system;
+
+use crate::{CpuBackend, CpuState, Exit};
+use kestrel_core::Memory;
+
+/// How control flow continues after an instruction.
+pub(crate) enum Flow {
+    /// Fall through to pc + 4.
+    Next,
+    /// Jump to an absolute address.
+    Jump(u64),
+}
+
+pub(crate) type Step = Result<Flow, Exit>;
+
+/// Context passed to every handler.
+pub(crate) struct Ctx<'a> {
+    pub s: &'a mut CpuState,
+    pub m: &'a mut Memory,
+    pub pc: u64,
+    pub insn: u32,
+}
+
+impl Ctx<'_> {
+    #[inline]
+    pub fn undef(&self) -> Exit {
+        Exit::Undefined {
+            pc: self.pc,
+            insn: self.insn,
+        }
+    }
+
+    #[inline]
+    pub fn fault(&self, fault: kestrel_core::MemFault) -> Exit {
+        Exit::Fault { pc: self.pc, fault }
+    }
+}
+
+/// The interpreter backend. Stateless apart from optional tracing.
+#[derive(Default)]
+pub struct Interpreter {
+    /// Print every executed instruction to stderr.
+    pub trace: bool,
+}
+
+impl Interpreter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl CpuBackend for Interpreter {
+    fn name(&self) -> &'static str {
+        "interp"
+    }
+
+    fn run(&mut self, state: &mut CpuState, mem: &mut Memory, max_steps: u64) -> Exit {
+        for _ in 0..max_steps {
+            let pc = state.pc;
+            let insn = match mem.fetch32(pc) {
+                Ok(i) => i,
+                Err(fault) => return Exit::Fault { pc, fault },
+            };
+            if self.trace {
+                eprintln!("{pc:#014x}: {insn:08x}");
+            }
+            let mut ctx = Ctx {
+                s: state,
+                m: mem,
+                pc,
+                insn,
+            };
+            match execute(&mut ctx) {
+                Ok(Flow::Next) => state.pc = pc.wrapping_add(4),
+                Ok(Flow::Jump(t)) => state.pc = t,
+                Err(exit) => {
+                    if let Exit::Svc(_) = exit {
+                        // SVC retires and returns to the next instruction.
+                        state.pc = pc.wrapping_add(4);
+                        state.retired += 1;
+                    }
+                    return exit;
+                }
+            }
+            state.retired += 1;
+        }
+        Exit::StepLimit
+    }
+}
+
+/// Decode and execute one instruction.
+pub(crate) fn execute(c: &mut Ctx) -> Step {
+    let op0 = (c.insn >> 25) & 0xf;
+    match op0 {
+        0b1000 | 0b1001 => dp_imm::exec(c),
+        0b1010 | 0b1011 => branch::exec(c),
+        0b0100 | 0b0110 | 0b1100 | 0b1110 => ldst::exec(c),
+        0b0101 | 0b1101 => dp_reg::exec(c),
+        0b0111 | 0b1111 => simd::exec(c),
+        _ => Err(c.undef()),
+    }
+}
+
+#[cfg(test)]
+mod tests;

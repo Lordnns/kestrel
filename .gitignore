@@ -1,0 +1,11 @@
+/target
+*.o
+# Never commit console-derived files.
+*.keys
+prod.keys
+title.keys
+*.nca
+*.nsp
+*.xci
+*.nso
+/firmware/

@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kestrel-core",
+    "crates/kestrel-cpu",
+    "crates/kestrel-loader",
+    "crates/kestrel-hle",
+    "crates/kestrel-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Lordnns/kestrel"
+rust-version = "1.80"
+
+[workspace.dependencies]
+kestrel-core = { path = "crates/kestrel-core" }
+kestrel-cpu = { path = "crates/kestrel-cpu" }
+kestrel-loader = { path = "crates/kestrel-loader" }
+kestrel-hle = { path = "crates/kestrel-hle" }
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 1
+
+# The interpreter is unusably slow without optimisation, so tests get it too.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.test]
+opt-level = 2

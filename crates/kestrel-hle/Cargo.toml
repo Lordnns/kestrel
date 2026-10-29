@@ -1,0 +1,12 @@
+[package]
+name = "kestrel-hle"
+description = "High-level emulation of the guest OS: process setup and supervisor calls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kestrel-core.workspace = true
+kestrel-cpu.workspace = true
+kestrel-loader.workspace = true

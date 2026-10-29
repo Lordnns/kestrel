@@ -1,0 +1,10 @@
+[package]
+name = "kestrel-cpu"
+description = "Guest ARM64 CPU: state, backend trait, portable interpreter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kestrel-core.workspace = true

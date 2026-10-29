@@ -1,0 +1,10 @@
+[package]
+name = "kestrel-loader"
+description = "Executable loaders (ELF test programs; homebrew formats next)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kestrel-core.workspace = true
