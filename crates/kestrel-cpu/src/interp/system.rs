@@ -29,27 +29,49 @@ pub fn exec(c: &mut Ctx) -> Step {
     let op0 = field(i, 20, 19);
     let rt = field(i, 4, 0);
 
+    let op1 = field(i, 18, 16);
+    let crn = field(i, 15, 12);
+    let crm = field(i, 11, 8);
+    let op2 = field(i, 7, 5);
+
     if op0 == 0 {
-        // Hints (NOP, YIELD, WFE, BTI, PAC hints...), barriers (DMB/DSB/ISB),
-        // CLREX and MSR (immediate). Single-threaded interpreter: all no-ops,
-        // except CLREX which clears the exclusive monitor.
-        if field(i, 15, 12) == 0b0011 && field(i, 7, 5) == 0b010 {
-            c.s.exclusive_addr = None;
+        if l || op1 != 3 || rt != 31 {
+            return Err(c.undef());
         }
-        return Ok(Flow::Next);
+        return match (crn, op2) {
+            // Hint space (NOP, YIELD, WFE, BTI, PAC hints ...). The Arm ARM
+            // defines unallocated or unimplemented hints to execute as NOP.
+            (0b0010, _) => Ok(Flow::Next),
+            // CLREX clears the exclusive monitor.
+            (0b0011, 0b010) => {
+                c.s.exclusive_addr = None;
+                Ok(Flow::Next)
+            }
+            // DSB, DMB, ISB, SB: one guest thread, nothing to order.
+            (0b0011, 0b100..=0b111) => Ok(Flow::Next),
+            // MSR (immediate) PSTATE fields and anything else.
+            _ => Err(c.undef()),
+        };
     }
     if op0 == 1 {
-        // SYS / SYSL: cache maintenance (DC ZVA, IC IVAU, DC CVAU ...).
-        let op1 = field(i, 18, 16);
-        let crn = field(i, 15, 12);
-        let crm = field(i, 11, 8);
-        let op2 = field(i, 7, 5);
-        if !l && op1 == 3 && crn == 7 && crm == 4 && op2 == 1 {
-            // DC ZVA: zero a 64-byte block (block size advertised in DCZID_EL0).
-            let addr = c.s.xr(rt) & !63;
-            c.m.write_bytes(addr, &[0u8; 64]).map_err(|f| c.fault(f))?;
+        // SYS: only the cache maintenance operations EL0 may execute.
+        if l || op1 != 3 || crn != 7 || op2 != 1 {
+            return Err(c.undef());
         }
-        return Ok(Flow::Next);
+        return match crm {
+            4 => {
+                // DC ZVA: zero a 64-byte block (block size advertised in DCZID_EL0).
+                let addr = c.s.xr(rt) & !63;
+                c.m.write_bytes(addr, &[0u8; 64]).map_err(|f| c.fault(f))?;
+                Ok(Flow::Next)
+            }
+            // IC IVAU: the interpreter caches no translations. Backends that
+            // do must act on it (docs/ROADMAP.md, phase 3).
+            5 => Ok(Flow::Next),
+            // DC CVAC, CVAU, CVAP, CVADP, CIVAC: no data cache to maintain.
+            10..=14 => Ok(Flow::Next),
+            _ => Err(c.undef()),
+        };
     }
 
     let reg = field(i, 19, 5);

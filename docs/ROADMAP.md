@@ -78,9 +78,11 @@ qemu for Linux ARM64.
 - "Every instruction has a unit test": `interp/tests.rs` plus the 91 checks in
   `asm_checks.S` cover most implemented instructions, but not all (for
   example BIT/BIF, REV32, CCMN, SMADDL/UMADDL, LDSMIN/LDUMAX).
-- "Never silently ignore": `system.rs` treats every MSR (immediate) and every
-  SYS/SYSL other than `DC ZVA` as a no-op, and SYSL leaves Rt unwritten.
-  `svcOutputDebugString` silently truncates at 1 MiB.
+- Fixed: `system.rs` treated every MSR (immediate) and every SYS/SYSL other
+  than `DC ZVA` as a no-op, and `svcOutputDebugString` truncated at 1 MiB.
+  Now hints and barriers run as NOP (as the architecture defines), the EL0
+  cache maintenance operations are listed explicitly, everything else stops
+  as undefined, and debug strings are read in full.
 
 ### Owner decisions from the audit
 

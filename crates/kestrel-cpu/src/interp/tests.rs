@@ -216,6 +216,39 @@ fn system_registers() {
 }
 
 #[test]
+fn hints_barriers_and_cache_maintenance() {
+    // paciasp; bti c; isb; dmb ish; dsb sy; clrex; ic ivau,x0; dc civac,x0;
+    // dc cvau,x0; brk
+    let s = run_with(
+        &[
+            0xd503233f, 0xd503245f, 0xd5033fdf, 0xd5033bbf, 0xd5033f9f, 0xd5033f5f, 0xd50b7520,
+            0xd50b7e20, 0xd50b7b20, 0xd4200000,
+        ],
+        |s| {
+            s.x[0] = STACK_BASE;
+            s.exclusive_addr = Some(STACK_BASE);
+        },
+    )
+    .0;
+    assert_eq!(s.exclusive_addr, None, "clrex clears the monitor");
+}
+
+#[test]
+fn unsupported_system_instructions_are_reported() {
+    for insn in [
+        0xd50342df, // msr daifset, #2
+        0xd503413f, // msr ssbs, #1
+        0xd52b7520, // sysl x0, #3, c7, c5, #1
+        0xd508751f, // ic iallu (EL1 only)
+        0xd5380000, // mrs x0, midr_el1
+    ] {
+        let (mut s, mut m) = setup(&[insn]);
+        let exit = Interpreter::new().run(&mut s, &mut m, 10);
+        assert_eq!(exit, Exit::Undefined { pc: CODE, insn }, "{insn:08x}");
+    }
+}
+
+#[test]
 fn unknown_encoding_is_reported() {
     // fadd d0, d1, d2 (FP arithmetic is not implemented yet)
     let (mut s, mut m) = setup(&[0x1e622820]);
