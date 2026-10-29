@@ -1,0 +1,3 @@
+vm sum_squares = 333833500 (both dispatchers agree)
+vm collatz(27) = 111 (both dispatchers agree)
+vm 20!         = 2432902008176640000 (both dispatchers agree)

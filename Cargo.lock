@@ -10,6 +10,7 @@ dependencies = [
  "kestrel-cpu",
  "kestrel-hle",
  "kestrel-loader",
+ "kestrel-testsuite",
 ]
 
 [[package]]
@@ -37,4 +38,14 @@ name = "kestrel-loader"
 version = "0.1.0"
 dependencies = [
  "kestrel-core",
+]
+
+[[package]]
+name = "kestrel-testsuite"
+version = "0.1.0"
+dependencies = [
+ "kestrel-core",
+ "kestrel-cpu",
+ "kestrel-hle",
+ "kestrel-loader",
 ]

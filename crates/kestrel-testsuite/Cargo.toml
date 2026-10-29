@@ -1,0 +1,13 @@
+[package]
+name = "kestrel-testsuite"
+description = "ARM64 test programs embedded in the binary, with expected output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kestrel-core.workspace = true
+kestrel-cpu.workspace = true
+kestrel-loader.workspace = true
+kestrel-hle.workspace = true

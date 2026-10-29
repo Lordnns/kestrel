@@ -34,8 +34,46 @@ signed div/mod = 97 99
 ```
 cargo build --release
 cargo test
-cargo run --release -p kestrel-cli -- info
+cargo run --release -p kestrel-cli -- selftest
 ```
+
+## Self-test and test programs
+
+`kestrel selftest` runs six ARM64 programs compiled into the binary and
+compares their output byte for byte with answers computed independently
+(Python, hashlib, zlib), so testers need nothing but the executable:
+
+| Program      | Exercises                                                        |
+|--------------|------------------------------------------------------------------|
+| `hello`      | loader, entry, debug-print SVC, exit                             |
+| `asm_checks` | 91 hand-written instruction checks: carries, bitfields, atomics, exclusives, jump tables, system registers, SIMD moves |
+| `vm`         | a bytecode VM run with switch dispatch and with function-pointer dispatch |
+| `bigint`     | 128-bit multiply, Miller-Rabin on 64-bit primes, SWAR popcount  |
+| `algos`      | recursion, CRC32, prime sieve, heap allocation, sort            |
+| `sha256`     | SHA-256 of three inputs (about 6.5M guest instructions)         |
+
+`kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
+
+## Packages for testers
+
+Push a version tag and GitHub Actions builds and self-tests these, then
+publishes them as a GitHub Release:
+
+```
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+| Package                    | Built on               | Self-tested in CI         |
+|----------------------------|------------------------|---------------------------|
+| `kestrel-macos-universal`  | macOS 14, Apple Silicon | natively; Intel slice under Rosetta |
+| `kestrel-linux-x86_64`     | Ubuntu                  | natively                  |
+| `kestrel-linux-aarch64`    | Ubuntu (cross)          | under qemu                |
+| `kestrel-windows-x86_64`   | Windows                 | natively                  |
+| `kestrel-windows-arm64`    | Windows (cross)         | by testers                |
+
+Each package has `TESTING.md` with step-by-step instructions. You can also
+run the workflow by hand from the Actions tab to get the packages as
+artifacts without making a release.
 
 Rebuilding the guest test programs needs `clang` and `ld.lld` (they
 cross-compile, so any host works): `./scripts/build-guest.sh`.

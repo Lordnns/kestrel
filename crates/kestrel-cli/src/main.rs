@@ -10,10 +10,12 @@ const USAGE: &str = "\
 kestrel - experimental ARM64 console emulator
 
 USAGE:
+    kestrel selftest [-v]            Run the built-in ARM64 test programs
+    kestrel extract <dir>            Write the built-in test programs to <dir>
     kestrel run <program.elf> [options]
-    kestrel info
+    kestrel info                     Show host and backend information
 
-OPTIONS:
+RUN OPTIONS:
     --backend <auto|interp|native|jit>   CPU backend (default: auto)
     --max-steps <n>                      Instruction budget (default: 1e10)
     --trace                              Print every executed instruction
@@ -72,6 +74,74 @@ fn info() {
     }
 }
 
+fn selftest(args: &[String]) -> Result<ExitCode, String> {
+    let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
+    if let Some(bad) = args.iter().find(|a| *a != "-v" && *a != "--verbose") {
+        return Err(format!("unknown selftest option '{bad}'"));
+    }
+    let cases = kestrel_testsuite::CASES;
+    println!(
+        "kestrel {} self-test on {} / {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        kestrel_core::host_arch()
+    );
+    println!();
+    let mut passed = 0;
+    let mut total_insns = 0u64;
+    let mut total_time = 0f64;
+    let mut backend = "?";
+    for case in cases {
+        let out = kestrel_testsuite::run_case(case, BackendKind::Auto)?;
+        backend = out.backend;
+        total_insns += out.instructions;
+        total_time += out.elapsed.as_secs_f64();
+        let status = if out.passed { "PASS" } else { "FAIL" };
+        println!(
+            "  {status}  {:<11} {:>12} instr  {:>7.3}s  {:>6.1} MIPS   {}",
+            case.name,
+            out.instructions,
+            out.elapsed.as_secs_f64(),
+            out.mips(),
+            case.description
+        );
+        if let Some(why) = out.failure_reason(case) {
+            println!("        -> {why}");
+        }
+        if verbose || !out.passed {
+            for line in out.output.lines() {
+                println!("        | {line}");
+            }
+        }
+        if out.passed {
+            passed += 1;
+        }
+    }
+    let mips = total_insns as f64 / total_time.max(1e-9) / 1e6;
+    println!();
+    println!(
+        "{passed}/{} passed  ({total_insns} guest instructions, {mips:.1} MIPS on the {backend} backend)",
+        cases.len()
+    );
+    Ok(if passed == cases.len() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+fn extract(args: &[String]) -> Result<ExitCode, String> {
+    let dir = args.first().ok_or("extract needs a target directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+    for case in kestrel_testsuite::CASES {
+        let path = std::path::Path::new(dir).join(format!("{}.elf", case.name));
+        std::fs::write(&path, case.elf)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run(o: Opts) -> Result<ExitCode, String> {
     let file = std::fs::read(&o.path).map_err(|e| format!("cannot read {}: {e}", o.path))?;
     let mut mem = Memory::new();
@@ -128,6 +198,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("run") => parse(&args[1..]).and_then(run),
+        Some("selftest" | "self-test" | "test") => selftest(&args[1..]),
+        Some("extract") => extract(&args[1..]),
         Some("info") => {
             info();
             Ok(ExitCode::SUCCESS)

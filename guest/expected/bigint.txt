@@ -1,0 +1,9 @@
+30! = 0x00000d13f6370f96:0x865df5dd54000000
+128-bit product = 0x0121fa00ad77d742:0x2236d88fe5618cf0
+2^61-1       : prime
+2^64-59      : prime
+2^64-1       : composite
+561          : composite
+1e18+9       : prime
+powmod(3, 2^63, 2^64-59) = 18446538182577456908
+popcount(0xdeadbeefcafebabe) = 46

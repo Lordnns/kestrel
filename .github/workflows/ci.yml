@@ -8,36 +8,54 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  native:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "Linux x86_64",   os: ubuntu-24.04 }
-          - { name: "Linux aarch64",  os: ubuntu-24.04-arm }
-          - { name: "macOS aarch64",  os: macos-14 }
-          - { name: "Windows x86_64", os: windows-2022 }
+          - { name: "Linux x86_64",           os: ubuntu-24.04 }
+          - { name: "macOS aarch64 (native)", os: macos-14 }
+          - { name: "Windows x86_64",         os: windows-2022 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Smoke test the CLI
+      - name: Self-test the CLI
         shell: bash
         run: |
           cargo run -q --release -p kestrel-cli -- info
-          cargo run -q --release -p kestrel-cli -- run guest/bin/algos.elf --stats
+          cargo run -q --release -p kestrel-cli -- selftest
 
-  guest-binaries-up-to-date:
-    name: Guest programs rebuild cleanly
+  linux-aarch64:
+    name: Linux aarch64 (cross + qemu)
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+      - run: cargo test --workspace --target aarch64-unknown-linux-gnu
+      - run: cargo run -q --release -p kestrel-cli --target aarch64-unknown-linux-gnu -- selftest
+
+  guest-programs:
+    name: Guest programs rebuild and still pass
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y clang lld
       - run: ./scripts/build-guest.sh
+      - run: cargo run -q --release -p kestrel-cli -- selftest

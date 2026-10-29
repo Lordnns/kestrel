@@ -1,0 +1,6 @@
+# Expected outputs are compared byte for byte; never convert line endings.
+guest/expected/*.txt text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.S text eol=lf
+*.elf binary

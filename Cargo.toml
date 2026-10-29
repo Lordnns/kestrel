@@ -5,6 +5,7 @@ members = [
     "crates/kestrel-cpu",
     "crates/kestrel-loader",
     "crates/kestrel-hle",
+    "crates/kestrel-testsuite",
     "crates/kestrel-cli",
 ]
 
@@ -20,6 +21,7 @@ kestrel-core = { path = "crates/kestrel-core" }
 kestrel-cpu = { path = "crates/kestrel-cpu" }
 kestrel-loader = { path = "crates/kestrel-loader" }
 kestrel-hle = { path = "crates/kestrel-hle" }
+kestrel-testsuite = { path = "crates/kestrel-testsuite" }
 
 [profile.release]
 debug = 1

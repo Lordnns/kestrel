@@ -22,4 +22,11 @@ for f in "$src"/*.c; do
     $LD -static -e _start "$out/start.o" "$out/$name.o" -o "$out/$name.elf"
     echo "built guest/bin/$name.elf"
 done
+# Hand-written assembly programs provide their own _start.
+for f in "$src"/*.S; do
+    name=$(basename "$f" .S)
+    $CC --target=aarch64-none-elf -march=armv8.2-a+lse -c "$f" -o "$out/$name.o"
+    $LD -static -e _start "$out/$name.o" -o "$out/$name.elf"
+    echo "built guest/bin/$name.elf"
+done
 rm -f "$out"/*.o

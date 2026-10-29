@@ -1,0 +1,5 @@
+fib(25) = 75025
+crc32 = 0x00000000414fa339
+primes <= 100000 = 9592
+sort ok
+signed div/mod = 97 99
