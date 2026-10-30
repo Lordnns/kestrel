@@ -1,0 +1,23 @@
+homebrew layout test
+aslr region inside the 39-bit space: yes
+alias, heap and stack regions inside the aslr region: yes
+any two regions overlap: no
+alias region GiB: 64
+heap region GiB: 8
+image inside the aslr region, outside the others: yes
+stack pointer inside the stack region: yes
+heap at the start of the heap region: yes
+heap readable and writable: yes
+used memory grew by the heap size: yes
+used memory within total: yes
+entropy subtype 0: 0x0000000000000000
+entropy subtype 1: 0x0000000000000000
+entropy subtype 2: 0x0000000000000000
+entropy subtype 3: 0x0000000000000000
+entropy subtype 4: 0x000000000000f601
+heap region with handle 0: 0x000000000000e401
+heap region with subtype 1: 0x000000000000f601
+debugger attached with the process handle: 0x000000000000e401
+debugger attached: 0
+is application: 1
+program id nonzero: yes

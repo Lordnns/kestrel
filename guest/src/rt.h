@@ -49,6 +49,18 @@ static inline void *svc_set_heap_size(u64 size) {
     __asm__ volatile("svc #0x01" : "=r"(x0), "+r"(x1) : : "memory");
     return x0 == 0 ? (void *)x1 : (void *)0;
 }
+
+// svcGetInfo: W1 = info type, W2 = handle, X3 = subtype; returns the result
+// code and stores the value.
+static inline u64 svc_get_info(u64 *value, u32 kind, u64 handle, u64 sub) {
+    register u64 x0 __asm__("x0");
+    register u64 x1 __asm__("x1") = kind;
+    register u64 x2 __asm__("x2") = handle;
+    register u64 x3 __asm__("x3") = sub;
+    __asm__ volatile("svc #0x29" : "=r"(x0), "+r"(x1) : "r"(x2), "r"(x3) : "memory");
+    *value = x1;
+    return x0;
+}
 #endif
 
 static inline u64 strlen_(const char *s) {

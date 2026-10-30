@@ -20,7 +20,8 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   executables (segments, BSS, asset section), with the homebrew launch
   environment: loader config entries and the argument string.
 - **HLE kernel stub** answering a first set of supervisor calls
-  (heap, exit, sleep, tick, debug output).
+  (heap, exit, sleep, tick, debug output, and svcGetInfo for the process
+  layout, memory sizes, entropy and program identity).
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -43,7 +44,7 @@ cargo run --release -p kestrel-cli -- selftest
 
 ## Self-test and test programs
 
-`kestrel selftest` runs fourteen ARM64 programs compiled into the binary and
+`kestrel selftest` runs fifteen ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
 by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
 nothing but the executable. Each integer C program is in the suite twice:
@@ -61,6 +62,7 @@ built integer-only, and built with floating point and NEON allowed
 | `fp`         | 127 scalar FP operations printed as bit patterns: NaN rules, flush-to-zero, default NaN, FPCR rounding modes |
 | `intrinsics` | 168 NEON intrinsics across every instruction class, including structure loads and stores |
 | `hbtest`     | a homebrew NRO with its own startup code: loader config entries, arguments, `.bss`, `.data`, self-relocation |
+| `hblayout`   | a homebrew NRO checking the svcGetInfo layout: regions in the 39-bit space without overlap, documented sizes, heap placement, error results |
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 
@@ -134,8 +136,8 @@ reference: faster backends are differentially tested against it. See
 
 ## Roadmap
 
-1. Homebrew (in progress: the NRO loader is done): process layout, memory
-   SVCs, threads, handles and synchronisation SVCs.
+1. Homebrew (in progress: the NRO loader and process layout are done):
+   memory SVCs, threads, handles and synchronisation SVCs.
 2. IPC and the first OS services, from public documentation.
 3. `native` backend on aarch64 hosts; `jit` backend on x86_64.
 4. GPU command processing and shader translation to Vulkan.

@@ -307,6 +307,42 @@ def hbtest():
     return "".join(line + "\n" for line in out)
 
 
+def hblayout():
+    """guest/src/nro/hblayout.c: the properties of the svcGetInfo layout that
+    Switchbrew documents. The regions fit the 39-bit address space ("SVC",
+    AddressSpace64Bit) without overlapping; the alias and heap regions have
+    the 39-bit default sizes ("16.0.0": 64 GiB and 8 GiB); a wrong handle is
+    0xe401 and a wrong subtype 0xf601 ("SVC", svcGetInfo); entropy has
+    subtypes 0 to 3. With AppletType Application the process is an
+    application, and no debugger is attached."""
+    ok, bad_handle, bad_sub = hex64(0), hex64(0xE401), hex64(0xF601)
+    out = [
+        "homebrew layout test",
+        "aslr region inside the 39-bit space: yes",
+        "alias, heap and stack regions inside the aslr region: yes",
+        "any two regions overlap: no",
+        "alias region GiB: 64",
+        "heap region GiB: 8",
+        "image inside the aslr region, outside the others: yes",
+        "stack pointer inside the stack region: yes",
+        "heap at the start of the heap region: yes",
+        "heap readable and writable: yes",
+        "used memory grew by the heap size: yes",
+        "used memory within total: yes",
+    ]
+    out += [f"entropy subtype {i}: {ok}" for i in range(4)]
+    out += [
+        f"entropy subtype 4: {bad_sub}",
+        f"heap region with handle 0: {bad_handle}",
+        f"heap region with subtype 1: {bad_sub}",
+        f"debugger attached with the process handle: {bad_handle}",
+        "debugger attached: 0",
+        "is application: 1",
+        "program id nonzero: yes",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -317,6 +353,7 @@ PROGRAMS = {
     "fp": fp,
     "intrinsics": intrinsics,
     "hbtest": hbtest,
+    "hblayout": hblayout,
 }
 
 

@@ -49,7 +49,7 @@ qemu for Linux ARM64.
 | Task | Status | Evidence |
 |------|--------|----------|
 | Homebrew executable loader | done, with the gaps below | `kestrel-loader/src/nro.rs` (segments, zeroed BSS, ASET icon/NACP/RomFS ranges) and `kestrel-hle/src/homebrew.rs` (loader config entries, argument string, X0/X1); `kestrel run x.nro -- args`; self-test program `hbtest` (own startup code, self-relocation) |
-| Process layout reporting | not started | fixed constants in `hle::layout`; no svcGetInfo |
+| Process layout reporting | done, with the gaps below | `hle::layout` is one documented 39-bit layout; svcGetInfo (`svc.rs`) answers types 2-8, 11-18, 21-23; self-test program `hblayout` checks the layout's documented properties |
 | Memory SVCs | not started | only SetHeapSize |
 | Handle table and kernel objects | not started | none |
 | Threads | not started | one thread; SleepThread returns at once |
@@ -183,8 +183,34 @@ Gaps:
   homebrew built with the public toolchain also needs the process layout,
   memory, thread and service work that follows.
 
+Process layout, from Switchbrew's "SVC" (svcGetInfo, AddressSpace64Bit)
+and "16.0.0" (39-bit region sizes) pages. Placement is kestrel's own and
+fixed; the kernel randomises it.
+
+| Region | Base | Size |
+|--------|------|------|
+| ASLR (the whole 39-bit space; code goes here) | 0x800_0000 | up to 2^39 |
+| Alias | 0x10_0000_0000 | 64 GiB |
+| Heap (svcSetHeapSize maps here) | 0x60_0000_0000 | 8 GiB |
+| Stack (holds the 1 MiB main stack) | 0x7e_8000_0000 | 2 GiB |
+
+svcGetInfo also reports TotalMemorySize 1 GiB (kept small while guest
+memory is ordinary host allocations), UsedMemorySize as image plus main
+stack plus heap, the same for the non-system variants, system resource
+sizes 0, no debugger, IsApplication 1, a fixed RandomEntropy, and the
+program ID "kestrel" in ASCII so it cannot pass for a real title. A wrong
+handle gives 0xe401 and a wrong subtype 0xf601.
+
+Gaps:
+
+- Types 0, 1, 9, 10, 19, 20, 24-26 and unknown types stop with an explicit
+  "unimplemented svcGetInfo type" message.
+- svcSetHeapSize does not yet check the heap region or total memory.
+- The ELF test programs stay at 0x200000, below the address space.
+
 ## Next task
 
-Phase 2, process layout reporting: svcGetInfo for the address space, heap,
-alias and stack regions, the random entropy and the program identity, with
-the fixed regions in `hle::layout` turned into one documented layout.
+Phase 2, memory system calls: svcQueryMemory with memory types and
+attributes for every mapping, svcSetMemoryPermission, svcSetMemoryAttribute,
+svcMapMemory/svcUnmapMemory into the alias region, and svcMapPhysicalMemory,
+with the heap checked against its region and the total memory size.
