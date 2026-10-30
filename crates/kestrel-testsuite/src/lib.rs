@@ -50,6 +50,7 @@ pub const CASES: &[Case] = &[
     case!("bigint", "128-bit math, Miller-Rabin primality"),
     case!("algos", "recursion, CRC32, sieve, heap, sort"),
     case!("sha256", "SHA-256 of three inputs"),
+    case!("fp", "127 scalar FP results: NaNs, FZ, DN, rounding"),
     // The same C programs built with floating point and NEON allowed.
     case!("hello-neon", "hello", "hello, NEON build"),
     case!("vm-neon", "vm", "vm, NEON build"),

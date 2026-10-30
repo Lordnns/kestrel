@@ -40,7 +40,7 @@ qemu for Linux ARM64.
 |------|--------|----------|
 | 1A Scalar floating point | done, with the gaps below | `float.rs` (Arm pseudocode) + `interp/fp.rs`; 13 test groups in `interp/fp_tests.rs`; a compiler-generated FP smoke program matches x86 host results bit for bit |
 | 1B NEON | done, with the gaps below | `interp/neon/` (integer, floating point, permutes, structure loads and stores); 430 generated cases in `neon_vectors.rs`; every C test program built with NEON at `-O2` and `-O3` matches the expected output |
-| 1C Phase 1 tests | in progress | every C program is also built with NEON (`name-neon.elf`, same expected output) and runs in the self-test; FP and NEON intrinsics programs and the assembly edge cases still to do |
+| 1C Phase 1 tests | in progress | every C program is also built with NEON (`name-neon.elf`, same expected output); `fp.c` prints 127 scalar FP results as bit patterns, modelled by `scripts/armfp.py`; NEON intrinsics program and assembly edge cases still to do |
 | 1D Real-hardware oracle | not started | no host build mode for `guest/src` |
 
 ### Phase 2: Homebrew: **not started**
@@ -155,6 +155,5 @@ Remaining gaps:
 
 ## Next task
 
-Phase 1C, Phase 1 tests: a floating-point program that prints exact bit
-patterns, a NEON intrinsics program, and NaN, denormal, flush-to-zero and
-saturation checks in `asm_checks.S`.
+Phase 1C, Phase 1 tests: a NEON intrinsics program, and NaN, denormal,
+flush-to-zero and saturation checks in `asm_checks.S`.

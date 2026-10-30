@@ -4,7 +4,9 @@
 #
 # Every C program is built twice: integer-only (name.elf) and with floating
 # point and NEON allowed (name-neon.elf), so auto-vectorised code runs
-# against the same expected output.
+# against the same expected output. Programs that need floating point or
+# NEON themselves say so with a "// build: simd-only" line and are built
+# once, as name.elf, with floating point allowed.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,8 +32,12 @@ build() { # build <name> <suffix> <flags>
 for f in "$src"/*.c; do
     name=$(basename "$f" .c)
     [ "$name" = start ] && continue
-    build "$name" "" "$INT"
-    build "$name" -neon "$SIMD"
+    if grep -q '^// build: simd-only' "$f"; then
+        build "$name" "" "$SIMD"
+    else
+        build "$name" "" "$INT"
+        build "$name" -neon "$SIMD"
+    fi
 done
 # Hand-written assembly programs provide their own _start.
 for f in "$src"/*.S; do

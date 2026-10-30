@@ -17,6 +17,9 @@ import sys
 import zlib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import armfp  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "guest" / "src"
 OUT = ROOT / "guest" / "expected"
@@ -145,6 +148,81 @@ def asm_checks():
     return f"asm checks: {n} passed, 0 failed\n"
 
 
+def fp():
+    """guest/src/fp.c: read its operand tables and OP lines, model each one."""
+    text = (SRC / "fp.c").read_text()
+
+    def table(name):
+        body = re.search(r"\b" + name + r"\[\] = \{(.*?)\};", text, re.S).group(1)
+        return [int(v, 16) for v in re.findall(r"^\s*(0x[0-9a-f]+|\d+),", body, re.M)]
+
+    dv, sv, iv = table("DV"), table("SV"), table("IV")
+    flags = {"RN": 0, "RP": 1 << 22, "RM": 2 << 22, "RZ": 3 << 22, "FZ": 1 << 24, "DN": 1 << 25}
+    ops = re.findall(r"^\s*OP\((\w+), ([\w |]+), (\d+), (\d+), (\d+)\)", text, re.M)
+    F, D, S = armfp, armfp.FD, armfp.FS
+    lines = []
+    for n, (kind, fpcr, a, b, c) in enumerate(ops):
+        fpcr = sum(flags[f.strip()] for f in fpcr.split("|"))
+        a, b, c = int(a), int(b), int(c)
+        F.FZ, F.DN = bool(fpcr & flags["FZ"]), bool(fpcr & flags["DN"])
+        mode = {0: "ne", 1: "p", 2: "m", 3: "z"}[(fpcr >> 22) & 3]
+        if kind[0] == "S" and kind != "STOD" or kind == "STOI32":
+            x, y, z = sv[a], sv[b], sv[c]
+        elif kind == "STOD":
+            x = sv[a]
+        elif kind[0] in "IU":
+            x = iv[a]
+        else:
+            x, y, z = dv[a], dv[b], dv[c]
+        to_int = lambda f, r, w, u: F.f_to_int(x, f, r, w, u)
+        r = {
+            "DADD": lambda: F.f_add(x, y, D),
+            "DSUB": lambda: F.f_sub(x, y, D),
+            "DMUL": lambda: F.f_mul(x, y, D),
+            "DDIV": lambda: F.f_div(x, y, D),
+            "DSQRT": lambda: F.f_sqrt(x, D),
+            "DFMA": lambda: F.f_fma(z, x, y, D),
+            "DNEG": lambda: F.f_neg(x, D),
+            "DABS": lambda: F.f_abs(x, D),
+            "DMIN": lambda: F.f_maxmin(x, y, D, False, True),
+            "DMAX": lambda: F.f_maxmin(x, y, D, True, True),
+            "DFLOOR": lambda: F.f_rint(x, D, "m"),
+            "DCEIL": lambda: F.f_rint(x, D, "p"),
+            "DTRUNC": lambda: F.f_rint(x, D, "z"),
+            "DROUND": lambda: F.f_rint(x, D, "a"),
+            "DRINT": lambda: F.f_rint(x, D, mode),
+            "DNEARBY": lambda: F.f_rint(x, D, mode),
+            "DTOI32": lambda: to_int(D, "z", 32, False),
+            "DTOU32": lambda: to_int(D, "z", 32, True),
+            "DTOI64": lambda: to_int(D, "z", 64, False),
+            "DTOU64": lambda: to_int(D, "z", 64, True),
+            "DLROUND": lambda: to_int(D, "a", 64, False),
+            "DTOS": lambda: F.f_convert(x, D, S, mode),
+            "DLT": lambda: int(F.f_cmp(y, x, D, "gt")),
+            "DLE": lambda: int(F.f_cmp(y, x, D, "ge")),
+            "DEQ": lambda: int(F.f_cmp(x, y, D, "eq")),
+            "DUNORD": lambda: int(F.cls(x, D)[0] in ("qnan", "snan") or F.cls(y, D)[0] in ("qnan", "snan")),
+            "SADD": lambda: F.f_add(x, y, S),
+            "SSUB": lambda: F.f_sub(x, y, S),
+            "SMUL": lambda: F.f_mul(x, y, S),
+            "SDIV": lambda: F.f_div(x, y, S),
+            "SSQRT": lambda: F.f_sqrt(x, S),
+            "SFMA": lambda: F.f_fma(z, x, y, S),
+            "SMIN": lambda: F.f_maxmin(x, y, S, False, True),
+            "SMAX": lambda: F.f_maxmin(x, y, S, True, True),
+            "SRINT": lambda: F.f_rint(x, S, mode),
+            "STOI32": lambda: to_int(S, "z", 32, False),
+            "STOD": lambda: F.f_convert(x, S, D),
+            "I64TOD": lambda: F.f_from_int(x, 64, False, D, 0, mode),
+            "U64TOD": lambda: F.f_from_int(x, 64, True, D, 0, mode),
+            "I32TOS": lambda: F.f_from_int(x, 32, False, S, 0, mode),
+            "U64TOS": lambda: F.f_from_int(x, 64, True, S, 0, mode),
+        }[kind]()
+        lines.append(f"{n:03} {kind} = {hex64(r)}\n")
+    F.FZ = F.DN = False
+    return "".join(lines)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -152,6 +230,7 @@ PROGRAMS = {
     "bigint": bigint,
     "algos": algos,
     "sha256": sha256,
+    "fp": fp,
 }
 
 
