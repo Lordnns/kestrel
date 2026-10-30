@@ -19,6 +19,7 @@ pub mod am;
 pub mod fatal;
 pub mod fs;
 pub mod hid;
+pub mod nv;
 pub mod psm;
 pub mod set;
 pub mod sm;
@@ -34,6 +35,12 @@ use std::rc::Rc;
 /// Longest port name read, with its NUL: kestrel's choice, as long as the
 /// longest name a service can have (8 bytes) with room to spare.
 const PORT_NAME_MAX: u64 = 12;
+
+/// The pointer buffer size every session reports (QueryPointerBufferSize).
+/// Kestrel's choice: kestrel copies pointer data straight from the
+/// client's memory, so any size works; 0x8000 holds every parcel and ioctl
+/// libnx sends, which then travel as pointers.
+pub const POINTER_BUFFER_SIZE: u16 = 0x8000;
 
 /// An interface kestrel implements: a service's first object, or one a
 /// command hands out.
@@ -76,6 +83,8 @@ pub enum Interface {
     PsmSession,
     /// "fatal:u", fatal errors.
     FatalU,
+    /// "nvdrv", the GPU driver.
+    NvDrv,
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234, command 2 hands out another test object. For unit
     /// tests of the session path.
@@ -93,6 +102,7 @@ const SERVICES: &[(&str, Interface)] = &[
     ("fsp-srv", Interface::FileSystemProxy),
     ("psm", Interface::Psm),
     ("fatal:u", Interface::FatalU),
+    ("nvdrv", Interface::NvDrv),
     #[cfg(test)]
     ("test", Interface::Test),
 ];
@@ -130,6 +140,7 @@ impl Interface {
             Psm => "psm",
             PsmSession => "IPsmSession",
             FatalU => "fatal:u",
+            NvDrv => "nvdrv",
             #[cfg(test)]
             Test => "test",
         }
@@ -332,6 +343,7 @@ pub struct State {
     pub fs: fs::State,
     /// psm: the IPsmSession state-change event.
     pub psm_state_event: Option<ObjectId>,
+    pub nv: nv::State,
 }
 
 impl Process {
@@ -428,12 +440,19 @@ impl Process {
             }
             command_type::CONTROL | command_type::CONTROL_WITH_CONTEXT => {
                 let n = ipc::cmif_request(&req).map_err(stop)?.command;
-                if n == 2 {
-                    // CloneCurrentObject: a new session to the same object,
-                    // moved to the client. libnx's session manager
-                    // (`sf/sessionmgr.c`) clones a domain session and sends
-                    // requests for the domain's objects over the clones, so
-                    // a clone shares the domain.
+                if n == 3 {
+                    // QueryPointerBufferSize: a u16. libnx asks on every new
+                    // session and sends auto-select buffers no larger than
+                    // this as pointers.
+                    let size = POINTER_BUFFER_SIZE.to_le_bytes().to_vec();
+                    ipc::cmif_reply(&Reply::ok(size), None).map_err(stop)?
+                } else if n == 2 || n == 4 {
+                    // CloneCurrentObject, and CloneCurrentObjectEx, which
+                    // also takes a u32 tag that kestrel does not use: a new
+                    // session to the same object, moved to the client.
+                    // libnx's session manager (`sf/sessionmgr.c`) clones a
+                    // domain session and sends requests for the domain's
+                    // objects over the clones, so a clone shares the domain.
                     let clone = Session {
                         object: session.object,
                         domain: session.domain.clone(),
@@ -572,6 +591,7 @@ impl Process {
             FileSystemProxy | SdCard | File(_) | Directory(_) => self.fs(call),
             Psm | PsmSession => self.psm(call),
             FatalU => self.fatal(call),
+            NvDrv => self.nvdrv(call),
             #[cfg(test)]
             Test => match call.n {
                 0 => Ok(Out::ok(call.args.to_vec())),
@@ -629,6 +649,44 @@ impl Process {
         self.mem.read_vec(a.addr, size as usize).map_err(|e| {
             IpcError::Stop(format!("cannot read send buffer {i} at {:#x}: {e}", a.addr))
         })
+    }
+
+    /// The bytes of auto-select input buffer `i`. libnx's
+    /// cmifRequestInAutoBuffer sends it as pointer `i` (X) and send buffer
+    /// `i` (A), with the one not used empty.
+    fn read_auto(&self, req: &Request, i: usize) -> Result<Vec<u8>, IpcError> {
+        let pointer = req.pointers.iter().find(|x| x.index as usize == i);
+        match (pointer, req.sends.get(i)) {
+            (Some(x), _) if x.size > 0 => self.read_pointer(req, i as u8),
+            (_, Some(a)) => self.read_send(req, i, a.size),
+            (Some(_), None) => Ok(Vec::new()),
+            (None, None) => Err(IpcError::Stop(format!(
+                "a request without auto-select input buffer {i}"
+            ))),
+        }
+    }
+
+    /// Room in auto-select output buffer `i`: receive list entry `i` (C)
+    /// or receive buffer `i` (B), the one libnx's cmifRequestOutAutoBuffer
+    /// did not leave empty.
+    fn auto_room(req: &Request, i: usize) -> Result<u64, IpcError> {
+        match (req.receive_list.get(i), req.receives.get(i)) {
+            (Some(c), _) if c.size > 0 => Ok(c.size),
+            (_, Some(b)) => Ok(b.size),
+            (Some(_), None) => Ok(0),
+            (None, None) => Err(IpcError::Stop(format!(
+                "a request without auto-select output buffer {i}"
+            ))),
+        }
+    }
+
+    /// Write `data` into auto-select output buffer `i`, which must hold
+    /// it.
+    fn write_auto(&mut self, req: &Request, i: usize, data: &[u8]) -> Result<(), IpcError> {
+        match req.receive_list.get(i) {
+            Some(c) if c.size > 0 => self.write_receive(req, i, data),
+            _ => self.write_buffer(req, i, data.len() as u64, data),
+        }
     }
 
     /// Write `data` at the start of the client's receive buffer (B) `i`,
@@ -916,8 +974,8 @@ mod tests {
             unimplemented("test command 7")
         );
         assert_eq!(
-            stop_from(&mut p, t, &cmif(5, false, 3, &[])),
-            unimplemented("CMIF control command 3 (QueryPointerBufferSize), sent to test")
+            stop_from(&mut p, t, &cmif(5, false, 1, &[0; 4])),
+            unimplemented("CMIF control command 1 (CopyFromCurrentDomain), sent to test")
         );
         // Inside a domain too.
         assert_eq!(convert(&mut p, t), Ok(1));
@@ -937,9 +995,9 @@ mod tests {
     fn requests_kestrel_cannot_answer_stop_with_a_reason() {
         let mut p = setup();
         let h = sm(&mut p);
-        let e = send(&mut p, h, &cmif(5, false, 3, &[])).unwrap_err();
+        let e = send(&mut p, h, &cmif(5, false, 1, &[0; 4])).unwrap_err();
         assert!(
-            e.contains("control command 3 (QueryPointerBufferSize)"),
+            e.contains("control command 1 (CopyFromCurrentDomain)"),
             "{e}"
         );
         let e = send(&mut p, h, &cmif(1, false, 0, &[])).unwrap_err();
@@ -1171,11 +1229,29 @@ mod tests {
         let u = clone(&mut p, t);
         assert_eq!(send(&mut p, u, &cmif(4, false, 0, &[7; 4])), Ok(0));
         assert_eq!(answer(&p, false, 4).3, vec![7; 4]);
-        let e = send(&mut p, t, &cmif(5, false, 4, &[0; 4])).unwrap_err();
+        // CloneCurrentObjectEx takes a tag and clones the same way, as
+        // libnx's nvInitialize sends it.
+        assert_eq!(send(&mut p, t, &cmif(5, false, 4, &[1, 0, 0, 0])), Ok(0));
+        let (rc, _, moved, data, _) = answer(&p, false, 0);
+        assert_eq!((rc, moved.len(), data), (0, 1, vec![]));
+        let v = moved[0] as u64;
+        assert_eq!(send(&mut p, v, &cmif(4, false, 0, &[8; 4])), Ok(0));
+        assert_eq!(answer(&p, false, 4).3, vec![8; 4]);
+        let e = send(&mut p, t, &cmif(5, false, 1, &[0; 4])).unwrap_err();
         assert!(
-            e.contains("control command 4 (CloneCurrentObjectEx)"),
+            e.contains("control command 1 (CopyFromCurrentDomain)"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn every_session_reports_its_pointer_buffer_size() {
+        // cmifQueryPointerBufferSize: control command 3, a u16 back.
+        let mut p = setup();
+        let h = open(&mut p, b"test");
+        assert_eq!(send(&mut p, h, &cmif(5, false, 3, &[])), Ok(0));
+        let (rc, _, _, data, _) = answer(&p, false, 2);
+        assert_eq!((rc, data), (0, vec![0x00, 0x80]));
     }
 
     #[test]
@@ -1491,6 +1567,230 @@ mod tests {
         m.extend(words(&[CMIF_IN_MAGIC, 0, cmd, 0]));
         m.extend(args);
         m
+    }
+
+    /// A request to a session (not a domain) as libnx's cmifMakeRequest
+    /// lays it out, with a process ID, copied handles, and pointer (X),
+    /// send (A), receive (B) and receive list (C) buffers as (address,
+    /// size). Each C entry is an out pointer with its size in the table
+    /// after the arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn hipc(
+        pid: bool,
+        copy: &[u32],
+        cmd: u32,
+        args: &[u8],
+        x: &[(u64, u64)],
+        a: &[(u64, u64)],
+        b: &[(u64, u64)],
+        c: &[(u64, u64)],
+    ) -> Vec<u8> {
+        let table = (16 + 16 + args.len() + 1) & !1;
+        let size = table + 2 * c.len();
+        let special = pid || !copy.is_empty();
+        let w0 = 4 | (x.len() as u32) << 16 | (a.len() as u32) << 20 | (b.len() as u32) << 24;
+        let statics = if c.is_empty() { 0 } else { 2 + c.len() as u32 };
+        let w1 = size.div_ceil(4) as u32 | statics << 10 | (special as u32) << 31;
+        let mut m = words(&[w0, w1]);
+        if special {
+            m.extend(words(&[pid as u32 | (copy.len() as u32) << 1]));
+            if pid {
+                m.extend(words(&[0, 0]));
+            }
+            m.extend(words(copy));
+        }
+        for (i, &(addr, size)) in x.iter().enumerate() {
+            m.extend(words(&[
+                i as u32
+                    | ((addr >> 36) as u32 & 0x3f) << 6
+                    | ((addr >> 32) as u32 & 0xf) << 12
+                    | (size as u32) << 16,
+                addr as u32,
+            ]));
+        }
+        for &(addr, size) in a.iter().chain(b) {
+            m.extend(words(&[
+                size as u32,
+                addr as u32,
+                ((addr >> 36) as u32 & 0x3f_ffff) << 2
+                    | ((size >> 32) as u32 & 0xf) << 24
+                    | ((addr >> 32) as u32 & 0xf) << 28,
+            ]));
+        }
+        let data = m.len();
+        m.resize(m.len().next_multiple_of(16), 0);
+        m.extend(words(&[CMIF_IN_MAGIC, 0, cmd, 0]));
+        m.extend(args);
+        m.resize(data + table, 0);
+        for &(_, size) in c {
+            m.extend((size as u16).to_le_bytes());
+        }
+        m.resize(data + size.next_multiple_of(4), 0);
+        for &(addr, size) in c {
+            m.extend(words(&[
+                addr as u32,
+                (addr >> 32) as u32 & 0xffff | (size as u32) << 16,
+            ]));
+        }
+        m
+    }
+
+    /// The u32s of a reply's data.
+    fn u32s(data: &[u8]) -> Vec<u32> {
+        data.chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn nvdrv_opens_nvmap_and_registers_memory() {
+        let mut p = setup();
+        let nv = open(&mut p, b"nvdrv");
+        let (input, output) = (STRINGS + 0x200, STRINGS + 0x300);
+        // Open: the path in send buffer 0; then (descriptor, NvError).
+        let open_dev = |p: &mut Process, path: &[u8]| {
+            p.mem.write_bytes(STRINGS, path).unwrap();
+            let msg = hipc(
+                false,
+                &[],
+                0,
+                &[],
+                &[],
+                &[(STRINGS, path.len() as u64)],
+                &[],
+                &[],
+            );
+            send(p, nv, &msg).map(|_| u32s(&answer(p, false, 8).3))
+        };
+        assert_eq!(
+            open_dev(&mut p, b"/dev/nvmap"),
+            Ok(vec![0, 3]),
+            "NotInitialized"
+        );
+        // Initialize, as nvInitialize sends it: the process and transfer
+        // memory handles and the memory's size.
+        let heap = p.set_heap_size(0x20_0000).unwrap();
+        let tmem = p.create_transfer_memory(heap, 0x1000, 0).unwrap();
+        let init =
+            |copy: &[u32]| hipc(false, copy, 3, &0x1000u32.to_le_bytes(), &[], &[], &[], &[]);
+        let process = handle::CURRENT_PROCESS as u32;
+        let e = send(&mut p, nv, &init(&[process])).unwrap_err();
+        assert!(e.contains("Initialize without"), "{e}");
+        assert_eq!(send(&mut p, nv, &init(&[process, tmem])), Ok(0));
+        assert_eq!(u32s(&answer(&p, false, 4).3), vec![0]);
+        // SetAruid: the process ID and the AppletResourceUserId.
+        let aruid = PROCESS_ID.to_le_bytes();
+        assert_eq!(
+            send(&mut p, nv, &hipc(true, &[], 8, &aruid, &[], &[], &[], &[])),
+            Ok(0)
+        );
+        assert_eq!(u32s(&answer(&p, false, 4).3), vec![0]);
+        assert_eq!(open_dev(&mut p, b"/dev/nvmap"), Ok(vec![1, 0]));
+        assert_eq!(open_dev(&mut p, b"/dev/nvhost-ctrl"), Ok(vec![2, 0]));
+        let e = open_dev(&mut p, b"/dev/nvhost-gpu").unwrap_err();
+        assert!(
+            e.contains("unimplemented: nvdrv device \"/dev/nvhost-gpu\""),
+            "{e}"
+        );
+
+        // Ioctl over pointers (X in, C out), as libnx sends small ones.
+        let ioctl = |p: &mut Process, fd: u32, code: u32, arg: &[u8]| {
+            p.mem.write_bytes(input, arg).unwrap();
+            let size = arg.len() as u64;
+            let args = [fd.to_le_bytes(), code.to_le_bytes()].concat();
+            let (x, c) = ([(input, size)], [(output, size)]);
+            let msg = hipc(false, &[], 1, &args, &x, &[(0, 0)], &[(0, 0)], &c);
+            send(p, nv, &msg).map(|_| {
+                let err = u32s(&answer(p, false, 4).3)[0];
+                (err, p.mem.read_vec(output, arg.len()).unwrap())
+            })
+        };
+        // CREATE: size in, handle out.
+        let (err, out) = ioctl(&mut p, 1, 0xc008_0101, &words(&[0x3000, 0])).unwrap();
+        assert_eq!((err, u32s(&out)), (0, vec![0x3000, 1]));
+        assert_eq!(
+            ioctl(&mut p, 1, 0xc008_0101, &[0; 8]).unwrap().0,
+            4,
+            "size 0"
+        );
+        // ALLOC through mapped buffers (A in, B out), as libnx sends ioctls
+        // larger than the pointer buffer.
+        let mut alloc = words(&[1, 0, 1, 0x1000]);
+        alloc.extend([0xfe, 0, 0, 0, 0, 0, 0, 0]);
+        alloc.extend(0x8000_0000u64.to_le_bytes());
+        p.mem.write_bytes(input, &alloc).unwrap();
+        let args = [1u32.to_le_bytes(), 0xc020_0104u32.to_le_bytes()].concat();
+        let msg = hipc(
+            false,
+            &[],
+            1,
+            &args,
+            &[(0, 0)],
+            &[(input, 0x20)],
+            &[(output, 0x20)],
+            &[(0, 0)],
+        );
+        assert_eq!(send(&mut p, nv, &msg), Ok(0));
+        assert_eq!(u32s(&answer(&p, false, 4).3), vec![0]);
+        assert_eq!(p.mem.read_vec(output, 0x20).unwrap(), alloc);
+        let m = p.services.nv.map(1).unwrap();
+        assert_eq!(
+            (m.size, m.addr, m.align, m.kind),
+            (0x3000, Some(0x8000_0000), 0x1000, 0xfe)
+        );
+        // GET_ID: ID out first, handle in second.
+        let (err, out) = ioctl(&mut p, 1, 0xc008_010e, &words(&[0, 1])).unwrap();
+        assert_eq!((err, u32s(&out)), (0, vec![1, 1]));
+        // PARAM: size, alignment, heap, kind; BASE is refused.
+        for (param, value) in [(1, 0x3000), (2, 0x1000), (4, 0x4000_0000), (5, 0xfe)] {
+            let (err, out) = ioctl(&mut p, 1, 0xc00c_0109, &words(&[1, param, 0])).unwrap();
+            assert_eq!((err, u32s(&out)[2]), (0, value), "param {param}");
+        }
+        assert_eq!(
+            ioctl(&mut p, 1, 0xc00c_0109, &words(&[1, 3, 0])).unwrap().0,
+            4
+        );
+        // FROM_ID adds a handle; the first FREE leaves the memory.
+        let (err, out) = ioctl(&mut p, 1, 0xc008_0103, &words(&[1, 0])).unwrap();
+        assert_eq!((err, u32s(&out)), (0, vec![1, 1]));
+        let free = |p: &mut Process| {
+            let (err, out) = ioctl(p, 1, 0xc018_0105, &[0; 24]).unwrap();
+            (
+                err,
+                u64::from_le_bytes(out[8..16].try_into().unwrap()),
+                u32s(&out[16..]),
+            )
+        };
+        let free_one = |p: &mut Process| {
+            let mut arg = [0u8; 24];
+            arg[0] = 1;
+            let (err, out) = ioctl(p, 1, 0xc018_0105, &arg).unwrap();
+            (
+                err,
+                u64::from_le_bytes(out[8..16].try_into().unwrap()),
+                u32s(&out[16..]),
+            )
+        };
+        assert_eq!(free_one(&mut p), (0, 0, vec![0x3000, 0]));
+        assert_eq!(free_one(&mut p), (0, 0x8000_0000, vec![0x3000, 0]));
+        assert_eq!(p.services.nv.map(1), None);
+        assert_eq!(free(&mut p).0, 4, "handle 0");
+        // Listed as NotSupported; an unknown ioctl stops.
+        assert_eq!(ioctl(&mut p, 1, 0xc008_010c, &[0; 8]).unwrap().0, 2);
+        let e = ioctl(&mut p, 1, 0xc008_01ff, &[0; 8]).unwrap_err();
+        assert!(
+            e.contains("unimplemented: nvdrv /dev/nvmap ioctl 0xc00801ff"),
+            "{e}"
+        );
+        let e = ioctl(&mut p, 2, 0xc008_0014, &[0; 8]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl ioctl 0xc0080014"), "{e}");
+        // A closed descriptor takes no ioctls.
+        let close = hipc(false, &[], 2, &1u32.to_le_bytes(), &[], &[], &[], &[]);
+        assert_eq!(send(&mut p, nv, &close), Ok(0));
+        assert_eq!(u32s(&answer(&p, false, 4).3), vec![0]);
+        assert_eq!(ioctl(&mut p, 1, 0xc008_0101, &[0; 8]).unwrap().0, 4);
+        assert_eq!(send(&mut p, nv, &close), Ok(0));
+        assert_eq!(u32s(&answer(&p, false, 4).3), vec![4]);
     }
 
     /// A fresh, empty folder for one test's SD card.
