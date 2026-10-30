@@ -24,15 +24,16 @@ pub mod nr {
     pub const UNMAP_PHYSICAL_MEMORY: u16 = 0x2d;
 }
 
-/// Result codes (module 1 = kernel), from Switchbrew's "Error codes" page.
+/// Result codes (module 1 = kernel), named and numbered as on Switchbrew's
+/// "Error codes" page.
 pub mod result {
     pub const SUCCESS: u64 = 0;
     pub const INVALID_SIZE: u64 = 0xca01;
     pub const INVALID_ADDRESS: u64 = 0xcc01;
     pub const OUT_OF_MEMORY: u64 = 0xd001;
-    pub const INVALID_STATE: u64 = 0xd401;
-    pub const INVALID_NEW_PERMISSION: u64 = 0xd801;
-    pub const INVALID_MEMORY_RANGE: u64 = 0xdc01;
+    pub const INVALID_CURRENT_MEMORY: u64 = 0xd401;
+    pub const INVALID_NEW_MEMORY_PERMISSION: u64 = 0xd801;
+    pub const INVALID_MEMORY_REGION: u64 = 0xdc01;
     pub const LIMIT_REACHED: u64 = 0x10801;
     pub const INVALID_HANDLE: u64 = 0xe401;
     pub const INVALID_COMBINATION: u64 = 0xe801;

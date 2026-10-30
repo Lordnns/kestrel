@@ -142,19 +142,19 @@ impl Process {
     /// not locked) inside the address space, as svcSetMemoryPermission and
     /// svcSetMemoryAttribute require.
     fn check_normal(&self, addr: u64, size: u64) -> Result<(), u64> {
-        let end = checked_range(addr, size)?.ok_or(result::INVALID_STATE)?;
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_CURRENT_MEMORY)?;
         if !within(layout::ASLR_REGION, addr, end) {
-            return Err(result::INVALID_STATE);
+            return Err(result::INVALID_CURRENT_MEMORY);
         }
         let blocks = self
             .mem
             .range_regions(addr, size)
-            .map_err(|_| result::INVALID_STATE)?;
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         if blocks
             .iter()
             .any(|b| b.tag.state != state::NORMAL || b.tag.attr & attr::LOCKED != 0)
         {
-            return Err(result::INVALID_STATE);
+            return Err(result::INVALID_CURRENT_MEMORY);
         }
         Ok(())
     }
@@ -167,12 +167,12 @@ impl Process {
             0 => Perm::NONE,
             1 => Perm::R,
             3 => Perm::RW,
-            _ => return Err(result::INVALID_NEW_PERMISSION),
+            _ => return Err(result::INVALID_NEW_MEMORY_PERMISSION),
         };
         self.check_normal(addr, size)?;
         self.mem
             .update_range(addr, size, |p, _| *p = new)
-            .map_err(|_| result::INVALID_STATE)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)
     }
 
     /// svcSetMemoryAttribute (Switchbrew, "SVC"): only the Uncached bit
@@ -191,7 +191,7 @@ impl Process {
         self.check_normal(addr, size)?;
         self.mem
             .update_range(addr, size, |_, t| t.attr = (t.attr & !mask) | value)
-            .map_err(|_| result::INVALID_STATE)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)
     }
 
     /// svcMapMemory (Switchbrew, "SVC"): make `size` bytes of read-write
@@ -199,28 +199,28 @@ impl Process {
     /// The source becomes inaccessible and Locked until unmapped. Its bytes
     /// move to the destination, which is equivalent while it is locked.
     pub fn map_memory(&mut self, dst: u64, src: u64, size: u64) -> Result<(), u64> {
-        let dst_end = checked_range(dst, size)?.ok_or(result::INVALID_MEMORY_RANGE)?;
-        checked_range(src, size)?.ok_or(result::INVALID_STATE)?;
+        let dst_end = checked_range(dst, size)?.ok_or(result::INVALID_MEMORY_REGION)?;
+        checked_range(src, size)?.ok_or(result::INVALID_CURRENT_MEMORY)?;
         if !within(layout::STACK_REGION, dst, dst_end) {
-            return Err(result::INVALID_MEMORY_RANGE);
+            return Err(result::INVALID_MEMORY_REGION);
         }
         if !self.mem.is_free(dst, size) {
-            return Err(result::INVALID_STATE);
+            return Err(result::INVALID_CURRENT_MEMORY);
         }
         let blocks = self
             .mem
             .range_regions(src, size)
-            .map_err(|_| result::INVALID_STATE)?;
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         if blocks
             .iter()
             .any(|b| b.tag != tag(state::NORMAL) || b.perm != Perm::RW)
         {
-            return Err(result::INVALID_STATE);
+            return Err(result::INVALID_CURRENT_MEMORY);
         }
         let bytes = self
             .mem
             .read_vec(src, size as usize)
-            .map_err(|_| result::INVALID_STATE)?;
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         let stack = tag(state::STACK);
         self.mem
             .map_tagged(dst, size, Perm::RW, stack, "mapped-memory")
@@ -231,7 +231,7 @@ impl Process {
                     t.attr |= attr::LOCKED;
                 })
             })
-            .map_err(|_| result::INVALID_STATE)?;
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         self.mapped_memory.push((dst, src, size));
         Ok(())
     }
@@ -239,20 +239,20 @@ impl Process {
     /// svcUnmapMemory: undo all or part of an svcMapMemory with the same
     /// source and destination, moving the bytes back to the source.
     pub fn unmap_memory(&mut self, dst: u64, src: u64, size: u64) -> Result<(), u64> {
-        let dst_end = checked_range(dst, size)?.ok_or(result::INVALID_MEMORY_RANGE)?;
-        checked_range(src, size)?.ok_or(result::INVALID_STATE)?;
+        let dst_end = checked_range(dst, size)?.ok_or(result::INVALID_MEMORY_REGION)?;
+        checked_range(src, size)?.ok_or(result::INVALID_CURRENT_MEMORY)?;
         if !within(layout::STACK_REGION, dst, dst_end) {
-            return Err(result::INVALID_MEMORY_RANGE);
+            return Err(result::INVALID_MEMORY_REGION);
         }
         let i = self
             .mapped_memory
             .iter()
             .position(|&(d, s, n)| d <= dst && dst_end <= d + n && dst - d == src.wrapping_sub(s))
-            .ok_or(result::INVALID_STATE)?;
+            .ok_or(result::INVALID_CURRENT_MEMORY)?;
         let bytes = self
             .mem
             .read_vec(dst, size as usize)
-            .map_err(|_| result::INVALID_STATE)?;
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         self.mem
             .unmap_range(dst, size)
             .and_then(|_| self.mem.poke_bytes(src, &bytes))
@@ -262,7 +262,7 @@ impl Process {
                     t.attr &= !attr::LOCKED;
                 })
             })
-            .map_err(|_| result::INVALID_STATE)?;
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         // Keep whatever is left of the mapping on either side.
         let (d, s, n) = self.mapped_memory.remove(i);
         if dst > d {
@@ -279,16 +279,16 @@ impl Process {
     /// split it into (mapped, unmapped) parts. Mapped parts must be
     /// unlocked Normal memory.
     fn physical_parts(&self, addr: u64, size: u64) -> Result<(Vec<Part>, Vec<Part>), u64> {
-        let end = checked_range(addr, size)?.ok_or(result::INVALID_MEMORY_RANGE)?;
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_MEMORY_REGION)?;
         if !within(layout::ALIAS_REGION, addr, end) {
-            return Err(result::INVALID_MEMORY_RANGE);
+            return Err(result::INVALID_MEMORY_REGION);
         }
         let (mut mapped, mut free) = (Vec::new(), Vec::new());
         let mut at = addr;
         while at < end {
             if let Some(b) = self.mem.region(at) {
                 if b.tag != tag(state::NORMAL) {
-                    return Err(result::INVALID_STATE);
+                    return Err(result::INVALID_CURRENT_MEMORY);
                 }
                 let stop = (b.base + b.size).min(end);
                 mapped.push((at, stop - at));
@@ -315,7 +315,7 @@ impl Process {
         for (base, n) in free {
             self.mem
                 .map_tagged(base, n, Perm::RW, tag(state::NORMAL), "physical")
-                .map_err(|_| result::INVALID_STATE)?;
+                .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         }
         self.physical_size += new;
         Ok(())
@@ -328,7 +328,7 @@ impl Process {
         for &(base, n) in &mapped {
             self.mem
                 .unmap_range(base, n)
-                .map_err(|_| result::INVALID_STATE)?;
+                .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
             self.physical_size -= n;
         }
         Ok(())
@@ -359,23 +359,23 @@ impl Process {
             }
             self.mem
                 .map_tagged(base + old, size - old, Perm::RW, tag(state::NORMAL), "heap")
-                .map_err(|_| result::INVALID_STATE)?;
+                .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         } else if size < old {
             // Only untouched heap can be released: Normal, read-write, no
             // attribute.
             let tail = self
                 .mem
                 .range_regions(base + size, old - size)
-                .map_err(|_| result::INVALID_STATE)?;
+                .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
             if tail
                 .iter()
                 .any(|b| b.tag != tag(state::NORMAL) || b.perm != Perm::RW)
             {
-                return Err(result::INVALID_STATE);
+                return Err(result::INVALID_CURRENT_MEMORY);
             }
             self.mem
                 .unmap_range(base + size, old - size)
-                .map_err(|_| result::INVALID_STATE)?;
+                .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
         }
         self.heap_size = size;
         Ok(base)
@@ -460,17 +460,21 @@ mod tests {
         );
         for bad in [2, 4, 5, 7] {
             let r = p.set_memory_permission(base, 0x1000, bad);
-            assert_eq!(r, Err(result::INVALID_NEW_PERMISSION), "permission {bad}");
+            assert_eq!(
+                r,
+                Err(result::INVALID_NEW_MEMORY_PERMISSION),
+                "permission {bad}"
+            );
         }
         // Past the end of the heap, and memory that is not heap.
         assert_eq!(
             p.set_memory_permission(base, 2 * MB2, 1),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         let stack = layout::STACK_TOP - layout::STACK_SIZE;
         assert_eq!(
             p.set_memory_permission(stack, 0x1000, 1),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         // Only Uncached (bit 3) can change.
         assert_eq!(p.set_memory_attribute(base, 0x1000, 8, 8), Ok(()));
@@ -509,10 +513,10 @@ mod tests {
         );
         assert!(p.mem.read8(heap).is_err());
         // A locked heap page cannot be released or reprotected.
-        assert_eq!(p.set_heap_size(0), Err(result::INVALID_STATE));
+        assert_eq!(p.set_heap_size(0), Err(result::INVALID_CURRENT_MEMORY));
         assert_eq!(
             p.set_memory_permission(heap, 0x1000, 1),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         // Unmap the middle page, then the rest; writes come back.
         p.mem.write64(dst + 0x1000, 0x5555).unwrap();
@@ -542,30 +546,30 @@ mod tests {
         let alias = layout::ALIAS_REGION.0;
         assert_eq!(
             p.map_memory(alias, heap, 0x1000),
-            Err(result::INVALID_MEMORY_RANGE)
+            Err(result::INVALID_MEMORY_REGION)
         );
         let main_stack = layout::STACK_TOP - layout::STACK_SIZE;
         assert_eq!(
             p.map_memory(main_stack, heap, 0x1000),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         assert_eq!(
             p.map_memory(dst, main_stack, 0x1000),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         assert_eq!(
             p.map_memory(dst, heap + MB2, 0x1000),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         // Unmapping needs the pairing that was mapped.
         assert_eq!(p.map_memory(dst, heap, 0x2000), Ok(()));
         assert_eq!(
             p.unmap_memory(dst, heap + 0x1000, 0x1000),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         assert_eq!(
             p.unmap_memory(dst, heap, 0x3000),
-            Err(result::INVALID_STATE)
+            Err(result::INVALID_CURRENT_MEMORY)
         );
         assert_eq!(p.unmap_memory(dst, heap, 0x2000), Ok(()));
     }
@@ -607,12 +611,12 @@ mod tests {
         let heap = layout::HEAP_REGION.0;
         assert_eq!(
             p.map_physical_memory(heap, 0x1000),
-            Err(result::INVALID_MEMORY_RANGE)
+            Err(result::INVALID_MEMORY_REGION)
         );
         let wrap = 0u64.wrapping_sub(0x1000);
         assert_eq!(
             p.map_physical_memory(wrap, 0x2000),
-            Err(result::INVALID_MEMORY_RANGE)
+            Err(result::INVALID_MEMORY_REGION)
         );
         let too_much = layout::TOTAL_MEMORY;
         assert_eq!(
@@ -636,7 +640,7 @@ mod tests {
         p.mem
             .update_range(base + MB2, 0x1000, |perm, _| *perm = Perm::R)
             .unwrap();
-        assert_eq!(p.set_heap_size(MB2), Err(result::INVALID_STATE));
+        assert_eq!(p.set_heap_size(MB2), Err(result::INVALID_CURRENT_MEMORY));
         assert_eq!(p.heap_size, 2 * MB2);
     }
 
