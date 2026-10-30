@@ -89,6 +89,17 @@ impl HandleTable {
         if self.free() < kinds.len() {
             return Err(result::OUT_OF_HANDLES);
         }
+        let id = self.store(object, kinds.len());
+        Ok(kinds.iter().map(|&kind| self.open(kind, id)).collect())
+    }
+
+    /// Store `object` with no handles and one reference, held by the
+    /// kernel (a service keeping an event it signals later).
+    pub fn insert_unnamed(&mut self, object: Object) -> ObjectId {
+        self.store(object, 1)
+    }
+
+    fn store(&mut self, object: Object, refs: usize) -> ObjectId {
         let id = match self.objects.iter().position(Option::is_none) {
             Some(i) => i,
             None => {
@@ -96,8 +107,17 @@ impl HandleTable {
                 self.objects.len() - 1
             }
         };
-        self.objects[id] = Some((kinds.len(), object));
-        Ok(kinds.iter().map(|&kind| self.open(kind, id)).collect())
+        self.objects[id] = Some((refs, object));
+        id
+    }
+
+    /// Open one more handle of `kind` to object `id`.
+    pub fn add_handle(&mut self, id: ObjectId, kind: Kind) -> Result<u32, u64> {
+        if self.free() == 0 {
+            return Err(result::OUT_OF_HANDLES);
+        }
+        self.retain(id);
+        Ok(self.open(kind, id))
     }
 
     /// Put a handle for `object` in a free slot; the caller has checked

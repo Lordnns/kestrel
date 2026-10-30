@@ -208,25 +208,90 @@ fn cmif_padding(raw_offset: usize) -> usize {
     raw_offset.next_multiple_of(16) - raw_offset
 }
 
-/// Read the "SFCI" header from a request's raw data.
-pub fn cmif_request(req: &Request) -> Result<CmifRequest, String> {
-    let start = cmif_padding(req.raw_offset);
-    if req.raw.len() < start + 16 {
+/// The "SFCI" header at `raw[at..]` and the arguments up to `end`.
+fn sfci(raw: &[u8], at: usize, end: usize) -> Result<CmifRequest, String> {
+    if end > raw.len() || at + 16 > end {
         return Err(format!(
             "a CMIF request with {} bytes of raw data, too few for its header",
-            req.raw.len()
+            raw.len()
         ));
     }
-    let magic = word(&req.raw, start);
+    let magic = word(raw, at);
     if magic != CMIF_IN_MAGIC {
         return Err(format!(
             "a CMIF request whose header magic is {magic:#010x}, not \"SFCI\""
         ));
     }
     Ok(CmifRequest {
-        command: word(&req.raw, start + 8),
-        args: req.raw[start + 16..].to_vec(),
+        command: word(raw, at + 8),
+        args: raw[at + 16..end].to_vec(),
     })
+}
+
+/// Read the "SFCI" header from a request's raw data.
+pub fn cmif_request(req: &Request) -> Result<CmifRequest, String> {
+    sfci(&req.raw, cmif_padding(req.raw_offset), req.raw.len())
+}
+
+/// The kinds of request to an object in a domain ("IPC Marshalling",
+/// CmifDomainRequestKind).
+pub mod domain_kind {
+    pub const SEND_MESSAGE: u8 = 1;
+    pub const CLOSE: u8 = 2;
+}
+
+/// A request to an object in a domain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DomainRequest {
+    pub kind: u8,
+    pub object_id: u32,
+    /// Domain objects passed as arguments.
+    pub in_objects: Vec<u32>,
+    /// The command, for SendMessage.
+    pub cmif: Option<CmifRequest>,
+}
+
+/// Read a domain request: the 16-byte domain header where CMIF data
+/// starts (kind, input object count, payload size, object ID), then for
+/// SendMessage the "SFCI" header and arguments filling the payload, then
+/// the input object IDs.
+pub fn domain_request(req: &Request) -> Result<DomainRequest, String> {
+    let raw = &req.raw;
+    let start = cmif_padding(req.raw_offset);
+    if raw.len() < start + 16 {
+        return Err(format!(
+            "a CMIF domain request with {} bytes of raw data, too few for its header",
+            raw.len()
+        ));
+    }
+    let (kind, n_in) = (raw[start], raw[start + 1] as usize);
+    let size = u16::from_le_bytes([raw[start + 2], raw[start + 3]]) as usize;
+    let object_id = word(raw, start + 4);
+    let payload = start + 16;
+    match kind {
+        domain_kind::CLOSE => Ok(DomainRequest {
+            kind,
+            object_id,
+            in_objects: Vec::new(),
+            cmif: None,
+        }),
+        domain_kind::SEND_MESSAGE => {
+            let cmif = sfci(raw, payload, payload + size)?;
+            let objects_at = payload + size;
+            if objects_at + 4 * n_in > raw.len() {
+                return Err(format!(
+                    "a CMIF domain request whose {n_in} input objects pass its raw data"
+                ));
+            }
+            Ok(DomainRequest {
+                kind,
+                object_id,
+                in_objects: (0..n_in).map(|i| word(raw, objects_at + 4 * i)).collect(),
+                cmif: Some(cmif),
+            })
+        }
+        k => Err(format!("unsupported: CMIF domain request kind {k}")),
+    }
 }
 
 /// A reply from a service.
@@ -286,16 +351,28 @@ fn fits(out: Vec<u8>) -> Result<Vec<u8>, String> {
 }
 
 /// Encode a CMIF reply: the raw data is 16 bytes of padding budget, the
-/// "SFCO" header (version 0, token 0) and the output arguments.
-pub fn cmif_reply(reply: &Reply) -> Result<Vec<u8>, String> {
-    let raw_words = (16 + 16 + reply.data.len()).div_ceil(4);
+/// "SFCO" header (version 0, token 0) and the output arguments. A reply
+/// from a domain object puts the domain header (the output object count)
+/// before "SFCO" and the output object IDs after the arguments, where
+/// libnx's cmifParseResponse reads them.
+pub fn cmif_reply(reply: &Reply, domain: Option<&[u32]>) -> Result<Vec<u8>, String> {
+    let domain_size = domain.map_or(0, |objects| 16 + 4 * objects.len());
+    let raw_words = (16 + 16 + domain_size + reply.data.len()).div_ceil(4);
     let mut out = reply_head(reply, raw_words);
     let raw_start = out.len();
     out.resize(raw_start + cmif_padding(raw_start), 0);
+    if let Some(objects) = domain {
+        for w in [objects.len() as u32, 0, 0, 0] {
+            out.extend(w.to_le_bytes());
+        }
+    }
     for w in [CMIF_OUT_MAGIC, 0, reply.result, 0] {
         out.extend(w.to_le_bytes());
     }
     out.extend(&reply.data);
+    for id in domain.unwrap_or(&[]) {
+        out.extend(id.to_le_bytes());
+    }
     out.resize(raw_start + raw_words * 4, 0);
     fits(out)
 }
@@ -436,7 +513,7 @@ mod tests {
             move_handles: vec![0x1234],
             ..Reply::ok(vec![1, 2, 3])
         };
-        let out = cmif_reply(&r).unwrap();
+        let out = cmif_reply(&r, None).unwrap();
         assert_eq!(word(&out, 0), 0);
         assert_eq!(word(&out, 4), 9 | 1 << 31); // (16 + 16 + 3) / 4 rounded up
         assert_eq!(word(&out, 8), 1 << 5);
@@ -446,9 +523,49 @@ mod tests {
         assert_eq!(&out[32..35], &[1, 2, 3]);
         assert_eq!(out.len(), 16 + 9 * 4);
         // Without handles the raw data starts at 8: 8 bytes of padding.
-        let out = cmif_reply(&Reply::error(0x415)).unwrap();
+        let out = cmif_reply(&Reply::error(0x415), None).unwrap();
         assert_eq!(word(&out, 4), 8);
         assert_eq!((word(&out, 16), word(&out, 24)), (CMIF_OUT_MAGIC, 0x415));
+    }
+
+    #[test]
+    fn a_domain_request_names_its_object() {
+        // As cmifMakeRequest lays out a request to domain object 3 with
+        // 4 bytes of arguments and one input object: the domain header at
+        // 0x10, "SFCI" at 0x20, the arguments, then the object ID.
+        #[rustfmt::skip]
+        let m = msg(&[
+            4, 15,                          // Request, 15 raw words
+            0, 0,                           // padding
+            1 | 1 << 8 | 20 << 16, 3, 0, 0, // SendMessage, 1 object, 20 bytes, object 3
+            CMIF_IN_MAGIC, 0, 9, 0,         // command 9
+            0x1234,                         // argument
+            7,                              // input object 7
+        ]);
+        let d = domain_request(&parse(&m).unwrap()).unwrap();
+        assert_eq!((d.kind, d.object_id, &d.in_objects[..]), (1, 3, &[7][..]));
+        let cmif = d.cmif.unwrap();
+        assert_eq!((cmif.command, &cmif.args[..]), (9, &[0x34, 0x12, 0, 0][..]));
+        // cmifMakeCloseRequest for an object: only the domain header.
+        let close = domain_request(&parse(&msg(&[4, 8, 0, 0, 2, 5])).unwrap()).unwrap();
+        assert_eq!((close.kind, close.object_id, close.cmif), (2, 5, None));
+        let bad = domain_request(&parse(&msg(&[4, 8, 0, 0, 3, 5])).unwrap());
+        assert!(bad.unwrap_err().contains("domain request kind 3"));
+        // A payload size past the raw data is refused.
+        let long = domain_request(&parse(&msg(&[4, 8, 0, 0, 1 | 0x100 << 16, 1])).unwrap());
+        assert!(long.unwrap_err().contains("too few"));
+    }
+
+    #[test]
+    fn a_domain_reply_wraps_sfco_and_lists_its_objects() {
+        let out = cmif_reply(&Reply::ok(vec![0xaa; 4]), Some(&[5, 6])).unwrap();
+        // Raw data from 8: padding to 16, the domain header, "SFCO", the
+        // 4 data bytes, then the two object IDs.
+        assert_eq!(word(&out, 4), (16 + 16 + 16 + 8 + 4) / 4);
+        assert_eq!(word(&out, 16), 2);
+        assert_eq!((word(&out, 32), word(&out, 40)), (CMIF_OUT_MAGIC, 0));
+        assert_eq!(word(&out, 48), 0xaaaa_aaaa);
+        assert_eq!((word(&out, 52), word(&out, 56)), (5, 6));
     }
 
     #[test]
@@ -467,6 +584,6 @@ mod tests {
 
     #[test]
     fn a_reply_that_does_not_fit_is_refused() {
-        assert!(cmif_reply(&Reply::ok(vec![0; MESSAGE_SIZE])).is_err());
+        assert!(cmif_reply(&Reply::ok(vec![0; MESSAGE_SIZE]), None).is_err());
     }
 }

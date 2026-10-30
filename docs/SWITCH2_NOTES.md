@@ -69,6 +69,15 @@ the owner legally has) but never includes its code or data.
 - Used by: `hle/service/set.rs` answers command 4 and stops on command 3
   with the note.
 
+### apm no longer used by official software
+
+- Kind: public source
+- Source: Switchbrew, "Applet Manager services", apm ("[S2] Official sw
+  no longer uses this (stubbed out)").
+- Behaviour: Switch 2 software does not open apm; the service remains.
+- Used by: `hle/service/am.rs` still answers OpenSession and
+  GetPerformanceMode, because libnx opens apm for every application.
+
 ## Observations
 
 None yet.

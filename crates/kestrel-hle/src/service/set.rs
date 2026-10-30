@@ -1,9 +1,8 @@
 //! The settings services (Switchbrew, "Settings services"). Only
 //! set:sys's GetFirmwareVersion2 so far.
 
-use super::{unimplemented, IpcError, Service};
+use super::{Call, IpcError, Out};
 use crate::firmware;
-use crate::ipc::{Reply, Request};
 use crate::Process;
 
 /// The FirmwareVersion structure ("Settings services") for the version
@@ -34,13 +33,13 @@ impl Process {
     /// set:sys. GetFirmwareVersion2 (4) writes the FirmwareVersion through
     /// its fixed-size output pointer (buffer type 0x1A). GetFirmwareVersion
     /// (3) was removed on Switch 2 ("Settings services"), so it stops.
-    pub(super) fn set_sys(&mut self, n: u32, req: &Request) -> Result<Reply, IpcError> {
-        match n {
+    pub(super) fn set_sys(&mut self, call: &Call) -> Result<Out, IpcError> {
+        match call.n {
             4 => {
-                self.write_receive(req, 0, &firmware_version())?;
-                Ok(Reply::ok(Vec::new()))
+                self.write_receive(call.req, 0, &firmware_version())?;
+                Ok(Out::empty())
             }
-            _ => Err(unimplemented(Service::SetSys, n)),
+            _ => Err(call.unimplemented()),
         }
     }
 }

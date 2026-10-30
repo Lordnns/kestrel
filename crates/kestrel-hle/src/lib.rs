@@ -101,6 +101,8 @@ pub struct Process {
     pub cpu: CpuState,
     pub handles: kernel::HandleTable,
     pub sched: thread::Scheduler,
+    /// Kernel objects the services keep.
+    pub services: service::State,
     /// The main thread's handle, passed to homebrew as MainThreadHandle.
     pub main_thread: u32,
     pub heap_size: u64,
@@ -146,6 +148,7 @@ impl Process {
             cpu: CpuState::default(),
             handles: kernel::HandleTable::default(),
             sched: thread::Scheduler::default(),
+            services: service::State::default(),
             main_thread: 0,
             heap_size: 0,
             image_size: image.image_end - image.image_start,
