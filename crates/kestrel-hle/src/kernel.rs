@@ -12,6 +12,7 @@
 
 use crate::svc::{handle, result};
 use crate::Process;
+use kestrel_core::Perm;
 
 /// Handle slots per process, kestrel's choice; a full table gives
 /// OutOfHandles.
@@ -32,6 +33,7 @@ pub enum Kind {
     Thread,
     ReadableEvent,
     WritableEvent,
+    TransferMemory,
 }
 
 /// A kernel object.
@@ -43,6 +45,11 @@ pub enum Object {
     /// One event, named by a readable and a writable handle.
     Event {
         signaled: bool,
+    },
+    /// Memory lent by svcCreateTransferMemory, with each block's
+    /// permission before it was lent as (base, size, permission).
+    TransferMemory {
+        restore: Vec<(u64, u64, Perm)>,
     },
 }
 
@@ -151,7 +158,9 @@ impl Process {
     /// svcCloseHandle (Switchbrew, "SVC"). Closing a pseudo-handle is
     /// refused with InvalidHandle (kestrel's choice; it names no slot).
     pub fn close_handle(&mut self, h: u64) -> Result<(), u64> {
-        self.handles.close(handle_arg(h))?;
+        if let Some(Object::TransferMemory { restore }) = self.handles.close(handle_arg(h))? {
+            self.release_transfer_memory(&restore);
+        }
         Ok(())
     }
 

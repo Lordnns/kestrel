@@ -2,6 +2,7 @@
 //! mapping (Switchbrew, "SVC": MemoryType, MemoryAttribute) and the block
 //! svcQueryMemory reports for any address.
 
+use crate::kernel::{Kind, Object};
 use crate::svc::result;
 use crate::{layout, Process};
 use kestrel_core::{Memory, Perm, Tag, PAGE_SIZE};
@@ -16,6 +17,9 @@ pub mod state {
     pub const STACK: u32 = 0x005c_3c0b;
     pub const THREAD_LOCAL: u32 = 0x0040_200c;
     pub const INACCESSIBLE: u32 = 0x0000_0010;
+    /// MemoryState bit 17, FlagCanTransfer: svcCreateTransferMemory may
+    /// lend the memory.
+    pub const CAN_TRANSFER: u32 = 1 << 17;
 }
 
 /// MemoryAttribute bits.
@@ -380,6 +384,62 @@ impl Process {
         self.heap_size = size;
         Ok(base)
     }
+
+    /// svcCreateTransferMemory (Switchbrew, "SVC"): lend `size` bytes at
+    /// `addr` through a TransferMemory handle. The range takes permission
+    /// `perm` and the Locked attribute until the last handle closes.
+    ///
+    /// Switchbrew documents only that the execute bit is refused and that
+    /// the memory needs FlagCanTransfer. Kestrel also refuses write-only
+    /// (as svcSetMemoryPermission does) and memory with any attribute set,
+    /// with the svcSetMemoryPermission result codes.
+    pub fn create_transfer_memory(&mut self, addr: u64, size: u64, perm: u32) -> Result<u32, u64> {
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_CURRENT_MEMORY)?;
+        let new = match perm {
+            0 => Perm::NONE,
+            1 => Perm::R,
+            3 => Perm::RW,
+            _ => return Err(result::INVALID_NEW_MEMORY_PERMISSION),
+        };
+        if !within(layout::ASLR_REGION, addr, end) {
+            return Err(result::INVALID_CURRENT_MEMORY);
+        }
+        let blocks = self
+            .mem
+            .range_regions(addr, size)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+        if blocks
+            .iter()
+            .any(|b| b.tag.state & state::CAN_TRANSFER == 0 || b.tag.attr != 0)
+        {
+            return Err(result::INVALID_CURRENT_MEMORY);
+        }
+        let restore = blocks.iter().map(|b| (b.base, b.size, b.perm)).collect();
+        let h = self
+            .handles
+            .insert(Object::TransferMemory { restore }, &[Kind::TransferMemory])?[0];
+        self.mem
+            .update_range(addr, size, |p, t| {
+                *p = new;
+                t.attr |= attr::LOCKED;
+            })
+            .expect("range checked above");
+        Ok(h)
+    }
+
+    /// Give back memory lent by svcCreateTransferMemory once its last
+    /// handle is closed: the old permissions return and Locked clears.
+    pub(crate) fn release_transfer_memory(&mut self, restore: &[(u64, u64, Perm)]) {
+        for &(base, size, perm) in restore {
+            // Locked memory cannot be unmapped, so the range is still there.
+            self.mem
+                .update_range(base, size, |p, t| {
+                    *p = perm;
+                    t.attr &= !attr::LOCKED;
+                })
+                .expect("lent memory stays mapped");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +457,75 @@ mod tests {
             image_end: 0,
         };
         Process::new(Memory::new(), &image).unwrap()
+    }
+
+    #[test]
+    fn transfer_memory_locks_the_range_until_its_handle_closes() {
+        let mut p = process();
+        let heap = p.set_heap_size(MB2).unwrap();
+        p.mem.write64(heap + 0x1000, 0xabcd).unwrap();
+        let h = p.create_transfer_memory(heap, 0x2000, 1).unwrap();
+        let lent = query(&p.mem, heap);
+        assert_eq!((lent.size, lent.attr, lent.perm), (0x2000, attr::LOCKED, 1));
+        assert_eq!(lent.state, state::NORMAL);
+        assert_eq!(p.mem.read64(heap + 0x1000).unwrap(), 0xabcd);
+        assert!(
+            p.mem.write64(heap + 0x1000, 0).is_err(),
+            "read-only while lent"
+        );
+        // Locked memory cannot be lent again, reprotected or freed.
+        let busy = Some(result::INVALID_CURRENT_MEMORY);
+        assert_eq!(p.create_transfer_memory(heap, 0x1000, 0).err(), busy);
+        assert_eq!(p.set_memory_permission(heap, 0x1000, 3).err(), busy);
+        assert_eq!(p.set_heap_size(0).err(), busy);
+        p.close_handle(h as u64).unwrap();
+        let back = query(&p.mem, heap);
+        assert_eq!((back.size, back.attr, back.perm), (MB2, 0, 3));
+        p.mem.write64(heap + 0x1000, 1).unwrap();
+        assert_eq!(p.set_heap_size(0), Ok(heap));
+    }
+
+    #[test]
+    fn transfer_memory_restores_each_blocks_own_permission() {
+        let mut p = process();
+        let heap = p.set_heap_size(MB2).unwrap();
+        p.set_memory_permission(heap, 0x1000, 1).unwrap();
+        let h = p.create_transfer_memory(heap, 0x2000, 0).unwrap();
+        assert_eq!(query(&p.mem, heap).size, 0x2000, "one block while lent");
+        p.close_handle(h as u64).unwrap();
+        assert_eq!(
+            (query(&p.mem, heap).size, query(&p.mem, heap).perm),
+            (0x1000, 1)
+        );
+        assert_eq!(query(&p.mem, heap + 0x1000).perm, 3);
+    }
+
+    #[test]
+    fn transfer_memory_checks_its_arguments() {
+        let mut p = process();
+        let heap = p.set_heap_size(MB2).unwrap();
+        let tm = |p: &mut Process, addr, size, perm| p.create_transfer_memory(addr, size, perm);
+        assert_eq!(
+            tm(&mut p, heap + 1, 0x1000, 0),
+            Err(result::INVALID_ADDRESS)
+        );
+        assert_eq!(tm(&mut p, heap, 0x800, 0), Err(result::INVALID_SIZE));
+        assert_eq!(tm(&mut p, heap, 0, 0), Err(result::INVALID_SIZE));
+        for perm in [2, 4, 5, 7] {
+            let r = tm(&mut p, heap, 0x1000, perm);
+            assert_eq!(r, Err(result::INVALID_NEW_MEMORY_PERMISSION), "perm {perm}");
+        }
+        // The stack lacks FlagCanTransfer; free memory and memory past the
+        // heap are not lendable.
+        let busy = Err(result::INVALID_CURRENT_MEMORY);
+        let stack = layout::STACK_TOP - layout::STACK_SIZE;
+        assert_eq!(tm(&mut p, stack, 0x1000, 0), busy);
+        assert_eq!(tm(&mut p, heap + MB2 - 0x1000, 0x2000, 0), busy);
+        assert_eq!(tm(&mut p, HI - 0x1000, 0x2000, 0), busy);
+        // Uncached memory has an attribute set.
+        p.set_memory_attribute(heap, 0x1000, 8, 8).unwrap();
+        assert_eq!(tm(&mut p, heap, 0x1000, 0), busy);
+        assert_eq!(p.handles.free(), crate::kernel::MAX_HANDLES - 1);
     }
 
     #[test]

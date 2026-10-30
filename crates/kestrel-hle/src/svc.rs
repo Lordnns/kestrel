@@ -18,6 +18,7 @@ pub mod nr {
     pub const SLEEP_THREAD: u16 = 0x0b;
     pub const SIGNAL_EVENT: u16 = 0x11;
     pub const CLEAR_EVENT: u16 = 0x12;
+    pub const CREATE_TRANSFER_MEMORY: u16 = 0x15;
     pub const CLOSE_HANDLE: u16 = 0x16;
     pub const RESET_SIGNAL: u16 = 0x17;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
@@ -181,6 +182,18 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
         nr::SLEEP_THREAD => {
             // Single thread: yielding or sleeping just returns.
             p.cpu.x[0] = result::SUCCESS;
+            None
+        }
+        nr::CREATE_TRANSFER_MEMORY => {
+            // X1 = address, X2 = size, W3 = permission; W1 = the handle.
+            let (addr, size, perm) = (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3] as u32);
+            match p.create_transfer_memory(addr, size, perm) {
+                Ok(h) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = h as u64;
+                }
+                Err(code) => p.cpu.x[0] = code,
+            }
             None
         }
         nr::CREATE_EVENT => {
