@@ -138,6 +138,12 @@ method; the methods live next to the state they change:
   console's "2345-0033" form with its module's name. A program that aborts
   (svcBreak) or throws a fatal error with an error screen stops with
   `Stop::Abort` or `Stop::Fatal`.
+- Whatever kestrel does not implement (an SVC, a named port, a service,
+  a command or a CMIF control command) stops the program with
+  `Stop::Unimplemented`, which names it with its identifiers; services
+  return `IpcError::Unimplemented` for it. `kestrel run` appends each one
+  to `user/logs/unimplemented.log`. SVC names come from
+  `kestrel_hle::svc_names`, generated from Switchbrew's SVC table.
 
 ### Scheduling
 

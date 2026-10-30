@@ -56,7 +56,7 @@ qemu for Linux ARM64.
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
 | First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; psm; fatal:u, svcBreak and result names; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`, `hbpower`. Not yet: host input |
-| SD folder option, unimplemented-call log | SD folder done; log not started | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, ports, services and commands stop with their name and number |
+| SD folder option, unimplemented-call log | done | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, svcGetInfo types, named ports, services, commands and CMIF control commands stop as `Stop::Unimplemented` with their identifiers, and `kestrel run` appends each to `user/logs/unimplemented.log` |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
 ### Phase 3: Native execution on ARM hosts: **not started**
@@ -693,6 +693,31 @@ Gaps:
   sends ThrowFatalWithPolicy.
 - No lm: official software's log service is for later phases.
 
+The unimplemented-call log. The owner chose to keep stopping at the
+first unimplemented call and to record it. Every such stop is
+`Stop::Unimplemented`, apart from other errors, and names the call:
+
+| Kind | Example |
+|------|---------|
+| SVC, with its name from Switchbrew's SVC table (`svc_names.rs`, generated) | `SVC 0x7f (CallSecureMonitor)` |
+| svcGetInfo type | `svcGetInfo type 9 (ResourceLimit), subtype 0x0` |
+| named port | `named port "nope" (kestrel has only "sm:")` |
+| service | `service "nosuch"` |
+| command, with its name where kestrel knows it | `psm command 2`, `set:sys command 3 (GetFirmwareVersion, removed on Switch 2)` |
+| CMIF control command | `CMIF control command 3 (QueryPointerBufferSize), sent to fsp-srv` |
+
+`kestrel run` prints it with the program counter, appends a line to
+`user/logs/unimplemented.log` next to the executable (the UTC time,
+kestrel's version, the program's file name and the call), and exits with
+code 5. The self-test does not write the log.
+
+Gaps:
+
+- Unimplemented instructions and IPC message features kestrel cannot
+  read (receive list modes, domain objects as arguments) still stop as
+  errors, not in the log: they are CPU or format gaps, not calls.
+- The log grows without limit; it is a plain text file to read or delete.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
@@ -701,14 +726,15 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. The unimplemented-call log (`PLAN.md` phase 2): a record of every
-   service, command and SVC kestrel does not implement, with its
-   identifiers, through `Process::note`. Today each one stops the
-   program; ask the owner whether the log should let a program go on
-   past an unimplemented command (answering an error) or keep stopping
-   and only record it.
-2. Host input into hid's shared memory, with the frontend (window and
-   keyboard or gamepad), once there is one.
+1. Host input into hid's shared memory, with the frontend (a window and
+   keyboard or gamepad). There is no window yet: ask the owner which way
+   the frontend should go (a windowing library, or a console-only input
+   path first) before starting.
+2. Phase 2 acceptance (`PLAN.md`): the standard homebrew examples (hello
+   world, input, file I/O, threads) built from source with the public
+   libnx toolchain in CI, run on all five platforms. Building them shows
+   what real libnx startup still needs; the unimplemented-call log names
+   it.
 
 Each service so far followed the same steps; keep them:
 
@@ -745,8 +771,7 @@ native backend, and the differential tester.
 
 ### Order after that
 
-1. Phase 2 acceptance (homebrew console examples on all five platforms),
-   then phase 3 on Linux KVM and Windows.
+1. Phase 3 on Linux KVM and Windows, once phase 2 is accepted.
 
 Owner decisions pending in `PLAN.md` section 7 (strategy, API-level
 graphics, code reuse) do not block any of the above; ask before phase 5.

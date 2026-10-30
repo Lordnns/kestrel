@@ -82,6 +82,21 @@ files. `--sd <folder>` uses another folder instead. A program can never
 reach outside the folder: `..`, host links and names some systems read
 differently are refused. Games can be run from any folder.
 
+### What kestrel does not do yet
+
+When a program uses a system call, service or command kestrel does not
+implement, kestrel stops it and names what was missing:
+
+```
+unimplemented: SVC 0x7f (CallSecureMonitor), at pc 0x21024c
+recorded in .../user/logs/unimplemented.log
+```
+
+Each such stop adds a line to `user/logs/unimplemented.log` next to the
+executable (the time, kestrel's version, the program and the call), so
+after running a few programs the file lists what they need next.
+`kestrel run` then exits with code 5.
+
 ## Building
 
 ```
