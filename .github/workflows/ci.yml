@@ -21,7 +21,7 @@ jobs:
           - { name: "Linux aarch64",  os: ubuntu-24.04-arm }
           - { name: "Windows x86_64", os: windows-2022 }
           - { name: "Windows arm64",  os: windows-11-arm }
-          - { name: "macOS aarch64",  os: macos-14 }
+          - { name: "macOS aarch64",  os: macos-15 }
           - { name: "macOS x86_64",   os: macos-15-intel }
     steps:
       - uses: actions/checkout@v5
@@ -87,7 +87,7 @@ jobs:
       matrix:
         include:
           - { name: "Linux aarch64", os: ubuntu-24.04-arm }
-          - { name: "macOS aarch64", os: macos-14 }
+          - { name: "macOS aarch64", os: macos-15 }
     steps:
       - uses: actions/checkout@v5
       - if: runner.os == 'Linux'

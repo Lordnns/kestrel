@@ -186,7 +186,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 | Package                    | Built on                | Self-tested natively on     |
 |----------------------------|-------------------------|-----------------------------|
-| `kestrel-macos-universal`  | macOS 14, Apple Silicon | Apple Silicon and Intel Macs |
+| `kestrel-macos-universal`  | macOS 15, Apple Silicon | Apple Silicon and Intel Macs |
 | `kestrel-linux-x86_64`     | Ubuntu x86_64           | Ubuntu x86_64               |
 | `kestrel-linux-aarch64`    | Ubuntu ARM64            | Ubuntu ARM64                |
 | `kestrel-windows-x86_64`   | Windows x86_64          | Windows x86_64              |

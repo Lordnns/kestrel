@@ -31,7 +31,7 @@ jobs:
   macos:
     name: macOS universal (Apple Silicon + Intel)
     needs: ci
-    runs-on: macos-14 # Apple Silicon
+    runs-on: macos-15 # Apple Silicon
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
