@@ -793,352 +793,611 @@ def m_ldr(asm):
     post_index(asm, 1, addr - ST.x[1])
 
 
+# FP two-register misc and compare-with-zero lane models.
+_rint = lambda mode: (lambda a, f: f_rint(a, f, mode))  # noqa: E731
+_cvt = lambda mode, u: (lambda a, f: f_to_int(a, f, mode, f.w, u))  # noqa: E731
+FMISC = {
+    "fabs": lambda a, f: f_abs(a, f), "fneg": lambda a, f: f_neg(a, f),
+    "fsqrt": f_sqrt, "frecpe": f_recpe, "frsqrte": f_rsqrte, "frecpx": f_recpx,
+    "frintn": _rint("ne"), "frintp": _rint("p"), "frintm": _rint("m"), "frintz": _rint("z"),
+    "frinta": _rint("a"), "frintx": lambda a, f: f_rint(a, f, fpcr_mode()),
+    "frinti": lambda a, f: f_rint(a, f, fpcr_mode()),
+    "fcvtns": _cvt("ne", False), "fcvtps": _cvt("p", False), "fcvtms": _cvt("m", False),
+    "fcvtzs": _cvt("z", False), "fcvtas": _cvt("a", False), "fcvtnu": _cvt("ne", True),
+    "fcvtpu": _cvt("p", True), "fcvtmu": _cvt("m", True), "fcvtzu": _cvt("z", True),
+    "fcvtau": _cvt("a", True),
+    "scvtf": lambda a, f: f_from_int(a, f.w, False, f, 0, fpcr_mode()),
+    "ucvtf": lambda a, f: f_from_int(a, f.w, True, f, 0, fpcr_mode()),
+    "urecpe": lambda a, f: urecpe(a), "ursqrte": lambda a, f: ursqrte(a),
+}
+FCMP0 = {
+    "fcmgt": lambda a, f: f_cmp(a, 0, f, "gt"), "fcmge": lambda a, f: f_cmp(a, 0, f, "ge"),
+    "fcmeq": lambda a, f: f_cmp(a, 0, f, "eq"), "fcmle": lambda a, f: f_cmp(0, a, f, "ge"),
+    "fcmlt": lambda a, f: f_cmp(0, a, f, "gt"),
+}
+
+
+# ---- dispatch: the model for any assembly line --------------------------------
+
+# Mnemonics whose trailing 2 is part of the name, not the "upper half" form.
+OWN_2 = {"uzp2", "trn2", "zip2", "ld2", "st2", "rev32"}
+LONG = {"addl", "addw", "subl", "subw", "abal", "abdl", "mlal", "mlsl", "mull"}
+NARROW_HIGH = {"addhn", "raddhn", "subhn", "rsubhn"}
+RIGHT = {"sshr", "ushr", "ssra", "usra", "srshr", "urshr", "srsra", "ursra"}
+NARROW_SHIFT = {"shrn": "shrn", "rshrn": "shrn", "sqshrn": "sqshrn", "sqrshrn": "sqshrn",
+                "uqshrn": "uqshrn", "uqrshrn": "uqshrn", "sqshrun": "sqshrun",
+                "sqrshrun": "sqshrun"}
+
+
+def model(asm):
+    """Apply the model of one instruction, given as assembly, to ST."""
+    mn, rest = asm.split(" ", 1)
+    base = mn[:-1] if mn.endswith("2") and mn not in OWN_2 else mn
+    index = re.search(r"\.[bhsd]\[\d+\]", rest) is not None
+    imm = "#" in rest
+    first = rest.split(",")[0].strip()
+    # Loads and stores.
+    if base[:2] in ("ld", "st") and base[2:3] in ("1", "2", "3", "4"):
+        if base.endswith("r"):
+            return m_ldr(asm)
+        if "}[" in rest:
+            return m_ldst_lane(asm, base.startswith("ld"))
+        return m_ldst_multi(asm, base.startswith("ld"), int(base[2]))
+    # Floating point.
+    if base in ("fcvtn", "fcvtxn"):
+        return m_fcvt_narrow(asm, "odd" if base == "fcvtxn" else fpcr_mode())
+    if base == "fcvtl":
+        return m_fcvtl(asm)
+    if base in ("fmaxv", "fminv", "fmaxnmv", "fminnmv"):
+        return m_facross(asm, FPAIR[base[:-1] + "p"])
+    if base in FCMP0 and "#0.0" in rest:
+        fn = FCMP0[base]
+        return m_fmisc(asm, lambda a, f: M(f.w) if fn(a, f) else 0)
+    if base in ("scvtf", "ucvtf", "fcvtzs", "fcvtzu") and imm:
+        return m_fixed(asm, base.startswith("fcvt"), base in ("ucvtf", "fcvtzu"))
+    if base in FSAME and index:
+        return m_felem(asm, FSAME[base])
+    if base in FPAIR:
+        return m_fpair(asm, FPAIR[base])
+    if base in FSAME:
+        return m_fsame(asm, FSAME[base])
+    if base in FMISC:
+        return m_fmisc(asm, FMISC[base])
+    # Immediates, copies, permutes.
+    if base in ("movi", "mvni") or (base in ("orr", "bic") and imm):
+        return m_movi(asm)
+    if base == "fmov":
+        return m_fmov_imm(asm)
+    if base in ("umov", "smov") or (base == "mov" and first[0] in "wx"):
+        return m_mov_to_gen(asm, base == "smov")
+    if base == "dup":
+        return m_dup_elem(asm) if index else m_dup_gen(asm)
+    if base == "mov":
+        if first[0] in "bhsd":
+            return m_dup_elem(asm)
+        return m_ins_elem(asm) if rest.count("[") == 2 else m_ins_gen(asm)
+    if base[:3] in ("uzp", "trn", "zip"):
+        return m_permute(asm, base[:3], int(mn[3]) - 1)
+    if base == "ext":
+        return m_ext(asm)
+    if base in ("tbl", "tbx"):
+        return m_tbl(asm, base == "tbx")
+    # Integer.
+    if index:
+        if base[0] in "su" and base[1:] in ("mull", "mlal", "mlsl"):
+            return m_elem_long(asm, base[1:], base[0] == "s")
+        if base in ("sqdmull", "sqdmlal", "sqdmlsl"):
+            return m_elem_long(asm, base, True)
+        return m_elem(asm, SAME[base])
+    if base in CMP0 and rest.endswith("#0"):
+        return m_cmp0(asm, base)
+    if base in NARROW_SHIFT:
+        return m_shift(asm, NARROW_SHIFT[base])
+    if base in ("sshll", "ushll", "sxtl", "uxtl"):
+        return m_shift(asm if imm else asm + ", #0", "shll", base[0] == "s")
+    if base == "shll":
+        return m_shll(asm)
+    if imm and base in ("sri", "sli", "shl"):
+        return m_shift(asm, base, False)
+    if imm and base in ("sqshlu", "sqshl", "uqshl"):
+        return m_shift(asm, base, base[0] == "s")
+    if imm and base in RIGHT:
+        return m_shift(asm, base[1:], base[0] == "s")
+    if base in ("rev64", "rev32", "rev16"):
+        return m_rev(asm, int(base[3:]))
+    if base in ("saddlp", "uaddlp", "sadalp", "uadalp"):
+        return m_addlp(asm, base[0] == "s", "adal" in base)
+    if base in ("xtn", "sqxtn", "uqxtn", "sqxtun"):
+        return m_xtn(asm, base)
+    if base in NARROW_HIGH or base in ("pmull", "sqdmull", "sqdmlal", "sqdmlsl"):
+        return m_long(asm, base, base[0] == "s" and base != "subhn")
+    if base[0] in "su" and base[1:] in LONG:
+        return m_long(asm, base[1:], base[0] == "s")
+    if base == "addv":
+        return m_across(asm, "addv", False)
+    if base in ("saddlv", "uaddlv", "smaxv", "umaxv", "sminv", "uminv"):
+        return m_across(asm, base[1:], base[0] == "s")
+    if base == "addp" and first[0] == "d":
+        n = int(re.search(r"v(\d+)", rest).group(1))
+        return wr(int(first[1:]), sum(lanes(ST.v[n], 64)), 64)
+    if base in PAIR:
+        return m_pair(asm, PAIR[base])
+    if base in MISC:
+        return m_misc(asm, MISC[base])
+    if base in SAME:
+        return m_same(asm, SAME[base])
+    raise ValueError(f"no model for {asm!r}")
+
+
 # ---- the cases ----------------------------------------------------------------
 
-CASES = []  # (group, asm, fpcr, model)
-
-
-def case(group, asm, model, fpcr=0):
-    CASES.append((group, asm, fpcr, model))
-
-
-def same_cases():
-    g = "int_same"
-    for asm in [
-        "shadd v0.16b, v1.16b, v2.16b", "uhadd v0.8h, v1.8h, v2.8h",
-        "sqadd v0.4s, v3.4s, v3.4s", "uqadd v0.2d, v3.2d, v1.2d",
-        "srhadd v0.8b, v1.8b, v2.8b", "urhadd v0.4h, v1.4h, v2.4h",
-        "shsub v0.4s, v1.4s, v2.4s", "uhsub v0.16b, v1.16b, v2.16b",
-        "sqsub v0.8h, v4.8h, v5.8h", "uqsub v0.4s, v1.4s, v2.4s",
-        "cmgt v0.2d, v1.2d, v2.2d", "cmhi v0.4s, v1.4s, v2.4s",
-        "cmge v0.8h, v4.8h, v5.8h", "cmhs v0.16b, v1.16b, v2.16b",
-        "sshl v0.4s, v1.4s, v6.4s", "ushl v0.2d, v1.2d, v6.2d",
-        "sqshl v0.8h, v1.8h, v6.8h", "uqshl v0.16b, v1.16b, v6.16b",
-        "srshl v0.4s, v1.4s, v6.4s", "urshl v0.8h, v1.8h, v6.8h",
-        "sqrshl v0.2d, v1.2d, v6.2d", "uqrshl v0.4s, v1.4s, v6.4s",
-        "smax v0.4s, v1.4s, v2.4s", "umax v0.16b, v1.16b, v2.16b",
-        "smin v0.8h, v1.8h, v2.8h", "umin v0.2s, v1.2s, v2.2s",
-        "sabd v0.16b, v1.16b, v2.16b", "uabd v0.8h, v1.8h, v2.8h",
-        "saba v0.4s, v1.4s, v2.4s", "uaba v0.16b, v1.16b, v2.16b",
-        "add v0.2d, v1.2d, v2.2d", "add v0.8b, v1.8b, v2.8b", "sub v0.4s, v1.4s, v2.4s",
-        "cmtst v0.8h, v1.8h, v2.8h", "cmeq v0.16b, v4.16b, v5.16b",
-        "mla v0.4s, v1.4s, v2.4s", "mls v0.8h, v1.8h, v2.8h",
-        "mul v0.16b, v1.16b, v2.16b", "pmul v0.16b, v1.16b, v2.16b",
-        "sqdmulh v0.4s, v3.4s, v3.4s", "sqrdmulh v0.8h, v1.8h, v2.8h",
-        "and v0.16b, v1.16b, v2.16b", "bic v0.8b, v1.8b, v2.8b",
-        "orr v0.16b, v1.16b, v2.16b", "orn v0.16b, v1.16b, v2.16b",
-        "eor v0.8b, v1.8b, v2.8b", "bsl v0.16b, v1.16b, v2.16b",
-        "bit v0.16b, v1.16b, v2.16b", "bif v0.8b, v1.8b, v2.8b",
-        # Scalar forms.
-        "sqadd b0, b3, b4", "uqsub h0, h1, h2", "sqsub s0, s4, s5", "uqadd d0, d1, d2",
-        "cmgt d0, d1, d2", "cmhs d0, d1, d2", "add d0, d1, d2", "sub d0, d1, d2",
-        "cmtst d0, d1, d2", "cmeq d0, d1, d1", "sshl d0, d1, d6", "urshl d0, d1, d6",
-        "sqshl s0, s1, s6", "uqrshl b0, b1, b6", "sqdmulh s0, s3, s3", "sqrdmulh h0, h1, h2",
-        # Armv8.1 RDM.
-        "sqrdmlah v0.4s, v1.4s, v2.4s", "sqrdmlsh v0.8h, v3.8h, v3.8h", "sqrdmlah h0, h3, h3",
+# group -> assembly lines, or (assembly, FPCR) pairs.
+GROUPS = {
+    "int_same": [
+        "shadd v0.16b, v1.16b, v2.16b",
+        "uhadd v0.8h, v1.8h, v2.8h",
+        "sqadd v0.4s, v3.4s, v3.4s",
+        "uqadd v0.2d, v3.2d, v1.2d",
+        "srhadd v0.8b, v1.8b, v2.8b",
+        "urhadd v0.4h, v1.4h, v2.4h",
+        "shsub v0.4s, v1.4s, v2.4s",
+        "uhsub v0.16b, v1.16b, v2.16b",
+        "sqsub v0.8h, v4.8h, v5.8h",
+        "uqsub v0.4s, v1.4s, v2.4s",
+        "cmgt v0.2d, v1.2d, v2.2d",
+        "cmhi v0.4s, v1.4s, v2.4s",
+        "cmge v0.8h, v4.8h, v5.8h",
+        "cmhs v0.16b, v1.16b, v2.16b",
+        "sshl v0.4s, v1.4s, v6.4s",
+        "ushl v0.2d, v1.2d, v6.2d",
+        "sqshl v0.8h, v1.8h, v6.8h",
+        "uqshl v0.16b, v1.16b, v6.16b",
+        "srshl v0.4s, v1.4s, v6.4s",
+        "urshl v0.8h, v1.8h, v6.8h",
+        "sqrshl v0.2d, v1.2d, v6.2d",
+        "uqrshl v0.4s, v1.4s, v6.4s",
+        "smax v0.4s, v1.4s, v2.4s",
+        "umax v0.16b, v1.16b, v2.16b",
+        "smin v0.8h, v1.8h, v2.8h",
+        "umin v0.2s, v1.2s, v2.2s",
+        "sabd v0.16b, v1.16b, v2.16b",
+        "uabd v0.8h, v1.8h, v2.8h",
+        "saba v0.4s, v1.4s, v2.4s",
+        "uaba v0.16b, v1.16b, v2.16b",
+        "add v0.2d, v1.2d, v2.2d",
+        "add v0.8b, v1.8b, v2.8b",
+        "sub v0.4s, v1.4s, v2.4s",
+        "cmtst v0.8h, v1.8h, v2.8h",
+        "cmeq v0.16b, v4.16b, v5.16b",
+        "mla v0.4s, v1.4s, v2.4s",
+        "mls v0.8h, v1.8h, v2.8h",
+        "mul v0.16b, v1.16b, v2.16b",
+        "pmul v0.16b, v1.16b, v2.16b",
+        "sqdmulh v0.4s, v3.4s, v3.4s",
+        "sqrdmulh v0.8h, v1.8h, v2.8h",
+        "and v0.16b, v1.16b, v2.16b",
+        "bic v0.8b, v1.8b, v2.8b",
+        "orr v0.16b, v1.16b, v2.16b",
+        "orn v0.16b, v1.16b, v2.16b",
+        "eor v0.8b, v1.8b, v2.8b",
+        "bsl v0.16b, v1.16b, v2.16b",
+        "bit v0.16b, v1.16b, v2.16b",
+        "bif v0.8b, v1.8b, v2.8b",
+        "sqadd b0, b3, b4",
+        "uqsub h0, h1, h2",
+        "sqsub s0, s4, s5",
+        "uqadd d0, d1, d2",
+        "cmgt d0, d1, d2",
+        "cmhs d0, d1, d2",
+        "add d0, d1, d2",
+        "sub d0, d1, d2",
+        "cmtst d0, d1, d2",
+        "cmeq d0, d1, d1",
+        "sshl d0, d1, d6",
+        "urshl d0, d1, d6",
+        "sqshl s0, s1, s6",
+        "uqrshl b0, b1, b6",
+        "sqdmulh s0, s3, s3",
+        "sqrdmulh h0, h1, h2",
+        "sqrdmlah v0.4s, v1.4s, v2.4s",
+        "sqrdmlsh v0.8h, v3.8h, v3.8h",
+        "sqrdmlah h0, h3, h3",
         "sqrdmlsh s0, s1, s2",
-    ]:
-        case(g, asm, lambda asm=asm: m_same(asm, SAME[asm.split()[0]]))
-    for asm in ["addp v0.2d, v1.2d, v2.2d", "addp v0.8b, v1.8b, v2.8b",
-                "smaxp v0.4s, v1.4s, v2.4s", "umaxp v0.8b, v1.8b, v2.8b",
-                "sminp v0.8h, v1.8h, v2.8h", "uminp v0.16b, v1.16b, v2.16b"]:
-        case(g, asm, lambda asm=asm: m_pair(asm, PAIR[asm.split()[0]]))
-    case(g, "addp d0, v1.2d", lambda: wr(0, sum(lanes(ST.v[1], 64)), 64))
-
-
-def misc_cases():
-    g = "int_misc"
-    for asm in ["suqadd v0.4s, v1.4s", "usqadd v0.16b, v1.16b", "cls v0.8h, v1.8h",
-                "clz v0.4s, v1.4s", "cnt v0.16b, v1.16b", "not v0.8b, v1.8b",
-                "rbit v0.16b, v1.16b", "sqabs v0.16b, v4.16b", "sqneg v0.4s, v3.4s",
-                "abs v0.2d, v1.2d", "neg v0.8h, v1.8h", "suqadd s0, s1",
-                "usqadd d0, d1", "sqabs b0, b4", "sqneg d0, d3", "abs d0, d3", "neg d0, d1"]:
-        case(g, asm, lambda asm=asm: m_misc(asm, MISC[asm.split()[0]]))
-    for asm in ["cmgt v0.4s, v1.4s, #0", "cmge v0.8h, v4.8h, #0", "cmeq v0.16b, v4.16b, #0",
-                "cmle v0.2d, v1.2d, #0", "cmlt v0.8b, v1.8b, #0", "cmgt d0, d1, #0",
-                "cmeq d0, d4, #0", "cmlt d0, d3, #0"]:
-        case(g, asm, lambda asm=asm: m_cmp0(asm, asm.split()[0]))
-    case(g, "rev64 v0.16b, v1.16b", lambda: m_rev("rev64 v0.16b, v1.16b", 64))
-    case(g, "rev64 v0.4s, v1.4s", lambda: m_rev("rev64 v0.4s, v1.4s", 64))
-    case(g, "rev32 v0.8h, v1.8h", lambda: m_rev("rev32 v0.8h, v1.8h", 32))
-    case(g, "rev16 v0.16b, v1.16b", lambda: m_rev("rev16 v0.16b, v1.16b", 16))
-    case(g, "saddlp v0.8h, v1.16b", lambda: m_addlp("saddlp v0.8h, v1.16b", True, False))
-    case(g, "uaddlp v0.2s, v1.4h", lambda: m_addlp("uaddlp v0.2s, v1.4h", False, False))
-    case(g, "sadalp v0.2d, v1.4s", lambda: m_addlp("sadalp v0.2d, v1.4s", True, True))
-    case(g, "uadalp v0.8h, v1.16b", lambda: m_addlp("uadalp v0.8h, v1.16b", False, True))
-    for asm, kind in [("xtn v0.8b, v1.8h", "xtn"), ("xtn2 v0.4s, v1.2d", "xtn"),
-                      ("sqxtn v0.4h, v3.4s", "sqxtn"), ("sqxtn2 v0.16b, v4.8h", "sqxtn"),
-                      ("uqxtn v0.2s, v3.2d", "uqxtn"), ("sqxtun v0.8b, v4.8h", "sqxtun"),
-                      ("sqxtun2 v0.8h, v3.4s", "sqxtun"), ("sqxtn s0, d3", "sqxtn"),
-                      ("uqxtn b0, h4", "uqxtn"), ("sqxtun h0, s3", "sqxtun")]:
-        case(g, asm, lambda asm=asm, kind=kind: m_xtn(asm, kind))
-    case(g, "shll v0.8h, v1.8b, #8", lambda: m_shll("shll v0.8h, v1.8b, #8"))
-    case(g, "shll2 v0.2d, v1.4s, #32", lambda: m_shll("shll2 v0.2d, v1.4s, #32"))
-
-
-def diff_cases():
-    g = "int_diff"
-    for asm in [
-        "saddl v0.8h, v1.8b, v2.8b", "uaddl2 v0.4s, v1.8h, v2.8h", "saddw v0.2d, v1.2d, v2.2s",
-        "uaddw2 v0.8h, v1.8h, v2.16b", "ssubl v0.4s, v1.4h, v2.4h", "usubl2 v0.2d, v1.4s, v2.4s",
-        "ssubw2 v0.4s, v1.4s, v2.8h", "usubw v0.8h, v1.8h, v2.8b",
-        "addhn v0.8b, v1.8h, v2.8h", "addhn2 v0.8h, v1.4s, v2.4s", "raddhn v0.2s, v1.2d, v2.2d",
-        "subhn v0.4h, v1.4s, v2.4s", "rsubhn2 v0.16b, v1.8h, v2.8h",
-        "sabal v0.8h, v1.8b, v2.8b", "uabal2 v0.4s, v1.8h, v2.8h", "sabdl v0.2d, v1.2s, v2.2s",
-        "uabdl2 v0.8h, v1.16b, v2.16b", "smlal v0.4s, v1.4h, v2.4h", "umlal2 v0.2d, v1.4s, v2.4s",
-        "smlsl2 v0.8h, v1.16b, v2.16b", "umlsl v0.4s, v1.4h, v2.4h",
-        "smull v0.2d, v1.2s, v2.2s", "umull2 v0.8h, v1.16b, v2.16b",
-        "sqdmull v0.4s, v3.4h, v3.4h", "sqdmull2 v0.2d, v1.4s, v2.4s",
-        "sqdmlal v0.4s, v1.4h, v2.4h", "sqdmlsl2 v0.2d, v3.4s, v3.4s",
-        "pmull v0.8h, v1.8b, v2.8b", "pmull2 v0.8h, v1.16b, v2.16b",
-        "sqdmull s0, h3, h3", "sqdmlal d0, s1, s2", "sqdmlsl s0, h1, h2",
-    ]:
-        mn = asm.split()[0].rstrip("2")
-        signed = mn[0] == "s" and mn not in ("subhn",)
-        kind = mn if mn in ("addhn", "subhn", "raddhn", "rsubhn", "pmull", "sqdmull",
-                            "sqdmlal", "sqdmlsl") else mn[1:]
-        case(g, asm, lambda asm=asm, kind=kind, signed=signed: m_long(asm, kind, signed))
-    g = "int_across"
-    for asm in ["addv b0, v1.16b", "addv s0, v1.4s", "addv h0, v1.4h", "saddlv h0, v1.16b",
-                "uaddlv d0, v1.4s", "saddlv s0, v1.4h", "smaxv h0, v1.8h", "umaxv s0, v1.4s",
-                "sminv b0, v4.16b", "uminv b0, v1.8b"]:
-        mn = asm.split()[0]
-        kind = "addv" if mn == "addv" else mn[1:]
-        case(g, asm, lambda asm=asm, kind=kind, s=mn[0] == "s": m_across(asm, kind, s))
-
-
-def shift_cases():
-    g = "int_shift"
-    for asm in [
-        "sshr v0.4s, v1.4s, #5", "ushr v0.2d, v1.2d, #63", "ssra v0.8h, v1.8h, #16",
-        "usra v0.16b, v1.16b, #3", "srshr v0.4s, v1.4s, #31", "urshr v0.8h, v1.8h, #1",
-        "srsra v0.2d, v1.2d, #40", "ursra v0.8b, v1.8b, #8", "sri v0.4s, v1.4s, #7",
-        "sri v0.2d, v1.2d, #64", "shl v0.8h, v1.8h, #3", "sli v0.2d, v1.2d, #13",
-        "sqshlu v0.4s, v1.4s, #4", "sqshl v0.16b, v1.16b, #2", "uqshl v0.8h, v1.8h, #9",
-        "sshr d0, d1, #64", "ushr d0, d1, #64", "srshr d0, d1, #1", "ursra d0, d1, #10",
-        "shl d0, d1, #63", "sli d0, d1, #1", "sri d0, d1, #33",
-        "sqshl b0, b1, #3", "uqshl s0, s1, #5", "sqshlu h0, h4, #2", "sqshlu d0, d3, #1",
-    ]:
-        mn = asm.split()[0]
-        if mn in ("sri", "sli", "shl"):
-            kind, signed = mn, False
-        elif mn in ("sqshlu", "sqshl", "uqshl"):
-            kind, signed = mn, mn[0] == "s"
-        else:
-            kind, signed = mn[1:], mn[0] == "s"
-        case(g, asm, lambda asm=asm, kind=kind, signed=signed: m_shift(asm, kind, signed))
-    for asm, kind in [
-        ("shrn v0.8b, v1.8h, #3", "shrn"), ("shrn2 v0.4s, v1.2d, #32", "shrn"),
-        ("rshrn v0.4h, v1.4s, #16", "shrn"), ("rshrn2 v0.16b, v1.8h, #1", "shrn"),
-        ("sqshrn v0.8b, v3.8h, #2", "sqshrn"), ("uqshrn2 v0.8h, v1.4s, #4", "uqshrn"),
-        ("sqrshrn v0.2s, v1.2d, #20", "sqshrn"), ("uqrshrn v0.4h, v1.4s, #3", "uqshrn"),
-        ("sqshrun v0.8b, v4.8h, #1", "sqshrun"), ("sqrshrun2 v0.4s, v3.2d, #31", "sqshrun"),
-        ("sqshrn s0, d3, #4", "sqshrn"), ("uqrshrn b0, h1, #2", "uqshrn"),
-        ("sqrshrun h0, s3, #9", "sqshrun"),
-    ]:
-        case(g, asm, lambda asm=asm, kind=kind: m_shift(asm, kind))
-    for asm in ["sshll v0.8h, v1.8b, #3", "ushll2 v0.2d, v1.4s, #31", "sxtl v0.4s, v1.4h",
-                "uxtl2 v0.8h, v1.16b"]:
-        a2 = asm if "#" in asm else asm + ", #0"
-        signed = asm[0] == "s"
-        case(g, asm, lambda a2=a2, signed=signed: m_shift(a2, "shll", signed))
-
-
-def elem_cases():
-    g = "int_elem"
-    for asm, fn in [
-        ("mul v0.4s, v1.4s, v2.s[3]", lambda a, b, d, e: a * b),
-        ("mul v0.8h, v1.8h, v2.h[5]", lambda a, b, d, e: a * b),
-        ("mla v0.4h, v1.4h, v15.h[7]", lambda a, b, d, e: d + a * b),
-        ("mls v0.2s, v1.2s, v20.s[1]", lambda a, b, d, e: d - a * b),
-        ("sqdmulh v0.4s, v3.4s, v3.s[3]", lambda a, b, d, e: sat((2 * sx(a, e) * sx(b, e)) >> e, e, False)),
-        ("sqrdmulh v0.8h, v1.8h, v2.h[2]",
-         lambda a, b, d, e: sat((2 * sx(a, e) * sx(b, e) + (1 << (e - 1))) >> e, e, False)),
-        ("sqdmulh s0, s1, v2.s[1]", lambda a, b, d, e: sat((2 * sx(a, e) * sx(b, e)) >> e, e, False)),
-        ("sqrdmulh h0, h1, v3.h[0]",
-         lambda a, b, d, e: sat((2 * sx(a, e) * sx(b, e) + (1 << (e - 1))) >> e, e, False)),
-        ("sqrdmlah v0.8h, v1.8h, v2.h[6]", SAME["sqrdmlah"]),
-        ("sqrdmlsh v0.2s, v3.2s, v3.s[1]", SAME["sqrdmlsh"]),
-        ("sqrdmlah s0, s1, v2.s[3]", SAME["sqrdmlah"]),
-        ("sqrdmlsh h0, h4, v4.h[2]", SAME["sqrdmlsh"]),
-    ]:
-        case(g, asm, lambda asm=asm, fn=fn: m_elem(asm, fn))
-    for asm in ["smull v0.4s, v1.4h, v2.h[3]", "umull2 v0.2d, v1.4s, v2.s[2]",
-                "smlal2 v0.4s, v1.8h, v2.h[6]", "umlal v0.2d, v1.2s, v2.s[0]",
-                "smlsl v0.2d, v1.2s, v2.s[1]", "umlsl2 v0.4s, v1.8h, v9.h[1]",
-                "sqdmull v0.4s, v3.4h, v3.h[1]", "sqdmlal2 v0.2d, v1.4s, v2.s[3]",
-                "sqdmlsl v0.4s, v1.4h, v2.h[4]", "sqdmull d0, s1, v2.s[2]",
-                "sqdmlal s0, h1, v2.h[7]"]:
-        mn = asm.split()[0].rstrip("2")
-        kind = mn if mn.startswith("sqd") else mn[1:]
-        signed = mn[0] == "s"
-        case(g, asm, lambda asm=asm, kind=kind, signed=signed: m_elem_long(asm, kind, signed))
-
-
-def perm_cases():
-    g = "perm"
-    case(g, "dup v0.16b, v1.b[13]", lambda: m_dup_elem("dup v0.16b, v1.b[13]"))
-    case(g, "dup v0.2d, v1.d[1]", lambda: m_dup_elem("dup v0.2d, v1.d[1]"))
-    case(g, "dup v0.4h, v1.h[6]", lambda: m_dup_elem("dup v0.4h, v1.h[6]"))
-    case(g, "mov s0, v1.s[3]", lambda: m_dup_elem("mov s0, v1.s[3]"))
-    case(g, "dup v0.4s, w3", lambda: m_dup_gen("dup v0.4s, w3"))
-    case(g, "dup v0.8b, w3", lambda: m_dup_gen("dup v0.8b, w3"))
-    case(g, "dup v0.2d, x3", lambda: m_dup_gen("dup v0.2d, x3"))
-    case(g, "mov v0.h[5], w3", lambda: m_ins_gen("mov v0.h[5], w3"))
-    case(g, "mov v0.d[1], x3", lambda: m_ins_gen("mov v0.d[1], x3"))
-    case(g, "mov v0.b[2], v1.b[15]", lambda: m_ins_elem("mov v0.b[2], v1.b[15]"))
-    case(g, "mov v0.s[3], v1.s[0]", lambda: m_ins_elem("mov v0.s[3], v1.s[0]"))
-    case(g, "umov w0, v1.b[9]", lambda: m_mov_to_gen("umov w0, v1.b[9]", False))
-    case(g, "umov w0, v1.h[3]", lambda: m_mov_to_gen("umov w0, v1.h[3]", False))
-    case(g, "mov x0, v1.d[1]", lambda: m_mov_to_gen("mov x0, v1.d[1]", False))
-    case(g, "smov w0, v4.b[3]", lambda: m_mov_to_gen("smov w0, v4.b[3]", True))
-    case(g, "smov x0, v4.h[1]", lambda: m_mov_to_gen("smov x0, v4.h[1]", True))
-    case(g, "smov x0, v3.s[1]", lambda: m_mov_to_gen("smov x0, v3.s[1]", True))
-    for asm in ["uzp1 v0.16b, v1.16b, v2.16b", "uzp2 v0.4s, v1.4s, v2.4s",
-                "uzp1 v0.4h, v1.4h, v2.4h", "trn1 v0.8h, v1.8h, v2.8h",
-                "trn2 v0.2d, v1.2d, v2.2d", "trn2 v0.8b, v1.8b, v2.8b",
-                "zip1 v0.4s, v1.4s, v2.4s", "zip2 v0.8b, v1.8b, v2.8b",
-                "zip2 v0.16b, v1.16b, v2.16b"]:
-        mn = asm.split()[0]
-        case(g, asm, lambda asm=asm, mn=mn: m_permute(asm, mn[:3], int(mn[3]) - 1))
-    case(g, "ext v0.16b, v1.16b, v2.16b, #3", lambda: m_ext("ext v0.16b, v1.16b, v2.16b, #3"))
-    case(g, "ext v0.8b, v1.8b, v2.8b, #5", lambda: m_ext("ext v0.8b, v1.8b, v2.8b, #5"))
-    # Index registers: v6 has small bytes (some in range), v1 random.
-    for asm in ["tbl v0.16b, {v1.16b}, v6.16b", "tbl v0.8b, {v1.16b, v2.16b}, v5.8b",
-                "tbl v0.16b, {v30.16b, v31.16b, v0.16b}, v6.16b",
-                "tbl v0.16b, {v1.16b, v2.16b, v3.16b, v4.16b}, v5.16b",
-                "tbx v0.16b, {v1.16b}, v6.16b", "tbx v0.8b, {v1.16b, v2.16b, v3.16b}, v5.8b"]:
-        case(g, asm, lambda asm=asm: m_tbl(asm, asm.startswith("tbx")))
-    g = "imm"
-    for asm in ["movi v0.4s, #0x5a, lsl #16", "movi v0.2s, #0xff", "movi v0.8h, #0x81, lsl #8",
-                "movi v0.4h, #0x7", "movi v0.4s, #0x12, msl #16", "movi v0.16b, #0xa5",
-                "movi v0.2d, #0xff00ff0000ffff00", "movi d0, #0xff000000000000ff",
-                "mvni v0.4s, #0x3c, lsl #24", "mvni v0.8h, #0x1", "mvni v0.2s, #0x40, msl #8",
-                "orr v0.4s, #0x80, lsl #8", "orr v0.4h, #0xf0", "bic v0.8h, #0xff, lsl #8",
-                "bic v0.2s, #0x1"]:
-        case(g, asm, lambda asm=asm: m_movi(asm))
-    for asm in ["fmov v0.4s, #1.5", "fmov v0.2s, #-31.0", "fmov v0.2d, #0.125"]:
-        case(g, asm, lambda asm=asm: m_fmov_imm(asm))
-
-
-def fp_cases():
-    g = "fp_same"
-    for asm in [
-        "fadd v0.4s, v16.4s, v17.4s", "fadd v0.2d, v18.2d, v19.2d", "fsub v0.2s, v16.2s, v24.2s",
-        "fsub v0.2d, v18.2d, v25.2d", "fmul v0.4s, v16.4s, v24.4s", "fmul v0.2d, v18.2d, v19.2d",
-        "fdiv v0.4s, v16.4s, v24.4s", "fdiv v0.2d, v21.2d, v25.2d", "fmulx v0.4s, v20.4s, v16.4s",
-        "fmla v0.4s, v16.4s, v24.4s", "fmla v24.2d, v18.2d, v19.2d", "fmls v16.4s, v24.4s, v17.4s",
-        "fmax v0.4s, v16.4s, v17.4s", "fmin v0.4s, v20.4s, v24.4s", "fmaxnm v0.4s, v16.4s, v17.4s",
-        "fminnm v0.2d, v18.2d, v25.2d", "fabd v0.4s, v16.4s, v24.4s", "fcmeq v0.4s, v16.4s, v16.4s",
-        "fcmge v0.4s, v16.4s, v24.4s", "fcmgt v0.2d, v18.2d, v19.2d", "facge v0.4s, v16.4s, v17.4s",
-        "facgt v0.2d, v21.2d, v25.2d", "frecps v0.4s, v16.4s, v24.4s", "frsqrts v0.2d, v19.2d, v25.2d",
-        # Scalar forms.
-        "fmulx s0, s16, s24", "fcmeq d0, d18, d18", "fcmge s0, s20, s24", "fcmgt d0, d19, d18",
-        "facge s0, s24, s16", "facgt d0, d25, d21", "fabd d0, d18, d19", "frecps s0, s16, s24",
+        "addp v0.2d, v1.2d, v2.2d",
+        "addp v0.8b, v1.8b, v2.8b",
+        "smaxp v0.4s, v1.4s, v2.4s",
+        "umaxp v0.8b, v1.8b, v2.8b",
+        "sminp v0.8h, v1.8h, v2.8h",
+        "uminp v0.16b, v1.16b, v2.16b",
+        "addp d0, v1.2d",
+    ],
+    "int_misc": [
+        "suqadd v0.4s, v1.4s",
+        "usqadd v0.16b, v1.16b",
+        "cls v0.8h, v1.8h",
+        "clz v0.4s, v1.4s",
+        "cnt v0.16b, v1.16b",
+        "not v0.8b, v1.8b",
+        "rbit v0.16b, v1.16b",
+        "sqabs v0.16b, v4.16b",
+        "sqneg v0.4s, v3.4s",
+        "abs v0.2d, v1.2d",
+        "neg v0.8h, v1.8h",
+        "suqadd s0, s1",
+        "usqadd d0, d1",
+        "sqabs b0, b4",
+        "sqneg d0, d3",
+        "abs d0, d3",
+        "neg d0, d1",
+        "cmgt v0.4s, v1.4s, #0",
+        "cmge v0.8h, v4.8h, #0",
+        "cmeq v0.16b, v4.16b, #0",
+        "cmle v0.2d, v1.2d, #0",
+        "cmlt v0.8b, v1.8b, #0",
+        "cmgt d0, d1, #0",
+        "cmeq d0, d4, #0",
+        "cmlt d0, d3, #0",
+        "rev64 v0.16b, v1.16b",
+        "rev64 v0.4s, v1.4s",
+        "rev32 v0.8h, v1.8h",
+        "rev16 v0.16b, v1.16b",
+        "saddlp v0.8h, v1.16b",
+        "uaddlp v0.2s, v1.4h",
+        "sadalp v0.2d, v1.4s",
+        "uadalp v0.8h, v1.16b",
+        "xtn v0.8b, v1.8h",
+        "xtn2 v0.4s, v1.2d",
+        "sqxtn v0.4h, v3.4s",
+        "sqxtn2 v0.16b, v4.8h",
+        "uqxtn v0.2s, v3.2d",
+        "sqxtun v0.8b, v4.8h",
+        "sqxtun2 v0.8h, v3.4s",
+        "sqxtn s0, d3",
+        "uqxtn b0, h4",
+        "sqxtun h0, s3",
+        "shll v0.8h, v1.8b, #8",
+        "shll2 v0.2d, v1.4s, #32",
+    ],
+    "int_diff": [
+        "saddl v0.8h, v1.8b, v2.8b",
+        "uaddl2 v0.4s, v1.8h, v2.8h",
+        "saddw v0.2d, v1.2d, v2.2s",
+        "uaddw2 v0.8h, v1.8h, v2.16b",
+        "ssubl v0.4s, v1.4h, v2.4h",
+        "usubl2 v0.2d, v1.4s, v2.4s",
+        "ssubw2 v0.4s, v1.4s, v2.8h",
+        "usubw v0.8h, v1.8h, v2.8b",
+        "addhn v0.8b, v1.8h, v2.8h",
+        "addhn2 v0.8h, v1.4s, v2.4s",
+        "raddhn v0.2s, v1.2d, v2.2d",
+        "subhn v0.4h, v1.4s, v2.4s",
+        "rsubhn2 v0.16b, v1.8h, v2.8h",
+        "sabal v0.8h, v1.8b, v2.8b",
+        "uabal2 v0.4s, v1.8h, v2.8h",
+        "sabdl v0.2d, v1.2s, v2.2s",
+        "uabdl2 v0.8h, v1.16b, v2.16b",
+        "smlal v0.4s, v1.4h, v2.4h",
+        "umlal2 v0.2d, v1.4s, v2.4s",
+        "smlsl2 v0.8h, v1.16b, v2.16b",
+        "umlsl v0.4s, v1.4h, v2.4h",
+        "smull v0.2d, v1.2s, v2.2s",
+        "umull2 v0.8h, v1.16b, v2.16b",
+        "sqdmull v0.4s, v3.4h, v3.4h",
+        "sqdmull2 v0.2d, v1.4s, v2.4s",
+        "sqdmlal v0.4s, v1.4h, v2.4h",
+        "sqdmlsl2 v0.2d, v3.4s, v3.4s",
+        "pmull v0.8h, v1.8b, v2.8b",
+        "pmull2 v0.8h, v1.16b, v2.16b",
+        "sqdmull s0, h3, h3",
+        "sqdmlal d0, s1, s2",
+        "sqdmlsl s0, h1, h2",
+    ],
+    "int_across": [
+        "addv b0, v1.16b",
+        "addv s0, v1.4s",
+        "addv h0, v1.4h",
+        "saddlv h0, v1.16b",
+        "uaddlv d0, v1.4s",
+        "saddlv s0, v1.4h",
+        "smaxv h0, v1.8h",
+        "umaxv s0, v1.4s",
+        "sminv b0, v4.16b",
+        "uminv b0, v1.8b",
+    ],
+    "int_shift": [
+        "sshr v0.4s, v1.4s, #5",
+        "ushr v0.2d, v1.2d, #63",
+        "ssra v0.8h, v1.8h, #16",
+        "usra v0.16b, v1.16b, #3",
+        "srshr v0.4s, v1.4s, #31",
+        "urshr v0.8h, v1.8h, #1",
+        "srsra v0.2d, v1.2d, #40",
+        "ursra v0.8b, v1.8b, #8",
+        "sri v0.4s, v1.4s, #7",
+        "sri v0.2d, v1.2d, #64",
+        "shl v0.8h, v1.8h, #3",
+        "sli v0.2d, v1.2d, #13",
+        "sqshlu v0.4s, v1.4s, #4",
+        "sqshl v0.16b, v1.16b, #2",
+        "uqshl v0.8h, v1.8h, #9",
+        "sshr d0, d1, #64",
+        "ushr d0, d1, #64",
+        "srshr d0, d1, #1",
+        "ursra d0, d1, #10",
+        "shl d0, d1, #63",
+        "sli d0, d1, #1",
+        "sri d0, d1, #33",
+        "sqshl b0, b1, #3",
+        "uqshl s0, s1, #5",
+        "sqshlu h0, h4, #2",
+        "sqshlu d0, d3, #1",
+        "shrn v0.8b, v1.8h, #3",
+        "shrn2 v0.4s, v1.2d, #32",
+        "rshrn v0.4h, v1.4s, #16",
+        "rshrn2 v0.16b, v1.8h, #1",
+        "sqshrn v0.8b, v3.8h, #2",
+        "uqshrn2 v0.8h, v1.4s, #4",
+        "sqrshrn v0.2s, v1.2d, #20",
+        "uqrshrn v0.4h, v1.4s, #3",
+        "sqshrun v0.8b, v4.8h, #1",
+        "sqrshrun2 v0.4s, v3.2d, #31",
+        "sqshrn s0, d3, #4",
+        "uqrshrn b0, h1, #2",
+        "sqrshrun h0, s3, #9",
+        "sshll v0.8h, v1.8b, #3",
+        "ushll2 v0.2d, v1.4s, #31",
+        "sxtl v0.4s, v1.4h",
+        "uxtl2 v0.8h, v1.16b",
+    ],
+    "int_elem": [
+        "mul v0.4s, v1.4s, v2.s[3]",
+        "mul v0.8h, v1.8h, v2.h[5]",
+        "mla v0.4h, v1.4h, v15.h[7]",
+        "mls v0.2s, v1.2s, v20.s[1]",
+        "sqdmulh v0.4s, v3.4s, v3.s[3]",
+        "sqrdmulh v0.8h, v1.8h, v2.h[2]",
+        "sqdmulh s0, s1, v2.s[1]",
+        "sqrdmulh h0, h1, v3.h[0]",
+        "sqrdmlah v0.8h, v1.8h, v2.h[6]",
+        "sqrdmlsh v0.2s, v3.2s, v3.s[1]",
+        "sqrdmlah s0, s1, v2.s[3]",
+        "sqrdmlsh h0, h4, v4.h[2]",
+        "smull v0.4s, v1.4h, v2.h[3]",
+        "umull2 v0.2d, v1.4s, v2.s[2]",
+        "smlal2 v0.4s, v1.8h, v2.h[6]",
+        "umlal v0.2d, v1.2s, v2.s[0]",
+        "smlsl v0.2d, v1.2s, v2.s[1]",
+        "umlsl2 v0.4s, v1.8h, v9.h[1]",
+        "sqdmull v0.4s, v3.4h, v3.h[1]",
+        "sqdmlal2 v0.2d, v1.4s, v2.s[3]",
+        "sqdmlsl v0.4s, v1.4h, v2.h[4]",
+        "sqdmull d0, s1, v2.s[2]",
+        "sqdmlal s0, h1, v2.h[7]",
+    ],
+    "perm": [
+        "dup v0.16b, v1.b[13]",
+        "dup v0.2d, v1.d[1]",
+        "dup v0.4h, v1.h[6]",
+        "mov s0, v1.s[3]",
+        "dup v0.4s, w3",
+        "dup v0.8b, w3",
+        "dup v0.2d, x3",
+        "mov v0.h[5], w3",
+        "mov v0.d[1], x3",
+        "mov v0.b[2], v1.b[15]",
+        "mov v0.s[3], v1.s[0]",
+        "umov w0, v1.b[9]",
+        "umov w0, v1.h[3]",
+        "mov x0, v1.d[1]",
+        "smov w0, v4.b[3]",
+        "smov x0, v4.h[1]",
+        "smov x0, v3.s[1]",
+        "uzp1 v0.16b, v1.16b, v2.16b",
+        "uzp2 v0.4s, v1.4s, v2.4s",
+        "uzp1 v0.4h, v1.4h, v2.4h",
+        "trn1 v0.8h, v1.8h, v2.8h",
+        "trn2 v0.2d, v1.2d, v2.2d",
+        "trn2 v0.8b, v1.8b, v2.8b",
+        "zip1 v0.4s, v1.4s, v2.4s",
+        "zip2 v0.8b, v1.8b, v2.8b",
+        "zip2 v0.16b, v1.16b, v2.16b",
+        "ext v0.16b, v1.16b, v2.16b, #3",
+        "ext v0.8b, v1.8b, v2.8b, #5",
+        "tbl v0.16b, {v1.16b}, v6.16b",
+        "tbl v0.8b, {v1.16b, v2.16b}, v5.8b",
+        "tbl v0.16b, {v30.16b, v31.16b, v0.16b}, v6.16b",
+        "tbl v0.16b, {v1.16b, v2.16b, v3.16b, v4.16b}, v5.16b",
+        "tbx v0.16b, {v1.16b}, v6.16b",
+        "tbx v0.8b, {v1.16b, v2.16b, v3.16b}, v5.8b",
+    ],
+    "imm": [
+        "movi v0.4s, #0x5a, lsl #16",
+        "movi v0.2s, #0xff",
+        "movi v0.8h, #0x81, lsl #8",
+        "movi v0.4h, #0x7",
+        "movi v0.4s, #0x12, msl #16",
+        "movi v0.16b, #0xa5",
+        "movi v0.2d, #0xff00ff0000ffff00",
+        "movi d0, #0xff000000000000ff",
+        "mvni v0.4s, #0x3c, lsl #24",
+        "mvni v0.8h, #0x1",
+        "mvni v0.2s, #0x40, msl #8",
+        "orr v0.4s, #0x80, lsl #8",
+        "orr v0.4h, #0xf0",
+        "bic v0.8h, #0xff, lsl #8",
+        "bic v0.2s, #0x1",
+        "fmov v0.4s, #1.5",
+        "fmov v0.2s, #-31.0",
+        "fmov v0.2d, #0.125",
+    ],
+    "fp_same": [
+        "fadd v0.4s, v16.4s, v17.4s",
+        "fadd v0.2d, v18.2d, v19.2d",
+        "fsub v0.2s, v16.2s, v24.2s",
+        "fsub v0.2d, v18.2d, v25.2d",
+        "fmul v0.4s, v16.4s, v24.4s",
+        "fmul v0.2d, v18.2d, v19.2d",
+        "fdiv v0.4s, v16.4s, v24.4s",
+        "fdiv v0.2d, v21.2d, v25.2d",
+        "fmulx v0.4s, v20.4s, v16.4s",
+        "fmla v0.4s, v16.4s, v24.4s",
+        "fmla v24.2d, v18.2d, v19.2d",
+        "fmls v16.4s, v24.4s, v17.4s",
+        "fmax v0.4s, v16.4s, v17.4s",
+        "fmin v0.4s, v20.4s, v24.4s",
+        "fmaxnm v0.4s, v16.4s, v17.4s",
+        "fminnm v0.2d, v18.2d, v25.2d",
+        "fabd v0.4s, v16.4s, v24.4s",
+        "fcmeq v0.4s, v16.4s, v16.4s",
+        "fcmge v0.4s, v16.4s, v24.4s",
+        "fcmgt v0.2d, v18.2d, v19.2d",
+        "facge v0.4s, v16.4s, v17.4s",
+        "facgt v0.2d, v21.2d, v25.2d",
+        "frecps v0.4s, v16.4s, v24.4s",
+        "frsqrts v0.2d, v19.2d, v25.2d",
+        "fmulx s0, s16, s24",
+        "fcmeq d0, d18, d18",
+        "fcmge s0, s20, s24",
+        "fcmgt d0, d19, d18",
+        "facge s0, s24, s16",
+        "facgt d0, d25, d21",
+        "fabd d0, d18, d19",
+        "frecps s0, s16, s24",
         "frsqrts d0, d21, d25",
-    ]:
-        case(g, asm, lambda asm=asm: m_fsame(asm, FSAME[asm.split()[0]]))
-    for asm in ["faddp v0.4s, v16.4s, v24.4s", "faddp v0.2d, v18.2d, v19.2d",
-                "fmaxp v0.4s, v16.4s, v17.4s", "fminp v0.2s, v20.2s, v24.2s",
-                "fmaxnmp v0.4s, v24.4s, v17.4s", "fminnmp v0.2d, v18.2d, v25.2d",
-                "faddp s0, v16.2s", "faddp d0, v18.2d", "fmaxp s0, v24.2s", "fminp d0, v21.2d",
-                "fmaxnmp s0, v17.2s", "fminnmp d0, v25.2d"]:
-        case(g, asm, lambda asm=asm: m_fpair(asm, FPAIR[asm.split()[0]]))
-    g = "fp_misc"
-    rint = lambda mode: (lambda a, f: f_rint(a, f, mode))
-    cvt = lambda mode, u: (lambda a, f: f_to_int(a, f, mode, f.w, u))
-    FMISC = {
-        "fabs": lambda a, f: f_abs(a, f), "fneg": lambda a, f: f_neg(a, f),
-        "fsqrt": f_sqrt, "frecpe": f_recpe, "frsqrte": f_rsqrte, "frecpx": f_recpx,
-        "frintn": rint("ne"), "frintp": rint("p"), "frintm": rint("m"), "frintz": rint("z"),
-        "frinta": rint("a"), "frintx": lambda a, f: f_rint(a, f, fpcr_mode()),
-        "frinti": lambda a, f: f_rint(a, f, fpcr_mode()),
-        "fcvtns": cvt("ne", False), "fcvtps": cvt("p", False), "fcvtms": cvt("m", False),
-        "fcvtzs": cvt("z", False), "fcvtas": cvt("a", False), "fcvtnu": cvt("ne", True),
-        "fcvtpu": cvt("p", True), "fcvtmu": cvt("m", True), "fcvtzu": cvt("z", True),
-        "fcvtau": cvt("a", True),
-        "scvtf": lambda a, f: f_from_int(a, f.w, False, f, 0, fpcr_mode()),
-        "ucvtf": lambda a, f: f_from_int(a, f.w, True, f, 0, fpcr_mode()),
-        "urecpe": lambda a, f: urecpe(a), "ursqrte": lambda a, f: ursqrte(a),
-    }
-    FCMP0 = {
-        "fcmgt": lambda a, f: f_cmp(a, 0, f, "gt"), "fcmge": lambda a, f: f_cmp(a, 0, f, "ge"),
-        "fcmeq": lambda a, f: f_cmp(a, 0, f, "eq"), "fcmle": lambda a, f: f_cmp(0, a, f, "ge"),
-        "fcmlt": lambda a, f: f_cmp(0, a, f, "gt"),
-    }
-    RM = 2 << 22
-    for asm, fpcr in [
-        ("fabs v0.4s, v20.4s", 0), ("fneg v0.2d, v21.2d", 0), ("fsqrt v0.4s, v24.4s", 0),
-        ("fsqrt v0.2d, v19.2d", 0), ("frecpe v0.4s, v16.4s", 0), ("frsqrte v0.2d, v19.2d", 0),
-        ("frintn v0.4s, v24.4s", 0), ("frintp v0.4s, v20.4s", 0), ("frintm v0.2d, v21.2d", 0),
-        ("frintz v0.4s, v20.4s", 0), ("frinta v0.4s, v24.4s", 0), ("frintx v0.2d, v25.2d", 0),
-        ("frinti v0.4s, v24.4s", RM), ("fcvtns v0.4s, v24.4s", 0), ("fcvtps v0.4s, v20.4s", 0),
-        ("fcvtms v0.2d, v21.2d", 0), ("fcvtzs v0.4s, v16.4s", 0), ("fcvtas v0.4s, v24.4s", 0),
-        ("fcvtnu v0.4s, v24.4s", 0), ("fcvtpu v0.2d, v25.2d", 0), ("fcvtmu v0.4s, v20.4s", 0),
-        ("fcvtzu v0.2d, v21.2d", 0), ("fcvtau v0.4s, v16.4s", 0), ("scvtf v0.4s, v22.4s", 0),
-        ("ucvtf v0.4s, v22.4s", 0), ("scvtf v0.2d, v23.2d", 2 << 22), ("ucvtf v0.2d, v23.2d", 0),
-        ("urecpe v0.4s, v1.4s", 0), ("ursqrte v0.2s, v2.2s", 0),
-        # Scalar forms.
-        ("frecpe d0, d18", 0), ("frsqrte s0, s24", 0), ("frecpx s0, s16", 0),
-        ("frecpx d0, d19", 0), ("fcvtzs s0, s20", 0), ("fcvtau d0, d21", 0),
-        ("scvtf d0, d23", 0), ("ucvtf s0, s1", 1 << 22),
-    ]:
-        case(g, asm, lambda asm=asm: m_fmisc(asm, FMISC[asm.split()[0]]), fpcr)
-    for asm in ["fcmgt v0.4s, v24.4s, #0.0", "fcmge v0.2d, v21.2d, #0.0",
-                "fcmeq v0.4s, v20.4s, #0.0", "fcmle v0.4s, v17.4s, #0.0",
-                "fcmlt v0.2d, v25.2d, #0.0", "fcmeq d0, d18, #0.0", "fcmlt s0, s24, #0.0"]:
-        fn = FCMP0[asm.split()[0]]
-        case(g, asm, lambda asm=asm, fn=fn: m_fmisc(asm, lambda a, f: M(f.w) if fn(a, f) else 0))
-    case(g, "fcvtn v0.2s, v18.2d", lambda: m_fcvt_narrow("fcvtn v0.2s, v18.2d", "ne"))
-    case(g, "fcvtn2 v0.4s, v21.2d", lambda: m_fcvt_narrow("fcvtn2 v0.4s, v21.2d", "z"), 3 << 22)
-    case(g, "fcvtxn v0.2s, v18.2d", lambda: m_fcvt_narrow("fcvtxn v0.2s, v18.2d", "odd"))
-    case(g, "fcvtxn2 v0.4s, v19.2d", lambda: m_fcvt_narrow("fcvtxn2 v0.4s, v19.2d", "odd"))
-    case(g, "fcvtxn s0, d18", lambda: m_fcvt_narrow("fcvtxn s0, d18", "odd"))
-    case(g, "fcvtl v0.2d, v16.2s", lambda: m_fcvtl("fcvtl v0.2d, v16.2s"))
-    case(g, "fcvtl2 v0.2d, v17.4s", lambda: m_fcvtl("fcvtl2 v0.2d, v17.4s"))
-    g = "fp_across"
-    for asm in ["fmaxv s0, v16.4s", "fminv s0, v20.4s", "fmaxnmv s0, v17.4s", "fminnmv s0, v17.4s"]:
-        fn = {"fmaxv": FPAIR["fmaxp"], "fminv": FPAIR["fminp"], "fmaxnmv": FPAIR["fmaxnmp"],
-              "fminnmv": FPAIR["fminnmp"]}[asm.split()[0]]
-        case(g, asm, lambda asm=asm, fn=fn: m_facross(asm, fn))
-    g = "fp_elem"
-    for asm in ["fmla v0.4s, v16.4s, v24.s[2]", "fmla v24.2d, v18.2d, v19.d[1]",
-                "fmls v16.2s, v24.2s, v17.s[1]", "fmul v0.4s, v16.4s, v24.s[3]",
-                "fmul v0.2d, v21.2d, v25.d[0]", "fmulx v0.4s, v20.4s, v20.s[0]",
-                "fmul s0, s16, v24.s[1]", "fmla d24, d18, v19.d[0]", "fmulx d0, d21, v25.d[1]",
-                "fmls s16, s24, v17.s[2]"]:
-        case(g, asm, lambda asm=asm: m_felem(asm, FSAME[asm.split()[0]]))
-    g = "fp_fixed"
-    for asm in ["scvtf v0.4s, v22.4s, #8", "ucvtf v0.2d, v23.2d, #16", "fcvtzs v0.4s, v24.4s, #4",
-                "fcvtzu v0.2d, v25.2d, #10", "scvtf s0, s22, #3", "fcvtzu d0, d21, #5",
-                "fcvtzs d0, d18, #60"]:
-        mn = asm.split()[0]
-        case(g, asm, lambda asm=asm, mn=mn: m_fixed(asm, mn.startswith("fcvt"), mn in ("ucvtf", "fcvtzu")))
+        "faddp v0.4s, v16.4s, v24.4s",
+        "faddp v0.2d, v18.2d, v19.2d",
+        "fmaxp v0.4s, v16.4s, v17.4s",
+        "fminp v0.2s, v20.2s, v24.2s",
+        "fmaxnmp v0.4s, v24.4s, v17.4s",
+        "fminnmp v0.2d, v18.2d, v25.2d",
+        "faddp s0, v16.2s",
+        "faddp d0, v18.2d",
+        "fmaxp s0, v24.2s",
+        "fminp d0, v21.2d",
+        "fmaxnmp s0, v17.2s",
+        "fminnmp d0, v25.2d",
+    ],
+    "fp_misc": [
+        "fabs v0.4s, v20.4s",
+        "fneg v0.2d, v21.2d",
+        "fsqrt v0.4s, v24.4s",
+        "fsqrt v0.2d, v19.2d",
+        "frecpe v0.4s, v16.4s",
+        "frsqrte v0.2d, v19.2d",
+        "frintn v0.4s, v24.4s",
+        "frintp v0.4s, v20.4s",
+        "frintm v0.2d, v21.2d",
+        "frintz v0.4s, v20.4s",
+        "frinta v0.4s, v24.4s",
+        "frintx v0.2d, v25.2d",
+        ("frinti v0.4s, v24.4s", 0x800000),
+        "fcvtns v0.4s, v24.4s",
+        "fcvtps v0.4s, v20.4s",
+        "fcvtms v0.2d, v21.2d",
+        "fcvtzs v0.4s, v16.4s",
+        "fcvtas v0.4s, v24.4s",
+        "fcvtnu v0.4s, v24.4s",
+        "fcvtpu v0.2d, v25.2d",
+        "fcvtmu v0.4s, v20.4s",
+        "fcvtzu v0.2d, v21.2d",
+        "fcvtau v0.4s, v16.4s",
+        "scvtf v0.4s, v22.4s",
+        "ucvtf v0.4s, v22.4s",
+        ("scvtf v0.2d, v23.2d", 0x800000),
+        "ucvtf v0.2d, v23.2d",
+        "urecpe v0.4s, v1.4s",
+        "ursqrte v0.2s, v2.2s",
+        "frecpe d0, d18",
+        "frsqrte s0, s24",
+        "frecpx s0, s16",
+        "frecpx d0, d19",
+        "fcvtzs s0, s20",
+        "fcvtau d0, d21",
+        "scvtf d0, d23",
+        ("ucvtf s0, s1", 0x400000),
+        "fcmgt v0.4s, v24.4s, #0.0",
+        "fcmge v0.2d, v21.2d, #0.0",
+        "fcmeq v0.4s, v20.4s, #0.0",
+        "fcmle v0.4s, v17.4s, #0.0",
+        "fcmlt v0.2d, v25.2d, #0.0",
+        "fcmeq d0, d18, #0.0",
+        "fcmlt s0, s24, #0.0",
+        "fcvtn v0.2s, v18.2d",
+        ("fcvtn2 v0.4s, v21.2d", 0xc00000),
+        "fcvtxn v0.2s, v18.2d",
+        "fcvtxn2 v0.4s, v19.2d",
+        "fcvtxn s0, d18",
+        "fcvtl v0.2d, v16.2s",
+        "fcvtl2 v0.2d, v17.4s",
+    ],
+    "fp_across": [
+        "fmaxv s0, v16.4s",
+        "fminv s0, v20.4s",
+        "fmaxnmv s0, v17.4s",
+        "fminnmv s0, v17.4s",
+    ],
+    "fp_elem": [
+        "fmla v0.4s, v16.4s, v24.s[2]",
+        "fmla v24.2d, v18.2d, v19.d[1]",
+        "fmls v16.2s, v24.2s, v17.s[1]",
+        "fmul v0.4s, v16.4s, v24.s[3]",
+        "fmul v0.2d, v21.2d, v25.d[0]",
+        "fmulx v0.4s, v20.4s, v20.s[0]",
+        "fmul s0, s16, v24.s[1]",
+        "fmla d24, d18, v19.d[0]",
+        "fmulx d0, d21, v25.d[1]",
+        "fmls s16, s24, v17.s[2]",
+    ],
+    "fp_fixed": [
+        "scvtf v0.4s, v22.4s, #8",
+        "ucvtf v0.2d, v23.2d, #16",
+        "fcvtzs v0.4s, v24.4s, #4",
+        "fcvtzu v0.2d, v25.2d, #10",
+        "scvtf s0, s22, #3",
+        "fcvtzu d0, d21, #5",
+        "fcvtzs d0, d18, #60",
+    ],
+    "mem": [
+        "ld1 {v0.16b}, [x1]",
+        "ld1 {v0.4h, v1.4h}, [x1]",
+        "ld1 {v0.4s, v1.4s, v2.4s}, [x1], #48",
+        "ld1 {v30.2d, v31.2d, v0.2d, v1.2d}, [x1]",
+        "ld2 {v0.8h, v1.8h}, [x1], x2",
+        "ld2 {v0.8b, v1.8b}, [x1]",
+        "ld3 {v0.4s, v1.4s, v2.4s}, [x1]",
+        "ld3 {v0.8b, v1.8b, v2.8b}, [x1], #24",
+        "ld4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]",
+        "ld4 {v0.4h, v1.4h, v2.4h, v3.4h}, [x1], x2",
+        "st1 {v1.16b}, [x1]",
+        "st1 {v1.2s, v2.2s}, [x1], #16",
+        "st1 {v1.8h, v2.8h, v3.8h}, [x1]",
+        "st1 {v1.2d, v2.2d, v3.2d, v4.2d}, [x1], x2",
+        "st2 {v1.4s, v2.4s}, [x1]",
+        "st3 {v1.8h, v2.8h, v3.8h}, [x1], #48",
+        "st4 {v1.8b, v2.8b, v3.8b, v4.8b}, [x1]",
+        "st4 {v1.2d, v2.2d, v3.2d, v4.2d}, [x1]",
+        "ld1 {v0.b}[9], [x1]",
+        "ld1 {v0.d}[1], [x1], #8",
+        "ld2 {v0.h, v1.h}[5], [x1]",
+        "ld3 {v0.s, v1.s, v2.s}[3], [x1], x2",
+        "ld4 {v0.d, v1.d, v2.d, v3.d}[0], [x1]",
+        "st1 {v1.s}[2], [x1]",
+        "st2 {v1.b, v2.b}[15], [x1], #2",
+        "st3 {v1.h, v2.h, v3.h}[7], [x1]",
+        "st4 {v1.s, v2.s, v3.s, v4.s}[1], [x1], x2",
+        "ld1r {v0.8b}, [x1]",
+        "ld1r {v0.2d}, [x1], #8",
+        "ld2r {v0.4s, v1.4s}, [x1]",
+        "ld3r {v0.8h, v1.8h, v2.8h}, [x1], x2",
+        "ld4r {v0.2s, v1.2s, v2.2s, v3.2s}, [x1]",
+    ],
+}
 
-
-def mem_cases():
-    g = "mem"
-    for asm, selem in [
-        ("ld1 {v0.16b}, [x1]", 1), ("ld1 {v0.4h, v1.4h}, [x1]", 1),
-        ("ld1 {v0.4s, v1.4s, v2.4s}, [x1], #48", 1), ("ld1 {v30.2d, v31.2d, v0.2d, v1.2d}, [x1]", 1),
-        ("ld2 {v0.8h, v1.8h}, [x1], x2", 2), ("ld2 {v0.8b, v1.8b}, [x1]", 2),
-        ("ld3 {v0.4s, v1.4s, v2.4s}, [x1]", 3), ("ld3 {v0.8b, v1.8b, v2.8b}, [x1], #24", 3),
-        ("ld4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]", 4), ("ld4 {v0.4h, v1.4h, v2.4h, v3.4h}, [x1], x2", 4),
-        ("st1 {v1.16b}, [x1]", 1), ("st1 {v1.2s, v2.2s}, [x1], #16", 1),
-        ("st1 {v1.8h, v2.8h, v3.8h}, [x1]", 1), ("st1 {v1.2d, v2.2d, v3.2d, v4.2d}, [x1], x2", 1),
-        ("st2 {v1.4s, v2.4s}, [x1]", 2), ("st3 {v1.8h, v2.8h, v3.8h}, [x1], #48", 3),
-        ("st4 {v1.8b, v2.8b, v3.8b, v4.8b}, [x1]", 4), ("st4 {v1.2d, v2.2d, v3.2d, v4.2d}, [x1]", 4),
-    ]:
-        case(g, asm, lambda asm=asm, selem=selem: m_ldst_multi(asm, asm.startswith("ld"), selem))
-    for asm in ["ld1 {v0.b}[9], [x1]", "ld1 {v0.d}[1], [x1], #8", "ld2 {v0.h, v1.h}[5], [x1]",
-                "ld3 {v0.s, v1.s, v2.s}[3], [x1], x2", "ld4 {v0.d, v1.d, v2.d, v3.d}[0], [x1]",
-                "st1 {v1.s}[2], [x1]", "st2 {v1.b, v2.b}[15], [x1], #2",
-                "st3 {v1.h, v2.h, v3.h}[7], [x1]", "st4 {v1.s, v2.s, v3.s, v4.s}[1], [x1], x2"]:
-        case(g, asm, lambda asm=asm: m_ldst_lane(asm, asm.startswith("ld")))
-    for asm in ["ld1r {v0.8b}, [x1]", "ld1r {v0.2d}, [x1], #8", "ld2r {v0.4s, v1.4s}, [x1]",
-                "ld3r {v0.8h, v1.8h, v2.8h}, [x1], x2", "ld4r {v0.2s, v1.2s, v2.2s, v3.2s}, [x1]"]:
-        case(g, asm, lambda asm=asm: m_ldr(asm))
-
+CASES = [
+    (g, *(item if isinstance(item, tuple) else (item, 0)))
+    for g, items in GROUPS.items()
+    for item in items
+]  # (group, asm, fpcr)
 
 # ---- assembly and output -------------------------------------------------------
 
@@ -1160,10 +1419,7 @@ def assemble(lines):
 
 def main():
     global ST
-    for build in (same_cases, misc_cases, diff_cases, shift_cases, elem_cases, perm_cases,
-                  fp_cases, mem_cases):
-        build()
-    words = assemble([asm for _, asm, _, _ in CASES])
+    words = assemble([asm for _, asm, _ in CASES])
     out = []
     w = out.append
     w("// Generated by scripts/gen-neon-vectors.py. Do not edit.")
@@ -1182,9 +1438,9 @@ def main():
     w("];")
     w("")
     w("pub const CASES: &[Case] = &[")
-    for (group, asm, fpcr, model), insn in zip(CASES, words):
+    for (group, asm, fpcr), insn in zip(CASES, words):
         ST = State(fpcr)
-        model()
+        model(asm)
         v = [(k, x) for k, x in enumerate(ST.v) if x != V0[k]]
         xs = [(k, x) for k, x in enumerate(ST.x) if x != X0[k]]
         mem = [(k, b) for k, b in enumerate(ST.mem) if b != MEM0[k]]
