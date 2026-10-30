@@ -365,6 +365,147 @@ jt_done:
     expect  x10, 0x55667788, "fmov w from s"
     expect  x11, 0, "eor vector clears"
 
+// ---- floating point: NaNs ----------------------------------------------------
+// FPProcessNaNs: the first signalling NaN wins, then the first quiet NaN;
+// a signalling NaN is returned with its quiet bit set.
+    ldr     x3, =0x7ff8000000000123     // quiet NaN
+    fmov    d1, x3
+    ldr     x3, =0x7ff0000000000456     // signalling NaN
+    fmov    d2, x3
+    fmov    d3, #1.0
+    ldr     w3, =0x7f800456             // single signalling NaN
+    fmov    s4, w3
+    fmov    s5, #1.0
+    fadd    d6, d1, d3
+    fmov    x4, d6
+    fadd    d6, d1, d2
+    fmov    x5, d6
+    fmul    s6, s4, s5
+    fmov    w6, s6
+    fmax    d6, d1, d3
+    fmov    x7, d6
+    fmaxnm  d6, d1, d3
+    fmov    x8, d6
+    ldr     x3, =0x7ff0000000000000     // +inf
+    fmov    d7, x3
+    fsub    d6, d7, d7
+    fmov    x9, d6
+    fcmp    d1, d3
+    mrs     x10, nzcv
+    fcvtzs  x11, d1
+    expect  x4, 0x7ff8000000000123, "fadd propagates quiet NaN"
+    expect  x5, 0x7ff8000000000456, "signalling NaN wins over quiet"
+    expect  x6, 0x7fc00456, "fmul quietens single signalling NaN"
+    expect  x7, 0x7ff8000000000123, "fmax returns the NaN"
+    expect  x8, 0x3ff0000000000000, "fmaxnm prefers the number"
+    expect  x9, 0x7ff8000000000000, "inf - inf is the default NaN"
+    expect  x10, 0x30000000, "fcmp unordered sets C and V"
+    expect  x11, 0, "fcvtzs of NaN is zero"
+
+// FPCR.DN: every processed NaN becomes the default NaN; FNEG is not NaN
+// processing, so it still flips the sign.
+    mov     x3, #0x2000000
+    msr     fpcr, x3
+    fadd    d6, d1, d3
+    fmov    x4, d6
+    fneg    d6, d1
+    fmov    x5, d6
+    msr     fpcr, xzr
+    expect  x4, 0x7ff8000000000000, "DN gives the default NaN"
+    expect  x5, 0xfff8000000000123, "fneg flips a NaN under DN"
+
+// ---- floating point: subnormals and flush-to-zero ----------------------------
+    ldr     x3, =0x0010000000000000     // smallest normal double, 2^-1022
+    fmov    d1, x3
+    fmov    d2, #0.5
+    mov     x3, #1                      // smallest subnormal double, 2^-1074
+    fmov    d3, x3
+    mov     w3, #1                      // smallest subnormal single, 2^-149
+    fmov    s4, w3
+    ldr     w3, =0x80800000             // -2^-126
+    fmov    s5, w3
+    fmov    s6, #0.5
+    fmul    d7, d1, d2                  // 2^-1023: a subnormal
+    fmov    x4, d7
+    fadd    s7, s4, s4                  // 2^-148
+    fmov    w5, s7
+    fcvt    d7, s4                      // 2^-149 is a normal double
+    fmov    x6, d7
+    fcvt    s7, d3                      // far below single range: +0
+    fmov    w7, s7
+    fmov    d7, #-1.0
+    fmax    d7, d3, d7
+    fmov    x8, d7
+    expect  x4, 0x0008000000000000, "subnormal product"
+    expect  x5, 0x00000002, "subnormal sum"
+    expect  x6, 0x36a0000000000000, "single subnormal widens exactly"
+    expect  x7, 0, "double subnormal narrows to zero"
+    expect  x8, 1, "fmax keeps a subnormal"
+// FPCR.FZ: subnormal inputs and results (judged before rounding) become
+// zero with their sign.
+    mov     x3, #0x1000000
+    msr     fpcr, x3
+    fmov    d7, xzr
+    fadd    d7, d3, d7
+    fmov    x4, d7
+    fmul    d7, d1, d2
+    fmov    x5, d7
+    fmul    s7, s5, s6
+    fmov    w6, s7
+    fcvt    d7, s4
+    fmov    x7, d7
+    fmov    d7, #-1.0
+    fmax    d7, d3, d7
+    fmov    x8, d7
+    fmov    d7, #2.0
+    fmul    d7, d1, d7                  // 2^-1021 is normal: kept
+    fmov    x9, d7
+    msr     fpcr, xzr
+    expect  x4, 0, "FZ flushes a subnormal input"
+    expect  x5, 0, "FZ flushes a subnormal result"
+    expect  x6, 0x80000000, "FZ keeps the sign"
+    expect  x7, 0, "FZ flushes fcvt input"
+    expect  x8, 0, "FZ: fmax sees +0"
+    expect  x9, 0x0020000000000000, "FZ keeps normal results"
+
+// ---- saturation and FPSR.QC --------------------------------------------------
+    msr     fpsr, xzr
+    movi    v1.16b, #0x7f
+    movi    v2.16b, #0x01
+    add     v3.16b, v1.16b, v2.16b      // wraps, never saturates
+    mrs     x4, fpsr
+    sqadd   b3, b1, b2                  // 0x7f + 1 saturates to 0x7f
+    umov    w5, v3.b[0]
+    mrs     x6, fpsr
+    msr     fpsr, xzr
+    movi    v1.4s, #1
+    movi    v2.4s, #2
+    uqsub   v3.4s, v1.4s, v2.4s         // 1 - 2 saturates to 0
+    umov    x7, v3.d[1]
+    mrs     x8, fpsr
+    msr     fpsr, xzr
+    ldr     w3, =0x00012345
+    fmov    s1, w3
+    sqxtn   h3, s1                      // 0x12345 saturates to 0x7fff
+    umov    w9, v3.h[0]
+    movi    v1.8h, #0x80, lsl #8        // -32768 in every lane
+    sqdmulh v3.8h, v1.8h, v1.8h         // 2 * (-2^15)^2 >> 16 saturates
+    umov    w10, v3.h[7]
+    movi    v1.16b, #0x80
+    sqabs   v3.16b, v1.16b              // |-128| saturates to 127
+    umov    w11, v3.b[15]
+    mrs     x12, fpsr
+    msr     fpsr, xzr
+    expect  x4, 0, "wrapping add leaves QC clear"
+    expect  x5, 0x7f, "sqadd saturates"
+    expect  x6, 0x8000000, "sqadd sets QC"
+    expect  x7, 0, "uqsub saturates at zero"
+    expect  x8, 0x8000000, "uqsub sets QC"
+    expect  x9, 0x7fff, "sqxtn saturates"
+    expect  x10, 0x7fff, "sqdmulh saturates"
+    expect  x11, 0x7f, "sqabs saturates"
+    expect  x12, 0x8000000, "QC is sticky"
+
 // ---- summary ---------------------------------------------------------------
     lea     x0, msg_head
     bl      print

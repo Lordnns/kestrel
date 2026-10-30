@@ -51,7 +51,7 @@ built integer-only, and built with floating point and NEON allowed
 | Program      | Exercises                                                        |
 |--------------|------------------------------------------------------------------|
 | `hello`      | loader, entry, debug-print SVC, exit                             |
-| `asm_checks` | 91 hand-written instruction checks: carries, bitfields, atomics, exclusives, jump tables, system registers, SIMD moves |
+| `asm_checks` | 121 hand-written instruction checks: carries, bitfields, atomics, exclusives, jump tables, system registers, SIMD moves, NaNs, subnormals, flush-to-zero, saturation |
 | `vm`         | a bytecode VM run with switch dispatch and with function-pointer dispatch |
 | `bigint`     | 128-bit multiply, Miller-Rabin on 64-bit primes, SWAR popcount  |
 | `algos`      | recursion, CRC32, prime sieve, heap allocation, sort            |

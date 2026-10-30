@@ -45,7 +45,7 @@ macro_rules! case {
 /// Every program in the suite, cheapest first.
 pub const CASES: &[Case] = &[
     case!("hello", "smallest program: one debug print"),
-    case!("asm_checks", "91 hand-written instruction checks"),
+    case!("asm_checks", "121 hand-written instruction checks"),
     case!("vm", "bytecode VM: jump tables and indirect calls"),
     case!("bigint", "128-bit math, Miller-Rabin primality"),
     case!("algos", "recursion, CRC32, sieve, heap, sort"),
@@ -57,7 +57,11 @@ pub const CASES: &[Case] = &[
     case!("vm-neon", "vm", "vm, NEON build"),
     case!("bigint-neon", "bigint", "bigint, NEON build"),
     case!("algos-neon", "algos", "algos, NEON build (vector compares)"),
-    case!("sha256-neon", "sha256", "sha256, NEON build (LD4, widening)"),
+    case!(
+        "sha256-neon",
+        "sha256",
+        "sha256, NEON build (LD4, widening)"
+    ),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
