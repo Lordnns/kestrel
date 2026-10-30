@@ -1,0 +1,43 @@
+homebrew memory test
+image text: type 0x0000000000dc7e03 attr 0 r-x
+image data: type 0x0000000003febd04 attr 0 rw-
+unmapped address: type 0x0000000000000000 attr 0 ---
+heap 2 MiB: 0x0000000000000000
+heap: type 0x00000000037ebd05 attr 0 rw-
+heap unaligned size: 0x000000000000ca01
+heap over 4 GiB: 0x000000000000ca01
+heap 4 MiB: 0x0000000000000000
+growing kept the contents: yes
+set r--: 0x0000000000000000
+heap page: type 0x00000000037ebd05 attr 0 r--
+only that page changed: yes
+still readable: yes
+set ---: 0x0000000000000000
+set rw-: 0x0000000000000000
+set -w-: 0x000000000000d801
+set r-x: 0x000000000000d801
+set uncached: 0x0000000000000000
+heap page: type 0x00000000037ebd05 attr 8 rw-
+clear uncached: 0x0000000000000000
+other attribute rejected: yes
+heap is one block again: yes
+map memory: 0x0000000000000000
+destination: type 0x00000000005c3c0b attr 0 rw-
+source: type 0x00000000037ebd05 attr 1 ---
+destination holds the source bytes: yes
+map into the alias region rejected: yes
+unmap with the wrong source: 0x000000000000d401
+unmap memory: 0x0000000000000000
+source after unmap: type 0x00000000037ebd05 attr 0 rw-
+write through the destination kept: yes
+map physical: 0x0000000000000000
+physical block: 0x0000000000010000 bytes, rw-
+map a larger range over it: 0x0000000000000000
+only the new part counted: yes
+physical memory writable: yes
+map physical unaligned size: 0x000000000000ca01
+map physical outside alias: 0x000000000000dc01
+unmap physical: 0x0000000000000000
+after unmap: type 0x0000000000000000 attr 0 ---
+heap shrink to 2 MiB: 0x0000000000000000
+shrinking kept the rest: yes

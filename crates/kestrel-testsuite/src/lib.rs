@@ -104,6 +104,7 @@ pub const CASES: &[Case] = &[
     // Homebrew format: NRO loader, launch environment, self-relocation.
     homebrew!("hbtest", "homebrew NRO: arguments, bss, relocations"),
     homebrew!("hblayout", "homebrew NRO: svcGetInfo process layout"),
+    homebrew!("hbmemory", "homebrew NRO: memory system calls"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.

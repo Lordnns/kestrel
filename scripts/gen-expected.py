@@ -343,6 +343,69 @@ def hblayout():
     return "".join(line + "\n" for line in out)
 
 
+def hbmemory():
+    """guest/src/nro/hbmemory.c: the memory system calls as Switchbrew's
+    "SVC" page documents them. Memory types are its MemoryType table (the
+    4.0.0+ values): Code 0xdc7e03 for the image's read-only part, CodeData
+    0x3febd04 for its data, Normal 0x37ebd05 for heap, Stack 0x5c3c0b for
+    the svcMapMemory destination, Free 0 for unmapped memory. Result codes:
+    0xca01 for a bad size, 0xd801 for a permission other than ---, r--, rw-,
+    0xd401 for an svcUnmapMemory pairing that was never mapped, 0xdc01 for
+    svcMapPhysicalMemory outside the alias region. The svcMapMemory source
+    becomes --- with attribute bit 0 (Locked); Uncached is bit 3."""
+    ok = hex64(0)
+    code = {name: hex64(v) for name, v in
+            (("size", 0xCA01), ("perm", 0xD801), ("state", 0xD401), ("range", 0xDC01))}
+    free, code_t, data_t = hex64(0), hex64(0xDC7E03), hex64(0x3FEBD04)
+    normal, stack = hex64(0x37EBD05), hex64(0x5C3C0B)
+    out = [
+        "homebrew memory test",
+        f"image text: type {code_t} attr 0 r-x",
+        f"image data: type {data_t} attr 0 rw-",
+        f"unmapped address: type {free} attr 0 ---",
+        f"heap 2 MiB: {ok}",
+        f"heap: type {normal} attr 0 rw-",
+        f"heap unaligned size: {code['size']}",
+        f"heap over 4 GiB: {code['size']}",
+        f"heap 4 MiB: {ok}",
+        "growing kept the contents: yes",
+        f"set r--: {ok}",
+        f"heap page: type {normal} attr 0 r--",
+        "only that page changed: yes",
+        "still readable: yes",
+        f"set ---: {ok}",
+        f"set rw-: {ok}",
+        f"set -w-: {code['perm']}",
+        f"set r-x: {code['perm']}",
+        f"set uncached: {ok}",
+        f"heap page: type {normal} attr 8 rw-",
+        f"clear uncached: {ok}",
+        "other attribute rejected: yes",
+        "heap is one block again: yes",
+        f"map memory: {ok}",
+        f"destination: type {stack} attr 0 rw-",
+        f"source: type {normal} attr 1 ---",
+        "destination holds the source bytes: yes",
+        "map into the alias region rejected: yes",
+        f"unmap with the wrong source: {code['state']}",
+        f"unmap memory: {ok}",
+        f"source after unmap: type {normal} attr 0 rw-",
+        "write through the destination kept: yes",
+        f"map physical: {ok}",
+        f"physical block: {hex64(0x10000)} bytes, rw-",
+        f"map a larger range over it: {ok}",
+        "only the new part counted: yes",
+        "physical memory writable: yes",
+        f"map physical unaligned size: {code['size']}",
+        f"map physical outside alias: {code['range']}",
+        f"unmap physical: {ok}",
+        f"after unmap: type {free} attr 0 ---",
+        f"heap shrink to 2 MiB: {ok}",
+        "shrinking kept the rest: yes",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -354,6 +417,7 @@ PROGRAMS = {
     "intrinsics": intrinsics,
     "hbtest": hbtest,
     "hblayout": hblayout,
+    "hbmemory": hbmemory,
 }
 
 

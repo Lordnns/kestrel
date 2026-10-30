@@ -50,7 +50,7 @@ qemu for Linux ARM64.
 |------|--------|----------|
 | Homebrew executable loader | done, with the gaps below | `kestrel-loader/src/nro.rs` (segments, zeroed BSS, ASET icon/NACP/RomFS ranges) and `kestrel-hle/src/homebrew.rs` (loader config entries, argument string, X0/X1); `kestrel run x.nro -- args`; self-test program `hbtest` (own startup code, self-relocation) |
 | Process layout reporting | done, with the gaps below | `hle::layout` is one documented 39-bit layout; svcGetInfo (`svc.rs`) answers types 2-8, 11-18, 21-23; self-test program `hblayout` checks the layout's documented properties |
-| Memory SVCs | not started | only SetHeapSize |
+| Memory SVCs | done, with the gaps below | `hle/memory.rs`: memory types per mapping, svcQueryMemory, svcSetHeapSize in place with its checks, svcSetMemoryPermission, svcSetMemoryAttribute, svcMapMemory/svcUnmapMemory, svcMapPhysicalMemory/svcUnmapPhysicalMemory; `Memory` range operations in `kestrel-core`; self-test program `hbmemory` |
 | Handle table and kernel objects | not started | none |
 | Threads | not started | one thread; SleepThread returns at once |
 | Synchronisation | not started | none |
@@ -205,12 +205,40 @@ Gaps:
 
 - Types 0, 1, 9, 10, 19, 20, 24-26 and unknown types stop with an explicit
   "unimplemented svcGetInfo type" message.
-- svcSetHeapSize does not yet check the heap region or total memory.
 - The ELF test programs stay at 0x200000, below the address space.
+
+Memory system calls, from Switchbrew's "SVC" page (ABIs, MemoryType and
+MemoryAttribute tables, result codes). Every mapping carries its type:
+
+| Mapping | MemoryType |
+|---------|------------|
+| Image, read-only parts | Code 0xdc7e03 |
+| Image, writable parts | CodeData 0x3febd04 |
+| Heap, svcMapPhysicalMemory, homebrew config | Normal 0x37ebd05 |
+| Main thread stack, svcMapMemory destination | Stack 0x5c3c0b |
+| TLS page | ThreadLocal 0x40200c |
+
+svcQueryMemory merges neighbours with the same type, attribute and
+permission. Unmapped memory is reported as the gap up to the nearest
+mappings: Free inside the address space, Inaccessible below or above it.
+svcSetHeapSize grows and shrinks in place; svcMapMemory moves the source
+bytes to the destination while the source is locked, which no program can
+tell apart from shared pages.
+
+Gaps:
+
+- Where Switchbrew is silent, kestrel chose: the main stack and the
+  homebrew config types, the reporting of unmapped and out-of-space
+  addresses, accepting only Normal memory for svcSetMemoryPermission and
+  svcSetMemoryAttribute, and 0xf601 for an attribute other than Uncached.
+- svcMapPhysicalMemory needs a system resource on the console (0xfa01
+  without one); kestrel does not model the system resource and allows it.
+- Memory is not shared yet (IPC and shared memory come later), so the
+  reference counts in MemoryInfo are always 0.
 
 ## Next task
 
-Phase 2, memory system calls: svcQueryMemory with memory types and
-attributes for every mapping, svcSetMemoryPermission, svcSetMemoryAttribute,
-svcMapMemory/svcUnmapMemory into the alias region, and svcMapPhysicalMemory,
-with the heap checked against its region and the total memory size.
+Phase 2, handle table and kernel objects: a per-process handle table with
+the current-thread and current-process pseudo-handles, svcCloseHandle,
+and the first kernel objects (threads, events, shared and transfer
+memory), with the main thread getting a real handle.
