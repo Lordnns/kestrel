@@ -34,7 +34,7 @@ qemu for Linux ARM64.
 | CI on all platforms | done | `ci.yml` native jobs on `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2022`, `windows-11-arm`, `macos-14`, `macos-15-intel`, plus the qemu fallback; release tags and manual dispatch only; all green on releases `v0.1.6` to `v0.1.8` |
 | Release packaging | done | every package built and self-tested on its own OS and CPU; the macOS universal binary is also self-tested on `macos-15-intel`; published for `v0.1.6` to `v0.1.8` |
 
-### Phase 1: Complete CPU: **in progress**
+### Phase 1: Complete CPU: **done** (acceptance check awaiting its first CI run)
 
 | Task | Status | Evidence |
 |------|--------|----------|
@@ -42,6 +42,7 @@ qemu for Linux ARM64.
 | 1B NEON | done, with the gaps below | `interp/neon/` (integer, floating point, permutes, structure loads and stores); 430 generated cases in `neon_vectors.rs`; every C test program built with NEON at `-O2` and `-O3` matches the expected output |
 | 1C Phase 1 tests | done | NEON unit vectors (430 cases); every integer C program also built with NEON (`name-neon.elf`, same expected output); `fp.c` (127 scalar FP results as bit patterns, modelled by `scripts/armfp.py`); `intrinsics.c` (168 NEON intrinsics, modelled by the `gen-neon-vectors.py` lane models); 30 NaN, subnormal, flush-to-zero and saturation checks in `asm_checks.S`; `kestrel selftest` runs 13 programs |
 | 1D Real-hardware oracle | done | `rt.h` host mode (`KESTREL_HOST`) sends the three console calls to the C library; `scripts/check-host.sh` builds every C program natively (integer-only and NEON, 12 builds) and compares its output with `guest/expected`; CI job `hardware-oracle` runs it on `ubuntu-24.04-arm` and `macos-14`, both passing on release `v0.1.8` (12/12 on each). Not covered: `asm_checks.S`, which is console-only assembly |
+| Phase 1 acceptance | done, awaiting first CI run | every C program with and without NEON passes the self-test on all five targets (CI, `v0.1.8`); the hardware oracle passes on both ARM runners; `scripts/check-optimised.sh` rebuilds every program at `-O3 -march=armv8.2-a` and runs it in kestrel: 13/13 reach the expected output with no unsupported instruction (locally; CI step added to the guest-programs job) |
 
 ### Phase 2: Homebrew: **not started**
 
@@ -155,7 +156,5 @@ Remaining gaps:
 
 ## Next task
 
-Phase 1 sign-off: check the remaining acceptance point, an aggressively
-optimised NEON build of the test programs hitting no unsupported instruction
-(so far checked by hand at `-O3`). After that, Phase 2 starts with the
-homebrew executable loader.
+Phase 2, homebrew: the homebrew executable loader with segment, BSS and
+asset handling, plus the argument and environment setup homebrew expects.

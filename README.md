@@ -115,6 +115,8 @@ Rebuilding the guest test programs needs `clang` and `ld.lld` (they
 cross-compile, so any host works): `./scripts/build-guest.sh`. On an ARM64
 Linux or macOS machine, `./scripts/check-host.sh` builds the C programs
 natively and checks that the real CPU prints exactly the expected output.
+`./scripts/check-optimised.sh` rebuilds every program at `-O3` for Armv8.2
+and checks that kestrel still runs each one to the expected output.
 
 ## How it runs on both architectures
 

@@ -69,6 +69,8 @@ jobs:
         run: python3 scripts/gen-neon-vectors.py --check
       - run: bash scripts/build-guest.sh
       - run: cargo run -q --release -p kestrel-cli -- selftest
+      - name: Programs built with -O3 for Armv8.2 hit no unsupported instruction
+        run: sh scripts/check-optimised.sh
 
   # Real-hardware oracle: the C test programs run natively on a real ARM CPU
   # must print exactly guest/expected, which kestrel is tested against.
