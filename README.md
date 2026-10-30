@@ -47,8 +47,9 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   ports, client sessions, svcSendSyncRequest and the service manager sm:,
   with unknown services and commands reported by name.
 - **First services**, answering as system version 20.0.0: set:sys
-  firmware version, apm, and the applet manager commands an application
-  sends at startup.
+  firmware version, apm, the applet manager commands an application
+  sends at startup, and hid's setup with its shared memory (no host input
+  yet).
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -98,6 +99,7 @@ built integer-only, and built with floating point and NEON allowed
 | `hbsync`     | a homebrew NRO checking waits, timeouts, cancelling, mutexes, condition variables and address arbitration |
 | `hbipc`      | a homebrew NRO talking to sm: over CMIF and TIPC, from two threads, with bad names, close requests and closed handles |
 | `hbapplet`   | a homebrew NRO sending libnx's startup requests: set:sys firmware version, apm, appletOE as a domain with its interfaces and events |
+| `hbhid`      | a homebrew NRO setting up input as libnx does: hid's applet resource and npad setup, and mapping its shared memory, with each kind of bad mapping |
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 
@@ -176,9 +178,9 @@ The plan of record, with its rules and acceptance criteria, is
 [docs/ROADMAP.md](docs/ROADMAP.md). In short:
 
 1. Homebrew (in progress: the NRO loader, process layout, memory calls,
-   handle table, threads, synchronisation, IPC with sm:, and the settings
-   and applet services are done): input, time, filesystem and the other
-   first OS services, from public documentation.
+   handle table, threads, synchronisation, IPC with sm:, and the settings,
+   applet and input setup services are done): time, filesystem and the
+   other first OS services, from public documentation.
 2. `native` backend on aarch64 hosts, starting on macOS, developed alongside
    the OS services; then a `jit` backend on x86_64.
 3. Graphics at two levels: GPU emulation with shader translation to Vulkan

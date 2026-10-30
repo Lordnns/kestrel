@@ -55,7 +55,7 @@ qemu for Linux ARM64.
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
-| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; self-test program `hbapplet`. Not yet: hid, time, fsp-srv, power state, logging |
+| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; self-test programs `hbapplet`, `hbhid`. Not yet: time, fsp-srv, power state, logging |
 | SD folder option, unimplemented-call log | not started | unknown SVCs, ports, services and commands stop with their name and number |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
@@ -287,10 +287,9 @@ Gaps:
   attribute or outside the address space refused with 0xd401.
 - svcResetSignal on a process stops as unsupported: process state changes
   are not modelled.
-- Shared memory has no object yet. A program cannot create one itself
-  (svcCreateSharedMemory is for system modules), so it arrives with the
-  first service that hands one out (input), together with
-  svcMapSharedMemory and svcUnmapSharedMemory.
+- Shared memory arrived with the first service that hands one out
+  (hid); see the first services notes. A program cannot create one
+  itself (svcCreateSharedMemory is for system modules).
 - No process handles; svcGetProcessId accepts only the pseudo-handle.
 - The receiving side of transfer memory (svcMapTransferMemory) belongs to
   services and comes with them.
@@ -487,6 +486,49 @@ Gaps:
   exist at a time ("Applet Manager services"); kestrel does not enforce
   it.
 
+Shared memory, from Switchbrew's "SVC" page (MapSharedMemory and
+UnmapSharedMemory arguments, the reference a mapping holds, MemoryType
+Shared 0x00402006), in `hle/memory.rs`. A shared memory object holds its
+bytes, the permission the process may map it with, and where it is
+mapped; services make them and keep a reference.
+
+- Where Switchbrew gives only the arguments, kestrel chose the checks,
+  with the other memory calls' result codes: a shared memory handle
+  (0xe401), page-aligned address and size (0xcc01, 0xca01), the object's
+  size (0xca01), inside the address space and outside the heap and alias
+  regions (0xdc01), free (0xd401), the object's permission (0xd801).
+  svcUnmapSharedMemory of anything but the object's mapping is 0xd401.
+- One mapping per object at a time; a second stops as unsupported.
+- The service's own reference keeps every object alive so far, so the
+  mapping's reference cannot be observed yet; it will be with the first
+  object no service keeps.
+
+hid, from Switchbrew's "HID services" page and the requests libnx's
+hidInitialize and padConfigureInput send (`hid.c`, `pad.c`), in
+`hle/service/hid.rs`:
+
+| Command | Behaviour |
+|---------|-----------|
+| CreateAppletResource (0) | hands out IAppletResource |
+| IAppletResource GetSharedMemoryHandle (0) | a copy handle to the one 0x40000-byte shared memory, mapped read-only |
+| ActivateTouchScreen (11), ActivateMouse (21), ActivateKeyboard (31), ActivateNpad (103) | accepted |
+| SetSupportedNpadStyleSet (100), GetSupportedNpadStyleSet (101) | the style bits, kept |
+| SetSupportedNpadIdType (102) | up to 10 NpadIdTypes from the pointer (X) buffer, kept |
+| ActivateNpadWithRevision (109) | the revisions Switchbrew lists (0, 1, 2, 3, 5), kept |
+
+Each takes the process ID descriptor and the applet resource user ID;
+an ID other than the one appletOE hands out stops, as do NpadIdType
+lists and revisions Switchbrew does not allow.
+
+Gaps:
+
+- No host input yet: the shared memory stays zeroed, so every ring
+  buffer is empty and no controller is connected. libnx reads that as no
+  input, and programs waiting for a button wait forever. The kept style
+  set, IDs and revision will shape the shared memory once input exists.
+- Every other hid command stops with its number, including vibration,
+  six-axis sensors and the npad style-set update event.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
@@ -495,16 +537,15 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. `hid` (input): CreateAppletResource and the shared memory it hands
-   out, which needs shared memory objects and svcMapSharedMemory, then
-   the npad setup libnx's hidInitialize sends.
-2. Time (`time:u` or the service libnx picks for 20.0.0): the system
-   clocks and the time zone service libnx's startup reads, with a
-   documented choice of what time it is (a fixed time keeps runs
-   reproducible).
-3. `fsp-srv` with the SD folder option: OpenSdCardFileSystem, files and
+1. Time (`time:u` or the service libnx picks for 20.0.0): the system
+   clocks and the time zone service libnx's startup reads
+   (`timeInitialize` and `__libnx_init_time`), with a documented choice
+   of what time it is (a fixed time keeps runs reproducible).
+2. `fsp-srv` with the SD folder option: OpenSdCardFileSystem, files and
    directories over a host folder, through A and B buffers.
-4. Power state and logging, then the unimplemented-call log.
+3. Power state and logging, then the unimplemented-call log.
+4. Host input into hid's shared memory, with the frontend (window and
+   keyboard or gamepad), once there is one.
 
 Phase 3 on macOS (needs a session on the owner's Mac, since
 Hypervisor.framework is macOS-only): the memory arena refactor, the
