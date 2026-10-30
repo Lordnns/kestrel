@@ -804,11 +804,10 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. Phase 2 acceptance (`PLAN.md`): the standard homebrew examples (hello
-   world, input, file I/O, threads) built from source with the public
-   libnx toolchain in CI, run on all five platforms. Building them shows
-   what real libnx startup still needs; the unimplemented-call log names
-   it. Ask the owner first how the libnx toolchain gets into CI.
+1. Phase 2 acceptance (`PLAN.md`), in progress: the standard homebrew
+   examples built from source with the public libnx toolchain, run on all
+   five platforms with their output checked in CI. See "Phase 2
+   acceptance" below for the owner's decisions and the steps.
 2. Later input tasks the owner wants (2026-10-30): the other
    NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
    players, and real Joy-Con motion, rumble and pairing over their own
@@ -843,6 +842,65 @@ Each service so far followed the same steps; keep them:
 5. Commits: one logical change each (code, test program, docs), with the
    ROADMAP, ARCHITECTURE and README updated in the same series. Push only
    when the owner says so.
+
+### Phase 2 acceptance
+
+Examples (switchbrew/switch-examples, public domain mark; libnx is
+ISC), pinned to a commit: `graphics/printing/hello-world` (hello world),
+`hid/read-controls` (input), `fs/sdmc` (file I/O), `misc/barrier`
+(threads). Each prints with libnx's console, which draws its text on the
+screen (`console_sw.c` through `framebuffer.c`), and waits for Plus.
+
+The owner's decisions (2026-10-30):
+- The real screen now: kestrel gets the frames libnx draws, shows them
+  in the window, and CI compares the final frame with an expected image.
+  This pulls the display path of phase 5 forward; the GPU itself stays
+  in phase 5.
+- Docker Desktop on the owner's PC, with the same public devkitPro
+  container image as CI (`devkitpro/devkita64`, pinned), to build the
+  examples locally. The built examples are not committed.
+
+The path libnx takes to the screen (libnx `display/*.c`,
+`services/vi.c`, `services/nv.c`, `nvidia/map.c`, `nvidia/fence.c`, read
+for the protocol only; Switchbrew "Display services", "Nvnflinger
+services", "NV services"):
+- startup: `__nx_win_init` (linked when the program uses the console)
+  opens vi:m, then vi:s, then vi:u (an application gets vi:u, command 0
+  GetDisplayService with 0, then 100 GetRelayService), OpenDisplay
+  "Default" (1010), am ISelfController 40 CreateManagedDisplayLayer,
+  OpenLayer (2020, the native window parcel with the binder ID in a
+  0x100-byte buffer), SetLayerScalingMode (2101);
+- the native window: IHOSBinderDriver AdjustRefcount (1),
+  GetNativeHandle (2, the buffer-free event), TransactParcel (3) carrying
+  Android IGraphicBufferProducer parcels: CONNECT, SET_PREALLOCATED_BUFFER
+  (the nvmap ID, offset and block-linear layout of each buffer),
+  DEQUEUE_BUFFER (no fences), REQUEST_BUFFER, QUEUE_BUFFER,
+  DISCONNECT;
+- nvdrv: Initialize (3, with transfer memory), clone with control
+  command 4 (CloneCurrentObjectEx), SetClientPID (8), Open (0)
+  `/dev/nvmap` and `/dev/nvhost-ctrl`, Ioctl (1), Close (2); nvmap
+  Create, Alloc (the program's own memory), GetId, FromId, Param, Free;
+- the pixels stay in the program's memory: on QUEUE_BUFFER kestrel reads
+  the buffer through its nvmap ID, undoes the block-linear layout, and
+  converts the colour format (RGB565 for the console).
+
+Steps:
+1. Owner: install Docker Desktop. Then a script that builds the four
+   examples at the pinned commits in the container.
+2. Display services: vi:u, the layer, the binder relay and the buffer
+   queue, with a vsync clock in guest time (buffers are released at
+   60 Hz, and the scheduler wakes for it), and am's
+   CreateManagedDisplayLayer.
+3. nvdrv and nvmap, with CloneCurrentObjectEx.
+4. Frames: block-linear to linear (from a public description of the
+   layout, not libnx's code), colour formats, a `Screen` sink like
+   `input::Source`; the window shows the frames.
+5. A homebrew test program `hbdisplay` drawing a known pattern, with a
+   model of the expected frame.
+6. The examples: run each, fix what the unimplemented-call log names,
+   press Plus from a scripted controller, compare the final frame.
+7. CI: build the examples in the container on release tags and run them
+   on all five platforms.
 
 Phase 3 on macOS (needs a session on the owner's Mac, since
 Hypervisor.framework is macOS-only): the memory arena refactor, the
