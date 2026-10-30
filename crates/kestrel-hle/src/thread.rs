@@ -65,6 +65,12 @@ pub enum State {
 pub enum Wait {
     /// svcWaitSynchronization: any of these objects, each retained.
     Objects(Vec<ObjectId>),
+    /// The mutex word at `addr`, held by thread `owner`; `tag` goes into
+    /// the word when the mutex is handed over.
+    Lock { addr: u64, owner: u64, tag: u32 },
+    /// The condition variable at `key`, after releasing the mutex word at
+    /// `mutex`, which it takes back with `tag` when signalled.
+    CondVar { key: u64, mutex: u64, tag: u32 },
 }
 
 pub struct Thread {
@@ -124,6 +130,12 @@ impl Wait {
         match self {
             Wait::Objects(ids) if ids.is_empty() => "waits on no objects".into(),
             Wait::Objects(ids) => format!("waits on {} object(s)", ids.len()),
+            Wait::Lock { addr, owner, .. } => {
+                format!("waits for the mutex at {addr:#x} held by thread {owner:#x}")
+            }
+            Wait::CondVar { key, .. } => {
+                format!("waits on the condition variable at {key:#x}")
+            }
         }
     }
 }
@@ -294,10 +306,19 @@ impl Process {
     /// The running thread waits for `wait` until woken, or until the clock
     /// reaches `until`.
     pub(crate) fn block(&mut self, wait: Wait, until: Option<u64>) {
+        let turn = self.sched.take_turn();
         let t = &mut self.sched.threads[self.sched.current];
         t.state = State::Waiting { until };
         t.wait = Some(wait);
+        t.turn = turn; // while waiting, the turn orders waiters
         self.sched.rotate = true;
+    }
+
+    /// The order in which waiters are served: best priority first, then
+    /// the longest waiting.
+    pub(crate) fn wait_order(&self, i: usize) -> (u32, u64) {
+        let t = &self.sched.threads[i];
+        (t.priority, t.turn)
     }
 
     /// End thread `i`'s wait with result `code` in W0 and, if given, `x1`

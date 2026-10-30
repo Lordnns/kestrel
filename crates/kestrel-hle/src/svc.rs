@@ -32,6 +32,10 @@ pub mod nr {
     pub const RESET_SIGNAL: u16 = 0x17;
     pub const WAIT_SYNCHRONIZATION: u16 = 0x18;
     pub const CANCEL_SYNCHRONIZATION: u16 = 0x19;
+    pub const ARBITRATE_LOCK: u16 = 0x1a;
+    pub const ARBITRATE_UNLOCK: u16 = 0x1b;
+    pub const WAIT_PROCESS_WIDE_KEY_ATOMIC: u16 = 0x1c;
+    pub const SIGNAL_PROCESS_WIDE_KEY: u16 = 0x1d;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
     pub const GET_PROCESS_ID: u16 = 0x24;
     pub const GET_THREAD_ID: u16 = 0x25;
@@ -335,6 +339,35 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
         }
         nr::CANCEL_SYNCHRONIZATION => {
             p.cpu.x[0] = code(p.cancel_synchronization(p.cpu.x[0]));
+            None
+        }
+        nr::ARBITRATE_LOCK => {
+            // W0 = owner's handle, X1 = mutex word, W2 = caller's tag.
+            let (owner, addr, tag) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2] as u32);
+            match p.arbitrate_lock(owner, addr, tag) {
+                Ok(true) => {} // the hand-over writes the result
+                Ok(false) => p.cpu.x[0] = result::SUCCESS,
+                Err(code) => p.cpu.x[0] = code,
+            }
+            None
+        }
+        nr::ARBITRATE_UNLOCK => {
+            p.cpu.x[0] = code(p.arbitrate_unlock(p.cpu.x[0]));
+            None
+        }
+        nr::WAIT_PROCESS_WIDE_KEY_ATOMIC => {
+            // X0 = mutex word, X1 = condition variable, W2 = caller's tag,
+            // X3 = timeout (the order libnx uses; see sync.rs).
+            let (mutex, key, tag) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2] as u32);
+            match p.wait_process_wide_key(mutex, key, tag, p.cpu.x[3] as i64) {
+                Ok(()) => {} // the wake-up writes the result
+                Err(code) => p.cpu.x[0] = code,
+            }
+            None
+        }
+        nr::SIGNAL_PROCESS_WIDE_KEY => {
+            p.signal_process_wide_key(p.cpu.x[0], p.cpu.x[1] as i32);
+            p.cpu.x[0] = result::SUCCESS;
             None
         }
         nr::CLOSE_HANDLE => {

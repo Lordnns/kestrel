@@ -1,18 +1,45 @@
-//! Synchronisation: waiting on kernel objects, cancelling a wait.
+//! Synchronisation: waiting on kernel objects, cancelling a wait, mutexes
+//! and condition variables.
 //!
 //! From Switchbrew's "SVC" page (WaitSynchronization, its object types and
 //! result codes, CancelSynchronization). A readable event is signaled while
 //! its event is; a thread is signaled once it has exited. Waiting holds a
 //! reference to every object, so closing their handles meanwhile does not
 //! end the wait.
+//!
+//! Mutexes and condition variables live in guest memory; the kernel only
+//! arbitrates. Switchbrew lists the arguments of ArbitrateLock,
+//! ArbitrateUnlock, WaitProcessWideKeyAtomic and SignalProcessWideKey; the
+//! protocol comes from the open-source libnx (`nx/source/kernel/mutex.c`
+//! and `condvar.c`, ISC licence), which runs on the console:
+//!
+//! - A mutex word holds its owner's tag, the owning thread's handle, with
+//!   bit 30 (`WAIT_MASK`) set while threads wait for it; 0 is unlocked.
+//! - A thread that finds the mutex held sets bit 30 and calls
+//!   ArbitrateLock(owner tag, word, own tag), then re-reads the word and
+//!   owns the mutex if the word holds its tag; otherwise it tries again.
+//!   So ArbitrateLock may return at once when the word no longer reads
+//!   owner | bit 30, and must, on return after waiting, have written the
+//!   caller's tag.
+//! - An owner that finds bit 30 set calls ArbitrateUnlock(word), which
+//!   hands the mutex to a waiter or writes 0.
+//! - A condition variable wait passes the mutex word in X0 and the
+//!   condition variable in X1 (Switchbrew labels them the other way round;
+//!   libnx's order is what the console accepts). The wait releases the
+//!   mutex; once signalled, the thread holds the mutex again when the call
+//!   returns success. After TimedOut it does not, and libnx locks it
+//!   itself. SignalProcessWideKey(-1) wakes every waiter.
 
 use crate::kernel::{Kind, Object, ObjectId};
 use crate::svc::result;
 use crate::thread::{State, Wait};
 use crate::Process;
+use kestrel_core::Perm;
 
 /// svcWaitSynchronization takes at most this many handles ("SVC").
 pub const MAX_WAIT_OBJECTS: i32 = 0x40;
+/// Set in a mutex word while threads wait for it (libnx `HANDLE_WAIT_MASK`).
+pub const WAIT_MASK: u32 = 0x4000_0000;
 
 /// The clock reading at which a wait of `timeout` nanoseconds ends: never
 /// for a negative timeout.
@@ -93,6 +120,154 @@ impl Process {
                 self.wake(i, result::SUCCESS, Some(index as u64));
             }
         }
+    }
+
+    /// Check a word the kernel reads and writes for user code: aligned
+    /// (InvalidAddress) and mapped read-write (InvalidCurrentMemory). The
+    /// result codes are kestrel's choice.
+    fn check_word(&self, addr: u64) -> Result<(), u64> {
+        if addr % 4 != 0 {
+            return Err(result::INVALID_ADDRESS);
+        }
+        match self.mem.region(addr) {
+            Some(b) if b.perm.contains(Perm::RW) => Ok(()),
+            _ => Err(result::INVALID_CURRENT_MEMORY),
+        }
+    }
+
+    fn word(&self, addr: u64) -> u32 {
+        self.mem.read32(addr).expect("checked word")
+    }
+
+    fn set_word(&mut self, addr: u64, v: u32) {
+        self.mem.write32(addr, v).expect("checked word");
+    }
+
+    /// The thread whose handle is `tag`, as a thread ID.
+    fn tag_owner(&self, tag: u32) -> Option<u64> {
+        let i = self.thread_index(tag as u64).ok()?;
+        Some(self.sched.threads[i].id)
+    }
+
+    /// The waiters matching `f`, best first.
+    fn waiters(&self, f: impl Fn(&Wait) -> bool) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.sched.threads.len())
+            .filter(|&i| self.sched.threads[i].wait.as_ref().is_some_and(&f))
+            .collect();
+        v.sort_by_key(|&i| self.wait_order(i));
+        v
+    }
+
+    /// svcArbitrateLock: wait for the mutex word at `addr` while it reads
+    /// `owner` | WAIT_MASK. Returns whether the caller now waits; if the
+    /// word reads anything else, the call returns at once. `owner` must be
+    /// a thread handle (InvalidHandle).
+    pub fn arbitrate_lock(&mut self, owner: u64, addr: u64, tag: u32) -> Result<bool, u64> {
+        self.check_word(addr)?;
+        let owner_tag = owner as u32;
+        let owner = self.tag_owner(owner_tag).ok_or(result::INVALID_HANDLE)?;
+        if self.word(addr) != owner_tag | WAIT_MASK {
+            return Ok(false);
+        }
+        self.block(Wait::Lock { addr, owner, tag }, None);
+        Ok(true)
+    }
+
+    /// svcArbitrateUnlock: hand the caller's mutex at `addr` to its best
+    /// waiter, or unlock it.
+    pub fn arbitrate_unlock(&mut self, addr: u64) -> Result<(), u64> {
+        self.check_word(addr)?;
+        self.unlock(addr);
+        Ok(())
+    }
+
+    /// Release the running thread's mutex at `addr`: the best waiter gets
+    /// it (with WAIT_MASK if others still wait, who now wait on the new
+    /// owner), or the word becomes 0.
+    fn unlock(&mut self, addr: u64) {
+        let me = self.current_thread().id;
+        let waiters = self.waiters(
+            |w| matches!(w, Wait::Lock { addr: a, owner, .. } if *a == addr && *owner == me),
+        );
+        let Some((&next, rest)) = waiters.split_first() else {
+            self.set_word(addr, 0);
+            return;
+        };
+        let (new_owner, tag) = match self.sched.threads[next].wait {
+            Some(Wait::Lock { tag, .. }) => (self.sched.threads[next].id, tag),
+            _ => unreachable!("a lock waiter"),
+        };
+        for &i in rest {
+            if let Some(Wait::Lock { owner, .. }) = &mut self.sched.threads[i].wait {
+                *owner = new_owner;
+            }
+        }
+        let mask = if rest.is_empty() { 0 } else { WAIT_MASK };
+        self.set_word(addr, tag | mask);
+        self.wake(next, result::SUCCESS, None);
+    }
+
+    /// svcWaitProcessWideKeyAtomic: release the mutex at `mutex` and wait
+    /// on the condition variable at `key` until signalled or timed out.
+    /// With timeout 0 the call times out at once, the mutex released. The
+    /// condition variable word itself is neither read nor written: libnx
+    /// never reads it.
+    pub fn wait_process_wide_key(
+        &mut self,
+        mutex: u64,
+        key: u64,
+        tag: u32,
+        timeout: i64,
+    ) -> Result<(), u64> {
+        self.check_word(mutex)?;
+        if key % 4 != 0 {
+            return Err(result::INVALID_ADDRESS);
+        }
+        self.unlock(mutex);
+        if timeout == 0 {
+            return Err(result::TIMED_OUT);
+        }
+        let until = deadline(self.cpu.retired, timeout);
+        self.block(Wait::CondVar { key, mutex, tag }, until);
+        Ok(())
+    }
+
+    /// svcSignalProcessWideKey: wake up to `count` waiters on `key`, best
+    /// first (all of them when `count` is 0 or less, as libnx's -1 asks).
+    /// Each takes its mutex back: at once if it is free, otherwise it
+    /// waits for the mutex like svcArbitrateLock, with WAIT_MASK set.
+    pub fn signal_process_wide_key(&mut self, key: u64, count: i32) {
+        let mut woken = self.waiters(|w| matches!(w, Wait::CondVar { key: k, .. } if *k == key));
+        if count > 0 {
+            woken.truncate(count as usize);
+        }
+        for i in woken {
+            let Some(Wait::CondVar { mutex, tag, .. }) = self.sched.threads[i].wait else {
+                unreachable!("a condition variable waiter");
+            };
+            self.relock(i, mutex, tag);
+        }
+    }
+
+    /// Thread `i`, signalled, takes the mutex at `addr` back with `tag`.
+    /// A mutex word that became unusable, or names no thread, ends the
+    /// wait with the check's result code (kestrel's choice).
+    fn relock(&mut self, i: usize, addr: u64, tag: u32) {
+        if let Err(code) = self.check_word(addr) {
+            return self.wake(i, code, None);
+        }
+        let value = self.word(addr);
+        if value == 0 {
+            self.set_word(addr, tag);
+            return self.wake(i, result::SUCCESS, None);
+        }
+        let Some(owner) = self.tag_owner(value & !WAIT_MASK) else {
+            return self.wake(i, result::INVALID_HANDLE, None);
+        };
+        self.set_word(addr, value | WAIT_MASK);
+        let t = &mut self.sched.threads[i];
+        t.wait = Some(Wait::Lock { addr, owner, tag });
+        t.state = State::Waiting { until: None };
     }
 
     /// svcCancelSynchronization: end the thread's svcWaitSynchronization
@@ -269,6 +444,184 @@ mod tests {
             Some(id),
             "slot reused"
         );
+    }
+
+    /// Mutex and condition variable words.
+    const M: u64 = 0x11_0000;
+    const K: u64 = 0x11_0040;
+
+    fn words(p: &mut Process) {
+        p.mem.map(M & !0xfff, 0x1000, Perm::RW, "words").unwrap();
+    }
+
+    /// Two threads on core 1 at priorities 0x2c and 0x20, started; returns
+    /// their handles. The main thread keeps running.
+    fn two_workers(p: &mut Process) -> (u64, u64) {
+        let a = spawn(p, 0x2000, 0x2c, 1);
+        let b = spawn(p, 0x3000, 0x20, 1);
+        svc(p, nr::START_THREAD, &[a]);
+        svc(p, nr::START_THREAD, &[b]);
+        (a, b)
+    }
+
+    /// What libnx's mutexLock does once it sees the mutex held by `owner`:
+    /// set the wait bit and ask the kernel.
+    fn lock_contended(p: &mut Process, owner: u64, me: u64) -> u64 {
+        let v = p.mem.read32(M).unwrap();
+        p.mem.write32(M, v | WAIT_MASK).unwrap();
+        svc(p, nr::ARBITRATE_LOCK, &[owner, M, me]).0
+    }
+
+    #[test]
+    fn unlocking_hands_the_mutex_to_the_best_waiter() {
+        let mut p = process();
+        words(&mut p);
+        let main = p.main_thread as u64;
+        let (a, b) = two_workers(&mut p);
+        p.mem.write32(M, main as u32).unwrap(); // the main thread owns it
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x3000, "b, the better priority on core 1");
+        lock_contended(&mut p, main, b);
+        assert_eq!(running(&p), 0x1000, "b waits; the next core runs");
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x2000);
+        lock_contended(&mut p, main, a);
+        assert_eq!(running(&p), 0x1000, "both wait; the main thread runs");
+        assert_eq!(p.mem.read32(M).unwrap(), main as u32 | WAIT_MASK);
+        // Unlock: b (priority 0x20) gets it; a still waits, now on b.
+        assert_eq!(svc(&mut p, nr::ARBITRATE_UNLOCK, &[M]).0, 0);
+        assert_eq!(p.mem.read32(M).unwrap(), b as u32 | WAIT_MASK);
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!((running(&p), p.cpu.x[0]), (0x3000, 0));
+        assert_eq!(svc(&mut p, nr::ARBITRATE_UNLOCK, &[M]).0, 0);
+        assert_eq!(p.mem.read32(M).unwrap(), a as u32, "no waiters left");
+        svc(&mut p, nr::EXIT_THREAD, &[]);
+        assert_eq!(running(&p), 0x1000, "core 0 is next after core 1");
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!((running(&p), p.cpu.x[0]), (0x2000, 0));
+        // Unlocking with no waiters clears the word.
+        assert_eq!(svc(&mut p, nr::ARBITRATE_UNLOCK, &[M]).0, 0);
+        assert_eq!(p.mem.read32(M).unwrap(), 0);
+    }
+
+    #[test]
+    fn arbitrate_lock_returns_at_once_when_the_word_changed() {
+        let mut p = process();
+        words(&mut p);
+        let main = p.main_thread as u64;
+        let (a, _) = two_workers(&mut p);
+        // The word does not read a | WAIT_MASK: nothing to wait for.
+        p.mem.write32(M, a as u32).unwrap();
+        assert_eq!(svc(&mut p, nr::ARBITRATE_LOCK, &[a, M, main]).0, 0);
+        assert_eq!(running(&p), 0x1000);
+        p.mem.write32(M, 0).unwrap();
+        assert_eq!(svc(&mut p, nr::ARBITRATE_LOCK, &[a, M, main]).0, 0);
+        assert_eq!(running(&p), 0x1000);
+    }
+
+    #[test]
+    fn mutex_calls_check_their_arguments() {
+        let mut p = process();
+        words(&mut p);
+        let main = p.main_thread as u64;
+        let lock = |p: &mut Process, owner: u64, addr: u64| {
+            svc(p, nr::ARBITRATE_LOCK, &[owner, addr, main]).0
+        };
+        assert_eq!(lock(&mut p, main, M + 2), result::INVALID_ADDRESS);
+        assert_eq!(
+            lock(&mut p, main, 0x50_0000),
+            result::INVALID_CURRENT_MEMORY
+        );
+        assert_eq!(lock(&mut p, 0x1234, M), result::INVALID_HANDLE);
+        assert_eq!(
+            svc(&mut p, nr::ARBITRATE_UNLOCK, &[M + 1]).0,
+            result::INVALID_ADDRESS
+        );
+        let wait = |p: &mut Process, mutex: u64, key: u64| {
+            svc(p, nr::WAIT_PROCESS_WIDE_KEY_ATOMIC, &[mutex, key, main, 0]).0
+        };
+        assert_eq!(wait(&mut p, M + 1, K), result::INVALID_ADDRESS);
+        assert_eq!(wait(&mut p, M, K + 2), result::INVALID_ADDRESS);
+        assert_eq!(wait(&mut p, 0x50_0000, K), result::INVALID_CURRENT_MEMORY);
+    }
+
+    #[test]
+    fn a_signalled_condition_variable_waiter_takes_its_mutex_back() {
+        let mut p = process();
+        words(&mut p);
+        let main = p.main_thread as u64;
+        let a = spawn(&mut p, 0x2000, 0x2c, 1);
+        svc(&mut p, nr::START_THREAD, &[a]);
+        p.mem.write32(M, main as u32).unwrap();
+        // The wait releases the mutex.
+        svc(
+            &mut p,
+            nr::WAIT_PROCESS_WIDE_KEY_ATOMIC,
+            &[M, K, main, u64::MAX],
+        );
+        assert_eq!(running(&p), 0x2000);
+        assert_eq!(p.mem.read32(M).unwrap(), 0);
+        // a takes the mutex and signals: the main thread must wait for a.
+        p.mem.write32(M, a as u32).unwrap();
+        assert_eq!(svc(&mut p, nr::SIGNAL_PROCESS_WIDE_KEY, &[K, 1]).0, 0);
+        assert_eq!(p.mem.read32(M).unwrap(), a as u32 | WAIT_MASK);
+        assert_eq!(running(&p), 0x2000);
+        // a unlocks: the main thread owns the mutex and returns success.
+        svc(&mut p, nr::ARBITRATE_UNLOCK, &[M]);
+        assert_eq!(p.mem.read32(M).unwrap(), main as u32);
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!((running(&p), p.cpu.x[0]), (0x1000, 0));
+    }
+
+    #[test]
+    fn a_condition_variable_wait_can_time_out_without_the_mutex() {
+        let mut p = process();
+        words(&mut p);
+        let main = p.main_thread as u64;
+        p.mem.write32(M, main as u32).unwrap();
+        let rc = svc(&mut p, nr::WAIT_PROCESS_WIDE_KEY_ATOMIC, &[M, K, main, 0]).0;
+        assert_eq!(rc, result::TIMED_OUT);
+        assert_eq!(p.mem.read32(M).unwrap(), 0, "released, not taken back");
+        p.mem.write32(M, main as u32).unwrap();
+        svc(
+            &mut p,
+            nr::WAIT_PROCESS_WIDE_KEY_ATOMIC,
+            &[M, K, main, 1_000_000],
+        );
+        assert_eq!(p.cpu.x[0], result::TIMED_OUT);
+        assert_eq!(p.mem.read32(M).unwrap(), 0);
+    }
+
+    #[test]
+    fn signal_wakes_the_best_waiters_or_all_of_them() {
+        let mut p = process();
+        words(&mut p);
+        let (a, b) = two_workers(&mut p);
+        let (ma, mb) = (M + 0x100, M + 0x104);
+        // b (the better priority) runs first on core 1 and waits on K with
+        // its own mutex word; then a does.
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x3000);
+        svc(
+            &mut p,
+            nr::WAIT_PROCESS_WIDE_KEY_ATOMIC,
+            &[mb, K, b, u64::MAX],
+        );
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x2000);
+        svc(
+            &mut p,
+            nr::WAIT_PROCESS_WIDE_KEY_ATOMIC,
+            &[ma, K, a, u64::MAX],
+        );
+        assert_eq!(running(&p), 0x1000);
+        // One: b, the better priority, takes its free mutex back.
+        svc(&mut p, nr::SIGNAL_PROCESS_WIDE_KEY, &[K, 1]);
+        assert_eq!(p.mem.read32(mb).unwrap(), b as u32);
+        assert_eq!(p.mem.read32(ma).unwrap(), 0, "a still waits");
+        // All the rest: -1.
+        svc(&mut p, nr::SIGNAL_PROCESS_WIDE_KEY, &[K, -1i64 as u64]);
+        assert_eq!(p.mem.read32(ma).unwrap(), a as u32);
     }
 
     #[test]
