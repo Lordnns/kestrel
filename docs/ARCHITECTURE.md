@@ -146,6 +146,14 @@ method; the methods live next to the state they change:
   and the program on a worker thread, and maps keys and gamepads as
   `user/config/input.cfg` says (`input_config.rs`). The self-test uses a
   scripted Source instead.
+- The display: a program registers memory with nvdrv's /dev/nvmap
+  (`hle/service/nv.rs`) and hands it to its layer's buffer queue through
+  vi:u's binder relay (`hle/service/vi.rs`). A queued buffer is read from
+  the program's memory and turned into pixels (`hle/display.rs`: block
+  linear, pixel formats) for `Process::screen`, a
+  `kestrel_hle::display::Screen`: the window paints it, the self-test
+  records a CRC-32 of it. Buffers are freed at a 60 Hz vsync of guest
+  time, which the scheduler wakes for.
 - Whatever kestrel does not implement (an SVC, a named port, a service,
   a command or a CMIF control command) stops the program with
   `Stop::Unimplemented`, which names it with its identifiers; services

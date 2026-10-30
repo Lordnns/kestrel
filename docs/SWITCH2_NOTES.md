@@ -78,6 +78,16 @@ the owner legally has) but never includes its code or data.
 - Used by: `hle/service/am.rs` still answers OpenSession and
   GetPerformanceMode, because libnx opens apm for every application.
 
+### /dev/nvhost-ctrl ioctls added
+
+- Kind: public source
+- Source: Switchbrew, "NV services", /dev/nvhost-ctrl (rows marked [S2]).
+- Behaviour: on Switch 2, /dev/nvhost-ctrl also takes ALLOC_SYNCPT
+  (0xc0080027), FREE_SYNCPT (0x40040028), GET_CHARACTERISTICS
+  (0xc010002a) and CHECK_MODULE_SUPPORT (0xc008002b).
+- Used by: not implemented; `hle/service/nv.rs` opens /dev/nvhost-ctrl
+  and stops on every ioctl to it until the GPU work of phase 5.
+
 ## Observations
 
 None yet.

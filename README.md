@@ -51,8 +51,9 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   sends at startup, hid with its shared memory and one controller,
   the time service (clocks that start at 2025-06-05 00:00 UTC and run
   with the guest's clock, in the UTC time zone), the file system
-  with the SD card as a folder on your computer, and the battery state of
-  a docked console.
+  with the SD card as a folder on your computer, the battery state of
+  a docked console, and the display (vi and the GPU driver's memory
+  handles), so a program's framebuffer shows in the window.
 - **Error reports**: when a program aborts or throws a fatal error, kestrel
   prints the reason and its result code as the console writes it, with
   the module's name (`guest aborted (Panic) at 0x...: result 2345-0033
@@ -85,9 +86,10 @@ differently are refused. Games can be run from any folder.
 ### The window and controls
 
 A homebrew program opens a window (`--headless` runs it without one).
-There are no graphics yet, so the window stays a plain dark grey; its
-job is to take your keyboard and gamepads and give them to the program
-as a Switch controller. Text output still goes to the terminal.
+The window shows what the program draws into its framebuffer (there is
+no GPU yet, so programs that render with it show nothing), and takes
+your keyboard and gamepads and gives them to the program as a Switch
+controller. Text a program prints for debugging goes to the terminal.
 
 kestrel emulates one controller, a Pro Controller by default. Which keys
 and gamepad buttons press what is set in `user/config/input.cfg` next to
@@ -139,7 +141,7 @@ cargo run --release -p kestrel-cli -- selftest
 
 ## Self-test and test programs
 
-`kestrel selftest` runs twenty-one ARM64 programs compiled into the binary and
+`kestrel selftest` runs twenty-two ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
 by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
 nothing but the executable. Each integer C program is in the suite twice:
@@ -167,6 +169,7 @@ built integer-only, and built with floating point and NEON allowed
 | `hbhid`      | a homebrew NRO setting up input as libnx does: hid's applet resource and npad setup, and mapping its shared memory, with each kind of bad mapping |
 | `hbfs`       | a homebrew NRO using the file system as libnx does: fsp-srv as a domain with cloned sessions, then creating, writing, reading, listing, renaming and deleting on an empty SD card, with bad paths and locked files |
 | `hbinput`    | a homebrew NRO reading player 1 as libnx's padUpdate does, while the self-test plays a scripted Pro Controller |
+| `hbdisplay`  | a homebrew NRO setting up the display as libnx does (vi, nvdrv, the buffer queue) and showing three frames; the self-test checks each frame |
 | `hbpower`    | a homebrew NRO reading the battery and charger state through psm, then sending a debugger-only svcBreak and a report-only fatal error, after which it carries on |
 | `hbtime`     | a homebrew NRO starting the time service as libnx does: the clocks, reading them from shared memory with CNTPCT_EL0, calendar times in UTC, and the clocks moving with a sleep |
 

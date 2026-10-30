@@ -887,20 +887,59 @@ services", "NV services"):
 Steps:
 1. Owner: install Docker Desktop. Then a script that builds the four
    examples at the pinned commits in the container.
-2. Display services: vi:u, the layer, the binder relay and the buffer
-   queue, with a vsync clock in guest time (buffers are released at
-   60 Hz, and the scheduler wakes for it), and am's
+2. Done: display services: vi:u, the layer, the binder relay and the
+   buffer queue, with a vsync clock in guest time (buffers are released
+   at 60 Hz, and the scheduler wakes for it), and am's
    CreateManagedDisplayLayer.
-3. nvdrv and nvmap, with CloneCurrentObjectEx.
-4. Frames: block-linear to linear (from a public description of the
-   layout, not libnx's code), colour formats, a `Screen` sink like
-   `input::Source`; the window shows the frames.
-5. A homebrew test program `hbdisplay` drawing a known pattern, with a
-   model of the expected frame.
+3. Done: nvdrv and nvmap, with CloneCurrentObjectEx and
+   QueryPointerBufferSize.
+4. Done: frames: block-linear to linear (envytools for the blocks, Mesa's
+   `nil/tiling.rs` for the Tegra GOB, not libnx's code), colour formats,
+   a `Screen` sink like `input::Source`; the window shows the frames.
+5. Done: `hbdisplay`, drawing three frames of a known pattern; the
+   self-test adds a CRC-32 line per frame shown, and the model renders
+   the pattern straight to RGB.
 6. The examples: run each, fix what the unimplemented-call log names,
    press Plus from a scripted controller, compare the final frame.
 7. CI: build the examples in the container on release tags and run them
    on all five platforms.
+
+How the display works (`hle/display.rs`, `hle/service/vi.rs`,
+`hle/service/nv.rs`):
+- nvmap objects record the program's memory (ALLOC's address); nothing
+  is copied. A buffer given to the queue (SET_PREALLOCATED_BUFFER) names
+  its nvmap object, offset and surface (size, Android pixel format,
+  layout, pitch, block height), read from the GraphicBuffer's ints.
+- QUEUE_BUFFER reads the buffer from the program's memory, converts it
+  to 0x00RRGGBB pixels and gives the frame to `Process::screen` at once;
+  the buffer is freed at the next vsync of guest time. The buffer-free
+  event (GetNativeHandle 0x0f) is signalled while a buffer is free. The
+  scheduler's idle jump also stops at the next vsync with a queued
+  buffer (`vi::State::next_release`).
+- The window's Screen keeps the newest frame and asks the window to
+  repaint; the self-test's records a CRC-32 per frame.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Pointer buffer size (QueryPointerBufferSize) | 0x8000 on every session, so libnx sends parcels and ioctls as pointers |
+| sm: NotAllowed | vi:m and vi:s, as for an application; other unknown services still stop |
+| IDs | display "Default" 1, layer 1, binder 1; nvdrv descriptors and nvmap handles count from 1; an nvmap ID is its handle |
+| Display resolution | 1920x1080 (the docked console; "VI services" gives 1080p for "Default") |
+| Queue size before buffers | 1280x720 |
+| nvdrv Initialize | the transfer memory is checked, not kept or used |
+| DEQUEUE_BUFFER | the free buffer freed longest ago, an NvMultiFence with no fences; none free: WOULD_BLOCK (-11) |
+| Showing a frame | at QUEUE_BUFFER; the buffer is freed at the next vsync, 60 Hz of the 19.2 MHz clock (320,000 ticks) |
+| RGB 565 | each channel's top bits repeated below it, so full intensity is 0xff |
+| Window | the frame as large as fits with its shape kept, centred, sharp pixels |
+
+Gaps:
+- Pixel formats RGBA 8888, RGBX 8888, BGRA 8888 and RGB 565 only; others
+  stop when a buffer is set.
+- No GPU: only /dev/nvmap takes ioctls; /dev/nvhost-ctrl opens and stops
+  on any ioctl, and no fences exist. Phase 5.
+- Not yet: GetDisplayVsyncEvent, CreateStrayLayer, the QUERY transaction,
+  other displays, the swap interval (every queued buffer is freed at the
+  next vsync), layer position and size.
 
 Phase 3 on macOS (needs a session on the owner's Mac, since
 Hypervisor.framework is macOS-only): the memory arena refactor, the
