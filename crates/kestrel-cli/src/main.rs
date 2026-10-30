@@ -2,6 +2,7 @@
 
 #[cfg(feature = "window")]
 mod input_config;
+mod unattended;
 #[cfg(feature = "window")]
 mod window;
 
@@ -43,6 +44,13 @@ RUN OPTIONS:
     --headless                           No window for a homebrew NRO; the
                                          window maps keys and gamepads as
                                          user/config/input.cfg says
+    --press <button>@<seconds>           Press a button (Switchbrew's name:
+                                         A, Plus, Up...) for 100 ms, at that
+                                         time of the controller's samples;
+                                         repeatable; replaces the window's
+                                         controls
+    --save-frame <file.png>              Save the last frame the program
+                                         showed
     -- args...                           Arguments for a homebrew NRO (argv[0]
                                          is its file name)
 ";
@@ -56,6 +64,8 @@ struct Opts {
     stats: bool,
     sd: Option<PathBuf>,
     headless: bool,
+    presses: Vec<unattended::Press>,
+    save_frame: Option<PathBuf>,
     args: Vec<String>,
 }
 
@@ -71,6 +81,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         stats: false,
         sd: None,
         headless: false,
+        presses: Vec::new(),
+        save_frame: None,
         args: Vec::new(),
     };
     while let Some(a) = it.next() {
@@ -90,6 +102,12 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--stats" => o.stats = true,
             "--sd" => o.sd = Some(it.next().ok_or("--sd needs a folder")?.into()),
             "--headless" => o.headless = true,
+            "--press" => o
+                .presses
+                .push(it.next().ok_or("--press needs a value")?.parse()?),
+            "--save-frame" => {
+                o.save_frame = Some(it.next().ok_or("--save-frame needs a file")?.into())
+            }
             "--" => {
                 o.args = it.by_ref().cloned().collect();
             }
@@ -313,6 +331,16 @@ fn emulate(
         proc.screen = Some(screen);
         proc.interrupt = Some(interrupt);
     }
+    if !o.presses.is_empty() {
+        proc.input = Some(Box::new(unattended::Scripted(o.presses.clone())));
+    }
+    let last_frame = std::rc::Rc::new(std::cell::RefCell::new(None));
+    if o.save_frame.is_some() {
+        proc.screen = Some(Box::new(unattended::Keep {
+            last: last_frame.clone(),
+            inner: proc.screen.take(),
+        }));
+    }
     let max_steps = o
         .max_steps
         .unwrap_or(if windowed { u64::MAX } else { 10_000_000_000 });
@@ -333,6 +361,13 @@ fn emulate(
     let t0 = Instant::now();
     let stop = proc.run(backend.as_mut(), max_steps);
     let elapsed = t0.elapsed();
+    if let Some(path) = &o.save_frame {
+        match &*last_frame.borrow() {
+            Some(frame) => std::fs::write(path, unattended::png(frame))
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?,
+            None => eprintln!("note: the program showed no frame to save"),
+        }
+    }
 
     if o.regs {
         eprintln!("{:?}", proc.cpu);
