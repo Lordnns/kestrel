@@ -11,7 +11,8 @@
 //!   yields, as on the console, where a core does not time-slice them.
 //! - The cores take turns on the host thread: kestrel moves on to the next
 //!   core with a ready thread when the running thread yields, sleeps or
-//!   exits.
+//!   exits, or has run for a slice of `SLICE` instructions, so a thread
+//!   spinning on one core cannot starve the others.
 //! - One process-wide clock counts guest instructions as ticks of the
 //!   documented 19.2 MHz counter ("SVC", GetSystemTick). When every live
 //!   thread sleeps, the clock jumps to the earliest wake-up.
@@ -32,6 +33,9 @@ pub const DEFAULT_CORE: u32 = 0;
 pub const MAIN_PRIORITY: u32 = 0x2c;
 /// The lowest priority; 0 is the highest ("SVC", SetThreadPriority).
 pub const LOWEST_PRIORITY: u32 = 0x3f;
+/// Instructions a core runs before the next core gets its turn: 1 ms of
+/// the 19.2 MHz clock. Kestrel's choice.
+pub const SLICE: u64 = 19_200;
 /// The size of a thread local region ("Thread Local Region").
 pub const TLR_SIZE: u64 = 0x200;
 /// Thread local regions per page: the first slot of each page is reserved
@@ -87,6 +91,8 @@ pub struct Scheduler {
     pub idle: u64,
     /// Set by a call after which the next core should get its turn.
     pub(crate) rotate: bool,
+    /// Instructions left in the running core's slice.
+    pub(crate) slice_left: u64,
 }
 
 impl Scheduler {
@@ -419,6 +425,9 @@ impl Process {
                     .min_by_key(|(_, t)| (t.priority, t.turn))
                     .map(|(i, _)| i);
                 if let Some(i) = best {
+                    if rotate || i != self.sched.current {
+                        self.sched.slice_left = SLICE;
+                    }
                     self.switch_to(i);
                     self.reap();
                     return None;
@@ -722,6 +731,21 @@ mod tests {
         svc(&mut p, nr::START_THREAD, &[h]);
         assert_eq!(running(&p), 0x2000);
         assert_eq!(p.sched.threads[0].cpu.exclusive_addr, None);
+    }
+
+    #[test]
+    fn a_slice_is_reset_when_another_thread_or_core_gets_its_turn() {
+        let mut p = process();
+        assert_eq!(p.sched.slice_left, SLICE);
+        p.sched.slice_left = 5;
+        svc(&mut p, nr::GET_SYSTEM_TICK, &[]);
+        assert_eq!(p.sched.slice_left, 5, "no switch, same slice");
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(p.sched.slice_left, SLICE);
+        p.sched.slice_left = 5;
+        let h = spawn(&mut p, 0x2000, 0x20, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(p.sched.slice_left, SLICE);
     }
 
     #[test]

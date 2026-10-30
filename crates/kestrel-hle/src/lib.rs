@@ -150,6 +150,7 @@ impl Process {
         let main = &mut p.sched.threads[0];
         main.state = thread::State::Ready;
         p.cpu = std::mem::take(&mut main.cpu);
+        p.sched.slice_left = thread::SLICE;
         Ok(p)
     }
 
@@ -184,7 +185,12 @@ impl Process {
             if used >= max_steps {
                 return Stop::StepLimit;
             }
-            match backend.run(&mut self.cpu, &mut self.mem, max_steps - used) {
+            let budget = (max_steps - used).min(self.sched.slice_left);
+            let before = self.cpu.retired;
+            let exit = backend.run(&mut self.cpu, &mut self.mem, budget);
+            let ran = self.cpu.retired - before;
+            self.sched.slice_left = self.sched.slice_left.saturating_sub(ran);
+            match exit {
                 Exit::Svc(n) => {
                     self.svc_count += 1;
                     if let Some(stop) = svc::dispatch(self, n) {
@@ -218,6 +224,12 @@ impl Process {
                     return Stop::Error(format!("guest fault at pc {pc:#x}: {fault}"))
                 }
                 Exit::StepLimit => {}
+            }
+            // The core used up its slice: the next core gets a turn.
+            if self.sched.slice_left == 0 {
+                if let Some(stop) = self.schedule(true) {
+                    return stop;
+                }
             }
         }
     }
