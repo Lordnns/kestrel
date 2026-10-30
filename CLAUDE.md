@@ -137,6 +137,13 @@ are harmless elsewhere.
   they put real newlines and NUL bytes into files, twice already. Write
   edit scripts and commit messages to files with the Write tool, then
   run them. Long heredocs with nested quotes also fail.
+- Before committing, check edited files for NUL bytes (with a script
+  file, not a shell one-liner).
+- Give each commit message its own new file (for example
+  `msg_<topic>.txt`) and `git commit -F` it: reusing one file once
+  committed with the previous message.
+- `cargo fmt` may reflow code between edits; re-read a file before
+  matching multi-line text in it.
 - Files may have CRLF endings (`core.autocrlf=true`); edit scripts should
   normalise to LF before matching and restore after. Python's default
   encoding there is cp1252: open files with `encoding="utf-8"`.
@@ -150,7 +157,8 @@ are harmless elsewhere.
   ARM64 guest code as the host. The real check is the guest build.
 - gh is at `"/c/Program Files/GitHub CLI/gh.exe"` (account Lordnns, repo
   `Lordnns/kestrel`); `gh run view <id> --job <job id> --log` reads CI
-  logs. The docker CLI is under
+  logs, and a run's jobs and annotations also come from the REST API
+  without logging in. The docker CLI is under
   `C:/Program Files/Docker/Docker/resources/bin` when PATH is stale, and
   Docker Desktop must be running.
 - A single self-test run varies by about 5 MIPS; run it three times
