@@ -52,7 +52,7 @@ qemu for Linux ARM64.
 | Process layout reporting | done, with the gaps below | `hle::layout` is one documented 39-bit layout; svcGetInfo (`svc.rs`) answers types 2-8, 11-18, 21-23; self-test program `hblayout` checks the layout's documented properties |
 | Memory SVCs | done, with the gaps below | `hle/memory.rs`: memory types per mapping, svcQueryMemory, svcSetHeapSize in place with its checks, svcSetMemoryPermission, svcSetMemoryAttribute, svcMapMemory/svcUnmapMemory, svcMapPhysicalMemory/svcUnmapPhysicalMemory; `Memory` range operations in `kestrel-core`; self-test program `hbmemory` |
 | Handle table and kernel objects | done, with the gaps below | `hle/kernel.rs`: per-process handle table, objects alive while a handle names them; svcCloseHandle, svcGetThreadId, svcGetProcessId, svcCreateEvent, svcSignalEvent, svcClearEvent, svcResetSignal; svcCreateTransferMemory in `hle/memory.rs`; the main thread has a real handle; self-test program `hbhandles` |
-| Threads | not started | one thread; SleepThread returns at once |
+| Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | not started | none |
 | IPC | not started | none |
 | First services | not started | none |
@@ -224,8 +224,9 @@ handle gives InvalidHandle 0xe401 and a wrong subtype InvalidCombination
 
 Gaps:
 
-- Types 0, 1, 9, 10, 19, 20, 24-26 and unknown types stop with an explicit
-  "unimplemented svcGetInfo type" message.
+- Types 9, 10, 19, 20, 24-26 and unknown types stop with an explicit
+  "unimplemented svcGetInfo type" message. Types 0 (CoreMask) and 1
+  (PriorityMask) came with threads.
 - The ELF test programs stay at 0x200000, below the address space.
 
 Memory system calls, from Switchbrew's "SVC" page (ABIs, MemoryType and
@@ -237,7 +238,7 @@ MemoryAttribute tables, result codes). Every mapping carries its type:
 | Image, writable parts | CodeData 0x3febd04 |
 | Heap, svcMapPhysicalMemory, homebrew config | Normal 0x37ebd05 |
 | Main thread stack, svcMapMemory destination | Stack 0x5c3c0b |
-| TLS page | ThreadLocal 0x40200c |
+| Thread local region pages | ThreadLocal 0x40200c |
 
 svcQueryMemory merges neighbours with the same type, attribute and
 permission. Unmapped memory is reported as the gap up to the nearest
@@ -285,7 +286,7 @@ Gaps:
   attribute or outside the address space refused with 0xd401.
 - svcResetSignal on a process stops as unsupported: process state changes
   are not modelled.
-- Nothing waits on events yet (synchronisation comes with threads).
+- Nothing waits on events yet (synchronisation is the next task).
 - Shared memory has no object yet. A program cannot create one itself
   (svcCreateSharedMemory is for system modules), so it arrives with the
   first service that hands one out (input), together with
@@ -300,26 +301,74 @@ names of Switchbrew's error table (0xd401 InvalidCurrentMemory, 0xd801
 InvalidNewMemoryPermission, 0xdc01 InvalidMemoryRegion, 0xfa01
 InvalidState).
 
+Threads, from Switchbrew's "SVC" page (CreateThread, StartThread,
+ExitThread, SleepThread, the priority and core mask calls,
+GetCurrentProcessorNumber, GetSystemTick) and its "Thread Local Region"
+page. Each thread has a record in `hle/thread.rs` and a kernel object; the
+main thread is the first.
+
+| Call | Behaviour |
+|------|-----------|
+| svcCreateThread | priority 0 to 0x3F (InvalidPriority 0xe001), processor 0 to 3 or -2 (InvalidCoreId 0xe201); the thread starts with X0 = argument, SP = stack top, TPIDRRO_EL0 = its zeroed thread local region |
+| svcStartThread | the thread becomes ready; a higher priority on the caller's core takes over at once |
+| svcExitThread | the thread ends; its handles stay valid; the process ends with its last thread |
+| svcSleepThread | 0, -1, -2 yield; a positive time sleeps on the process clock |
+| svcSet/GetThreadPriority | 0 to 0x3F; the thread goes behind its new equals |
+| svcSet/GetThreadCoreMask | ideal core and affinity mask; the thread moves to its new ideal core |
+
+Scheduling is not documented, so the model is kestrel's, chosen to behave
+like the console where programs can tell and to repeat exactly:
+
+- Four virtual cores. On each, the ready thread with the best priority
+  runs; equal priorities take turns only on yield, as the console does
+  not time-slice them.
+- The cores take turns on one host thread: on yield, sleep and exit, and
+  after a slice of 19,200 instructions (1 ms of guest time), so a thread
+  spinning on one core cannot starve the others.
+- One clock for the process: an instruction is one tick of the 19.2 MHz
+  counter. When every thread sleeps, the clock jumps to the next wake-up
+  without counting instructions.
+- A thread switch clears the outgoing thread's exclusive monitor, so a
+  store-exclusive another thread may have overtaken fails and retries.
+  `hbthreads` fails without this (lost increments).
+- Thread local regions are 0x200 bytes from page + 0x200 (slot 0 of each
+  page is reserved), zeroed, with pages mapped as needed and slots reused.
+
+Gaps:
+
+- Where Switchbrew is silent, kestrel chose: core 0 for the main thread
+  and for ProcessorId -2, main thread priority 0x2c, thread IDs counting
+  up from 0x100, InvalidState 0xfa01 for starting a thread twice, the
+  svcSetThreadCoreMask checks (core 0 to 3 and a non-empty mask of cores
+  0 to 3, else InvalidCoreId; the ideal core in the mask, else
+  InvalidCombination), the slice length, and stopping with an error when
+  the only threads left were never started.
+- Threads never migrate between cores, so the three yield kinds behave
+  alike and the affinity mask only constrains svcSetThreadCoreMask.
+- Undocumented values stop the process: svcSleepThread with other
+  negative times, svcSetThreadCoreMask with a negative ideal core.
+- svcGetSystemTick and CNTVCT_EL0 read the process clock; reading
+  CNTPCT_EL0 directly, as official software does, is not supported yet.
+- No limit on the number of threads beyond the handle table.
+
 ## Next task
 
-Phase 2, threads: svcCreateThread, svcStartThread, svcExitThread, a real
-svcSleepThread (sleep and the yield variants), svcGetThreadPriority and
-svcSetThreadPriority, the core mask calls and svcGetCurrentProcessorNumber,
-with a thread-local storage page per thread. Threads run on a cooperative
-scheduler on one host thread (`PLAN.md` phase 2 provision), switching on
-sleep, yield and exit; preemption by instruction budget comes after.
-Each thread is a kernel object in the handle table.
+Phase 2, synchronisation: a waiting state in the scheduler with
+timeouts on the process clock, and the calls built on it:
+svcWaitSynchronization on readable events and threads (signaled when
+they exit), svcCancelSynchronization, svcArbitrateLock and
+svcArbitrateUnlock, svcWaitProcessWideKeyAtomic and
+svcSignalProcessWideKey, svcWaitForAddress and svcSignalToAddress.
+svcSignalEvent wakes waiting threads. A process whose threads all wait
+with no timeout stops with a deadlock error naming what each waits on.
 
 ### Order after that
 
-1. Phase 2: synchronisation (svcWaitSynchronization on threads and
-   events, svcCancelSynchronization, mutex arbitration, condition
-   variables, address-based wait and signal).
-2. Then two tracks in parallel (`PLAN.md` phase 3 priority):
+1. Two tracks in parallel (`PLAN.md` phase 3 priority):
    - Phase 2: IPC, first services, SD folder option, unimplemented-call log.
    - Phase 3 on macOS: memory arena refactor, native backend,
      differential tester.
-3. Phase 2 acceptance (homebrew console examples on all five platforms),
+2. Phase 2 acceptance (homebrew console examples on all five platforms),
    then phase 3 on Linux KVM and Windows.
 
 Owner decisions pending in `PLAN.md` section 7 (strategy, API-level

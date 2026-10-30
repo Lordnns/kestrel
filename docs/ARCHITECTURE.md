@@ -104,11 +104,36 @@ method; the methods live next to the state they change:
   what it holds (transfer memory gets its permissions back). The
   pseudo-handles 0xffff8000 and 0xffff8001 name the current thread and
   process without occupying a slot.
+- `kestrel_hle::thread`: thread records and the scheduler. `Process::cpu`
+  holds the running thread's registers; the others' are saved in their
+  records.
 
-Today the process has one thread. Planned, in order: threads on a
-cooperative scheduler on one host thread, synchronisation, then IPC
-(sessions become kernel objects) and the system services, which will also
-create shared memory.
+### Scheduling
+
+Every thread runs on one host thread, so runs repeat exactly. Guest
+threads are spread over four virtual cores; each core runs its
+best-priority ready thread, and the cores take turns:
+
+```
+Process::run
+  └─ backend.run(cpu, budget = min(steps left, slice left))
+       ├─ Exit::Svc → svc::dispatch → schedule(rotate if the call yielded,
+       │                                        slept or exited)
+       └─ slice used up (19,200 instructions) → schedule(rotate)
+schedule: wake sleepers whose time came; pick the best ready thread of
+          this core (or of the next core with one, when rotating); if none
+          is ready, jump the clock to the next wake-up
+```
+
+`CpuState::retired` doubles as the process clock (one instruction per
+tick of the 19.2 MHz counter): a switch hands the clock to the incoming
+thread and clears the outgoing thread's exclusive monitor. Idle jumps are
+counted separately, so `Process::instructions` reports only executed
+instructions.
+
+Planned, in order: synchronisation (a waiting state with timeouts), then
+IPC (sessions become kernel objects) and the system services, which will
+also create shared memory.
 
 ## Graphics (planned)
 
