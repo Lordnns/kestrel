@@ -1,0 +1,74 @@
+homebrew fs test
+sm: register: 0x0000000000000000
+ConvertCurrentObjectToDomain: 0x0000000000000000
+its object: 1
+SetCurrentProcess: 0x0000000000000000
+CloneCurrentObject: 0x0000000000000000
+CloneCurrentObject: 0x0000000000000000
+each moved a session handle: yes
+OpenSdCardFileSystem: 0x0000000000000000
+it gave a domain object: yes
+GetEntryType /: directory
+CreateDirectory /switch: 0x0000000000000000
+CreateDirectory /switch again: 0x0000000000000402
+CreateDirectory /switch/kestrel: 0x0000000000000000
+CreateFile save.bin, 4 bytes: 0x0000000000000000
+CreateFile save.bin again: 0x0000000000000402
+CreateFile in a missing directory: 0x0000000000000202
+GetEntryType /switch/kestrel/save.bin: file
+GetEntryType /switch/nothing: 0x0000000000000202
+GetEntryType /switch/../switch: 0x00000000002eee02
+GetEntryType /a:b: 0x00000000002ee802
+GetEntryType switch: 0x00000000002eea02
+GetEntryType //: 0x00000000002eee02
+OpenFile for writing and appending: 0x0000000000000000
+Write 18 bytes: 0x0000000000000000
+OpenFile for writing: 0x0000000000000000
+Write past the end without append: 0x0000000000307202
+Write 1 byte at 0: 0x0000000000000000
+OpenFile for reading: 0x0000000000000000
+GetSize: 18
+Read 32 bytes: 0x0000000000000000
+bytes read: 18
+they say: Kestrel saves this
+Read at the end: 0x0000000000000000
+bytes read: 0
+Read at offset -1: 0x00000000002f5a02
+SetSize 7: 0x0000000000000000
+GetSize: 7
+they say: Kestrel
+Flush: 0x0000000000000000
+DeleteFile while it is open: 0x0000000000000e02
+RenameFile while it is open: 0x0000000000000e02
+CreateFile b.txt, 3 bytes: 0x0000000000000000
+CreateDirectory sub: 0x0000000000000000
+OpenDirectory, files and directories: 0x0000000000000000
+GetEntryCount: 3
+  b.txt file, attributes 0, size 3
+  save.bin file, attributes 0, size 7
+Read, room for 2: 2
+  sub directory, attributes 1, size 0
+Read, room for 2: 1
+Read, room for 2: 0
+OpenDirectory, directories only: 0x0000000000000000
+GetEntryCount: 1
+OpenDirectory of a file: 0x0000000000000202
+RenameFile save.bin to sub/save.bin: 0x0000000000000000
+GetEntryType /switch/kestrel/save.bin: 0x0000000000000202
+RenameFile onto an existing file: 0x0000000000000402
+RenameDirectory sub to data: 0x0000000000000000
+RenameDirectory of a file: 0x0000000000000202
+GetFileTimeStampRaw: 0x0000000000000000
+no timestamps (all zero): yes
+Commit: 0x0000000000000000
+DeleteFile data/save.bin: 0x0000000000000000
+DeleteFile again: 0x0000000000000202
+DeleteDirectory data: 0x0000000000000000
+DeleteDirectory of a file: 0x0000000000000202
+CleanDirectoryRecursively /switch/kestrel: 0x0000000000000000
+DeleteDirectoryRecursively /switch: 0x0000000000000000
+OpenDirectory /: 0x0000000000000000
+GetEntryCount: 0
+close the clones: 0x0000000000000000
+close fsp-srv: 0x0000000000000000
+close sm: 0x0000000000000000

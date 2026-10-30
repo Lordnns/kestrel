@@ -864,6 +864,119 @@ def hbtime():
     return "".join(line + "\n" for line in out)
 
 
+def hbfs():
+    """guest/src/nro/hbfs.c: the file system as libnx's fsInitialize,
+    fsdevMountSdmc and "sdmc:" device use it, on an empty SD card.
+    Switchbrew's "HIPC": ConvertCurrentObjectToDomain returns the object
+    ID, CloneCurrentObject a session handle. "Filesystem services":
+    SetCurrentProcess, OpenSdCardFileSystem returns an IFileSystem;
+    GetEntryType returns DirectoryEntryType (0 directory, 1 file); writing
+    past the end without the append bit is 0x307202; IDirectory Read
+    returns the entries it wrote, 0 once all are read, and GetEntryCount
+    the count; a DirectoryEntry has the attributes (bit 0 directory) and
+    the size, 0 for directories. "Error codes" (module 2): PathNotFound
+    0x202, PathAlreadyExists 0x402, TargetLocked 0xe02, InvalidCharacter
+    0x2ee802, InvalidPathFormat 0x2eea02, NotNormalized 0x2eee02,
+    InvalidOffset 0x2f5a02. Kestrel's documented choices (docs/ROADMAP.md,
+    phase 2 notes): which path gets which of those results; an open file
+    is TargetLocked for delete and rename; reading at the end reads
+    nothing; entries come in name order; no timestamps (all zero); the
+    file contents follow from the writes, modelled here as a bytearray."""
+    ok = hex64(0)
+    out = [
+        "homebrew fs test",
+        f"sm: register: {ok}",
+        f"ConvertCurrentObjectToDomain: {ok}",
+        "its object: 1",
+        f"SetCurrentProcess: {ok}",
+        f"CloneCurrentObject: {ok}",
+        f"CloneCurrentObject: {ok}",
+        "each moved a session handle: yes",
+        f"OpenSdCardFileSystem: {ok}",
+        "it gave a domain object: yes",
+        "GetEntryType /: directory",
+        f"CreateDirectory /switch: {ok}",
+        f"CreateDirectory /switch again: {hex64(0x402)}",
+        f"CreateDirectory /switch/kestrel: {ok}",
+        f"CreateFile save.bin, 4 bytes: {ok}",
+        f"CreateFile save.bin again: {hex64(0x402)}",
+        f"CreateFile in a missing directory: {hex64(0x202)}",
+        "GetEntryType /switch/kestrel/save.bin: file",
+        f"GetEntryType /switch/nothing: {hex64(0x202)}",
+        f"GetEntryType /switch/../switch: {hex64(0x2EEE02)}",
+        f"GetEntryType /a:b: {hex64(0x2EE802)}",
+        f"GetEntryType switch: {hex64(0x2EEA02)}",
+        f"GetEntryType //: {hex64(0x2EEE02)}",
+    ]
+    save = bytearray(4)  # CreateFile with size 4: zeroed
+    text = b"kestrel saves this"
+    save[0 : len(text)] = text  # the append bit lets it grow
+    out += [
+        f"OpenFile for writing and appending: {ok}",
+        f"Write 18 bytes: {ok}",
+        f"OpenFile for writing: {ok}",
+    ]
+    assert 16 + 4 > len(save)  # past the end, no append bit
+    out.append(f"Write past the end without append: {hex64(0x307202)}")
+    save[0:1] = b"K"
+    out += [
+        f"Write 1 byte at 0: {ok}",
+        f"OpenFile for reading: {ok}",
+        f"GetSize: {len(save)}",
+        f"Read 32 bytes: {ok}",
+        f"bytes read: {min(32, len(save))}",
+        f"they say: {save.decode()}",
+        f"Read at the end: {ok}",
+        "bytes read: 0",
+        f"Read at offset -1: {hex64(0x2F5A02)}",
+    ]
+    del save[7:]
+    out += [
+        f"SetSize 7: {ok}",
+        f"GetSize: {len(save)}",
+        f"they say: {save.decode()}",
+        f"Flush: {ok}",
+        f"DeleteFile while it is open: {hex64(0xE02)}",
+        f"RenameFile while it is open: {hex64(0xE02)}",
+        f"CreateFile b.txt, 3 bytes: {ok}",
+        f"CreateDirectory sub: {ok}",
+        f"OpenDirectory, files and directories: {ok}",
+    ]
+    listing = sorted([("b.txt", False, 3), ("save.bin", False, len(save)), ("sub", True, 0)])
+    out.append(f"GetEntryCount: {len(listing)}")
+    for start in range(0, len(listing) + 2, 2):  # until a read gives 0
+        chunk = listing[start : start + 2]
+        for name, is_dir, size in chunk:
+            kind = "directory" if is_dir else "file"
+            out.append(f"  {name} {kind}, attributes {int(is_dir)}, size {size}")
+        out.append(f"Read, room for 2: {len(chunk)}")
+    out += [
+        f"OpenDirectory, directories only: {ok}",
+        f"GetEntryCount: {sum(1 for e in listing if e[1])}",
+        f"OpenDirectory of a file: {hex64(0x202)}",
+        f"RenameFile save.bin to sub/save.bin: {ok}",
+        f"GetEntryType /switch/kestrel/save.bin: {hex64(0x202)}",
+        f"RenameFile onto an existing file: {hex64(0x402)}",
+        f"RenameDirectory sub to data: {ok}",
+        f"RenameDirectory of a file: {hex64(0x202)}",
+        f"GetFileTimeStampRaw: {ok}",
+        "no timestamps (all zero): yes",
+        f"Commit: {ok}",
+        f"DeleteFile data/save.bin: {ok}",
+        f"DeleteFile again: {hex64(0x202)}",
+        f"DeleteDirectory data: {ok}",
+        f"DeleteDirectory of a file: {hex64(0x202)}",
+        f"CleanDirectoryRecursively /switch/kestrel: {ok}",
+        f"DeleteDirectoryRecursively /switch: {ok}",
+        f"OpenDirectory /: {ok}",
+        "GetEntryCount: 0",
+        f"close the clones: {ok}",
+        f"close fsp-srv: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -883,6 +996,7 @@ PROGRAMS = {
     "hbapplet": hbapplet,
     "hbhid": hbhid,
     "hbtime": hbtime,
+    "hbfs": hbfs,
 }
 
 

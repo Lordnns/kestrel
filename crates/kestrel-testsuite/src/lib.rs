@@ -118,6 +118,7 @@ pub const CASES: &[Case] = &[
     homebrew!("hbapplet", "homebrew NRO: set:sys, apm, appletOE startup"),
     homebrew!("hbhid", "homebrew NRO: hid startup, shared memory"),
     homebrew!("hbtime", "homebrew NRO: time startup, clocks, UTC calendar"),
+    homebrew!("hbfs", "homebrew NRO: fsp-srv, the SD card folder"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
@@ -157,18 +158,30 @@ impl Outcome {
     }
 }
 
-/// Load and run one case on the requested backend.
+/// Load and run one case on the requested backend. A homebrew case gets
+/// an empty SD card, a new folder in the system's temporary directory that
+/// is removed afterwards, so every run starts the same.
 pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
-    let file_name = if kestrel_loader::is_nro(case.file) {
-        format!("{}.nro", case.name)
-    } else {
-        format!("{}.elf", case.name)
-    };
+    let nro = kestrel_loader::is_nro(case.file);
+    let file_name = format!("{}.{}", case.name, if nro { "nro" } else { "elf" });
     let mut proc = Process::load(case.file, &file_name, &case.args())?;
+    let sd = std::env::temp_dir().join(format!(
+        "kestrel-selftest-{}-{}",
+        std::process::id(),
+        case.name
+    ));
+    if nro {
+        let _ = std::fs::remove_dir_all(&sd);
+        std::fs::create_dir_all(&sd).map_err(|e| format!("cannot create {}: {e}", sd.display()))?;
+        proc.services.fs.sd = Some(sd.clone());
+    }
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
     let stop = proc.run(cpu.as_mut(), MAX_STEPS);
     let elapsed = t0.elapsed();
+    if nro {
+        let _ = std::fs::remove_dir_all(&sd);
+    }
     let output = proc.debug_output_str();
     Ok(Outcome {
         passed: stop == Stop::Exited && output == case.expected,
