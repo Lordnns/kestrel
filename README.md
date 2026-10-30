@@ -1,5 +1,20 @@
 # kestrel
 
+# ⚠️ DISCLAIMER — READ BEFORE USE ⚠️
+
+> [!CAUTION]
+> ## 🤖 This project was entirely VIBE CODED by Claude AI
+>
+> **The code, binaries and scripts in this repository have NOT been reviewed or verified by an actual developer.**
+>
+> - 🧪 This is **merely an experiment**, not production-ready software.
+> - ⚠️ **Use at your own risk.** It may contain bugs, security vulnerabilities, or behave in unexpected ways.
+> - 🚫 **I am not responsible** for any damage, data loss, hardware issues, or any other problem that may arise from using this project.
+> - 🔍 If you plan to use any part of it, **review and test the code yourself first.**
+>
+> By using, building, or running anything from this repository, you accept these terms.
+
+
 An experimental, clean-room ARM64 console emulator written in Rust, aimed at
 next-generation hybrid handheld consoles. It builds and runs on **x86_64 and
 aarch64 hosts** (Linux, macOS, Windows) from day one.
