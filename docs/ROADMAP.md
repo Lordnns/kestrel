@@ -547,6 +547,39 @@ checked by a homebrew test program:
 4. Host input into hid's shared memory, with the frontend (window and
    keyboard or gamepad), once there is one.
 
+Before starting time, ask the owner which fixed date and time zone to
+report (the proposal: a fixed clock, so runs repeat). Record the answer
+in `hle::firmware` or next to it, as with the system version.
+
+Each service so far followed the same steps; keep them:
+
+1. Sources: the Switchbrew page as wiki source
+   (`https://switchbrew.org/w/index.php?title=<Page>&action=raw`, for
+   example `HID_services`, `Applet_Manager_services`, `SVC`), and the
+   libnx client code that sends the requests (`nx/source/services/*.c`,
+   `nx/source/runtime/init.c`, from
+   `raw.githubusercontent.com/switchbrew/libnx/master/`), read for the
+   protocol only. Switch 2 notes ([S2]) go into `docs/SWITCH2_NOTES.md`
+   first.
+2. Code in `crates/kestrel-hle/src/service/<service>.rs`, with unit tests
+   through IPC in `service/mod.rs`. Where the sources are silent, choose,
+   say so in a comment, and list the choice in these notes; anything
+   undocumented stops with its interface and command number.
+3. A homebrew test program `guest/src/nro/hb<service>.c` (with an empty
+   `.args`) that sends the requests the way libnx lays them out, a model
+   in `scripts/gen-expected.py` written from the documentation and
+   kestrel's listed choices, and a `homebrew!` entry in
+   `crates/kestrel-testsuite/src/lib.rs`.
+4. Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets
+   -- -D warnings`, `cargo test --workspace`,
+   `scripts/gen-expected.py --check`, `kestrel selftest`; the program
+   built at `-O3 -march=armv8.2-a` (`GUEST_OUT`, `GUEST_OPT` for
+   `scripts/build-guest.sh`) gives the same output; one deliberate bug in
+   the new code makes the program's output differ, then is undone.
+5. Commits: one logical change each (code, test program, docs), with the
+   ROADMAP, ARCHITECTURE and README updated in the same series. Push only
+   when the owner says so.
+
 Phase 3 on macOS (needs a session on the owner's Mac, since
 Hypervisor.framework is macOS-only): the memory arena refactor, the
 native backend, and the differential tester.
