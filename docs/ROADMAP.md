@@ -835,7 +835,9 @@ Each service so far followed the same steps; keep them:
    kestrel's listed choices, and a `homebrew!` entry in
    `crates/kestrel-testsuite/src/lib.rs`.
 4. Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets
-   -- -D warnings`, `cargo test --workspace`,
+   -- -D warnings` (on Windows also with `--no-default-features --target
+   x86_64-unknown-linux-gnu`, which compiles the Unix-only tests),
+   `cargo test --workspace`,
    `scripts/gen-expected.py --check`, `kestrel selftest`; the program
    built at `-O3 -march=armv8.2-a` (`GUEST_OUT`, `GUEST_OPT` for
    `scripts/build-guest.sh`) gives the same output; one deliberate bug in
