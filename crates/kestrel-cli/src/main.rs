@@ -6,6 +6,7 @@ mod input_config;
 mod window;
 
 use kestrel_cpu::{create_backend, interp::Interpreter, BackendKind, CpuBackend};
+use kestrel_hle::display::Screen;
 use kestrel_hle::input::Source;
 use kestrel_hle::{Process, Stop};
 use std::path::{Path, PathBuf};
@@ -276,8 +277,8 @@ fn run(o: Opts) -> Result<ExitCode, String> {
         let config = input_config()?;
         let title = format!("kestrel - {name}");
         let (opts, f, n) = (o.clone(), file.clone(), name.clone());
-        let windowed = window::run(title, config, move |source, interrupt| {
-            emulate(&opts, &f, &n, Some(source), Some(interrupt))
+        let windowed = window::run(title, config, move |source, screen, interrupt| {
+            emulate(&opts, &f, &n, Some((source, screen, interrupt)))
         });
         match windowed {
             Ok(result) => return result,
@@ -285,27 +286,33 @@ fn run(o: Opts) -> Result<ExitCode, String> {
             Err(e) => eprintln!("note: no window ({e}); running without one"),
         }
     }
-    emulate(&o, &file, &name, None, None)
+    emulate(&o, &file, &name, None)
 }
 
-/// Load and run the program, with a controller and a stop flag when a
-/// window gives them, and report how it stopped.
+/// What a window gives the program: the controller, the screen, and the
+/// flag that stops it.
+type Windowed = (Box<dyn Source>, Box<dyn Screen>, Arc<AtomicBool>);
+
+/// Load and run the program, in a window when one is given, and report how
+/// it stopped.
 fn emulate(
     o: &Opts,
     file: &[u8],
     name: &str,
-    input: Option<Box<dyn Source>>,
-    interrupt: Option<Arc<AtomicBool>>,
+    window: Option<Windowed>,
 ) -> Result<ExitCode, String> {
     let mut proc = Process::load(file, name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
     proc.echo = true;
     proc.services.fs.sd = sd_folder(o.sd.clone());
     // With a window someone is using the program: it runs in real time,
     // for as long as they like.
-    let windowed = interrupt.is_some();
+    let windowed = window.is_some();
     proc.realtime = windowed;
-    proc.input = input;
-    proc.interrupt = interrupt;
+    if let Some((input, screen, interrupt)) = window {
+        proc.input = Some(input);
+        proc.screen = Some(screen);
+        proc.interrupt = Some(interrupt);
+    }
     let max_steps = o
         .max_steps
         .unwrap_or(if windowed { u64::MAX } else { 10_000_000_000 });
