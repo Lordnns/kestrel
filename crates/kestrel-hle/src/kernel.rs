@@ -158,26 +158,12 @@ impl Process {
     /// svcCloseHandle (Switchbrew, "SVC"). Closing a pseudo-handle is
     /// refused with InvalidHandle (kestrel's choice; it names no slot).
     pub fn close_handle(&mut self, h: u64) -> Result<(), u64> {
-        if let Some(Object::TransferMemory { restore }) = self.handles.close(handle_arg(h))? {
-            self.release_transfer_memory(&restore);
+        match self.handles.close(handle_arg(h))? {
+            Some(Object::TransferMemory { restore }) => self.release_transfer_memory(&restore),
+            Some(Object::Thread { id }) => self.thread_released(id),
+            _ => {}
         }
         Ok(())
-    }
-
-    /// svcGetThreadId: the thread a thread handle or the current-thread
-    /// pseudo-handle names.
-    pub fn thread_id(&self, h: u64) -> Result<u64, u64> {
-        let h = handle_arg(h);
-        if h as u64 == handle::CURRENT_THREAD {
-            return Ok(self.thread_id);
-        }
-        match self.handles.get(h) {
-            Some((Kind::Thread, id)) => match self.handles.object(id) {
-                Object::Thread { id } => Ok(*id),
-                o => unreachable!("a thread handle names {o:?}"),
-            },
-            _ => Err(result::INVALID_HANDLE),
-        }
     }
 
     /// svcGetProcessId: only the current-process pseudo-handle names a

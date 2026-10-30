@@ -189,7 +189,7 @@ fn run(o: Opts) -> Result<ExitCode, String> {
         eprintln!("{:?}", proc.cpu);
     }
     if o.stats {
-        let n = proc.cpu.retired;
+        let n = proc.instructions();
         let mips = n as f64 / elapsed.as_secs_f64().max(1e-9) / 1e6;
         eprintln!(
             "[{}] {n} instructions, {} SVCs in {:.3}s ({mips:.1} MIPS)",

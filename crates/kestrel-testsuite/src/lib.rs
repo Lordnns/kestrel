@@ -165,7 +165,7 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
         passed: stop == Stop::Exited && output == case.expected,
         stop,
         output,
-        instructions: proc.cpu.retired,
+        instructions: proc.instructions(),
         elapsed,
         backend: cpu.name(),
     })

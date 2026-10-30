@@ -12,6 +12,7 @@ pub mod homebrew;
 pub mod kernel;
 pub mod memory;
 pub mod svc;
+pub mod thread;
 
 use kestrel_core::{Memory, Perm};
 use kestrel_cpu::{CpuBackend, CpuState, Exit};
@@ -40,6 +41,7 @@ pub mod layout {
     pub const STACK_TOP: u64 = 0x7f_0000_0000;
     pub const STACK_SIZE: u64 = 1 << 20;
     pub const HEAP_BASE: u64 = 0x60_0000_0000;
+    /// Pages of thread local regions, mapped as threads need them.
     pub const TLS_BASE: u64 = 0x7e_0000_0000;
     pub const TLS_SIZE: u64 = 0x1000;
     /// Where homebrew NROs are loaded: the start of the ASLR region.
@@ -75,13 +77,13 @@ pub enum Stop {
     StepLimit,
 }
 
-/// One emulated process with a single thread.
+/// One emulated process.
 pub struct Process {
     pub mem: Memory,
+    /// The running thread's registers.
     pub cpu: CpuState,
     pub handles: kernel::HandleTable,
-    /// The running thread's ID, for the current-thread pseudo-handle.
-    pub thread_id: u64,
+    pub sched: thread::Scheduler,
     /// The main thread's handle, passed to homebrew as MainThreadHandle.
     pub main_thread: u32,
     pub heap_size: u64,
@@ -122,35 +124,12 @@ impl Process {
         let stack = tag(state::STACK);
         mem.map_tagged(STACK_TOP - STACK_SIZE, STACK_SIZE, Perm::RW, stack, "stack")
             .map_err(|e| e.to_string())?;
-        mem.map_tagged(
-            TLS_BASE,
-            TLS_SIZE,
-            Perm::RW,
-            tag(state::THREAD_LOCAL),
-            "tls",
-        )
-        .map_err(|e| e.to_string())?;
-        let mut handles = kernel::HandleTable::default();
-        let main_thread = handles
-            .insert(
-                kernel::Object::Thread {
-                    id: kernel::MAIN_THREAD_ID,
-                },
-                &[kernel::Kind::Thread],
-            )
-            .map_err(|code| format!("cannot open the main thread handle: {code:#x}"))?[0];
-        let cpu = CpuState {
-            pc: image.entry,
-            sp: STACK_TOP,
-            tpidrro_el0: TLS_BASE,
-            ..Default::default()
-        };
-        Ok(Process {
+        let mut p = Process {
             mem,
-            cpu,
-            handles,
-            thread_id: kernel::MAIN_THREAD_ID,
-            main_thread,
+            cpu: CpuState::default(),
+            handles: kernel::HandleTable::default(),
+            sched: thread::Scheduler::default(),
+            main_thread: 0,
             heap_size: 0,
             image_size: image.image_end - image.image_start,
             physical_size: 0,
@@ -158,7 +137,20 @@ impl Process {
             debug_output: Vec::new(),
             echo: false,
             svc_count: 0,
-        })
+        };
+        p.main_thread = p
+            .new_thread(
+                image.entry,
+                0,
+                STACK_TOP,
+                thread::MAIN_PRIORITY,
+                thread::DEFAULT_CORE,
+            )
+            .map_err(|code| format!("cannot create the main thread: {code:#x}"))?;
+        let main = &mut p.sched.threads[0];
+        main.state = thread::State::Ready;
+        p.cpu = std::mem::take(&mut main.cpu);
+        Ok(p)
     }
 
     /// Load `file`, an ELF test program or a homebrew NRO, into a new
@@ -186,9 +178,9 @@ impl Process {
 
     /// Run until the process stops or `max_steps` instructions retire.
     pub fn run(&mut self, backend: &mut dyn CpuBackend, max_steps: u64) -> Stop {
-        let start = self.cpu.retired;
+        let start = self.instructions();
         loop {
-            let used = self.cpu.retired - start;
+            let used = self.instructions() - start;
             if used >= max_steps {
                 return Stop::StepLimit;
             }
@@ -196,6 +188,10 @@ impl Process {
                 Exit::Svc(n) => {
                     self.svc_count += 1;
                     if let Some(stop) = svc::dispatch(self, n) {
+                        return stop;
+                    }
+                    let rotate = std::mem::take(&mut self.sched.rotate);
+                    if let Some(stop) = self.schedule(rotate) {
                         return stop;
                     }
                 }
@@ -221,7 +217,7 @@ impl Process {
                 Exit::Fault { pc, fault } => {
                     return Stop::Error(format!("guest fault at pc {pc:#x}: {fault}"))
                 }
-                Exit::StepLimit => return Stop::StepLimit,
+                Exit::StepLimit => {}
             }
         }
     }
