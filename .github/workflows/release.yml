@@ -87,6 +87,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # gilrs (gamepads in the window) builds against libudev on Linux.
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - run: cargo build --release -p kestrel-cli --target ${{ matrix.target }}
       - name: Self-test
         run: target/${{ matrix.target }}/release/kestrel selftest
