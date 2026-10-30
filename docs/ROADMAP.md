@@ -885,8 +885,12 @@ services", "NV services"):
   converts the colour format (RGB565 for the console).
 
 Steps:
-1. Owner: install Docker Desktop. Then a script that builds the four
-   examples at the pinned commits in the container.
+1. Owner: install Docker Desktop (in progress at the end of 2026-10-30).
+   Then a script that builds the four examples at the pinned commits in
+   the container. Commits read on 2026-10-30, to pin unless newer ones
+   are needed: switch-examples 669786898205b7beb25ff1731e72982e6d0397d3,
+   libnx b156b4774fb2df7b93402169509266da7547fc4c (the container's libnx
+   is what the examples link; record its version with the image tag).
 2. Done: display services: vi:u, the layer, the binder relay and the
    buffer queue, with a vsync clock in guest time (buffers are released
    at 60 Hz, and the scheduler wakes for it), and am's
