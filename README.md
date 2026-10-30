@@ -50,8 +50,13 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   firmware version, apm, the applet manager commands an application
   sends at startup, hid's setup with its shared memory (no host input
   yet), the time service (clocks that start at 2025-06-05 00:00 UTC and
-  run with the guest's clock, in the UTC time zone), and the file system
-  with the SD card as a folder on your computer.
+  run with the guest's clock, in the UTC time zone), the file system
+  with the SD card as a folder on your computer, and the battery state of
+  a docked console.
+- **Error reports**: when a program aborts or throws a fatal error, kestrel
+  prints the reason and its result code as the console writes it, with
+  the module's name (`guest aborted (Panic) at 0x...: result 2345-0033
+  (Libnx: InitFail_FS)`).
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -87,7 +92,7 @@ cargo run --release -p kestrel-cli -- selftest
 
 ## Self-test and test programs
 
-`kestrel selftest` runs nineteen ARM64 programs compiled into the binary and
+`kestrel selftest` runs twenty ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
 by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
 nothing but the executable. Each integer C program is in the suite twice:
@@ -114,6 +119,7 @@ built integer-only, and built with floating point and NEON allowed
 | `hbapplet`   | a homebrew NRO sending libnx's startup requests: set:sys firmware version, apm, appletOE as a domain with its interfaces and events |
 | `hbhid`      | a homebrew NRO setting up input as libnx does: hid's applet resource and npad setup, and mapping its shared memory, with each kind of bad mapping |
 | `hbfs`       | a homebrew NRO using the file system as libnx does: fsp-srv as a domain with cloned sessions, then creating, writing, reading, listing, renaming and deleting on an empty SD card, with bad paths and locked files |
+| `hbpower`    | a homebrew NRO reading the battery and charger state through psm, then sending a debugger-only svcBreak and a report-only fatal error, after which it carries on |
 | `hbtime`     | a homebrew NRO starting the time service as libnx does: the clocks, reading them from shared memory with CNTPCT_EL0, calendar times in UTC, and the clocks moving with a sleep |
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.

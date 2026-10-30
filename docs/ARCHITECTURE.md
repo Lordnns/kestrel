@@ -132,6 +132,12 @@ method; the methods live next to the state they change:
   the time zone. Sessions cloned from a domain session share the domain.
   The SD card is a host folder the frontend chooses (`fs::State::sd`);
   fsp-srv checks every path so none leads outside it.
+- Kestrel's own notes about a program (`Process::note`, kept in
+  `Process::log` and echoed to stderr by `kestrel run`) are apart from the
+  program's output. `kestrel_hle::results` turns a result code into the
+  console's "2345-0033" form with its module's name. A program that aborts
+  (svcBreak) or throws a fatal error with an error screen stops with
+  `Stop::Abort` or `Stop::Fatal`.
 
 ### Scheduling
 

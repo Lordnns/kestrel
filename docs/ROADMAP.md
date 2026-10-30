@@ -55,7 +55,7 @@ qemu for Linux ARM64.
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
-| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`. Not yet: power state, logging |
+| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; psm; fatal:u, svcBreak and result names; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`, `hbpower`. Not yet: host input |
 | SD folder option, unimplemented-call log | SD folder done; log not started | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, ports, services and commands stop with their name and number |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
@@ -647,6 +647,52 @@ Gaps:
 - OpenSdCardFileSystem before SetCurrentProcess stops (kestrel's choice):
   the file system does not know the process yet.
 
+Power state, from Switchbrew's "PTM services" (psm, IPsmSession,
+ChargerType, BatteryVoltageState) and libnx's `psm.c`, in
+`hle/service/psm.rs`. kestrel runs docked (am's OperationMode Console),
+so psm answers as a docked console on its charger, kestrel's choice:
+
+| Command | Answer |
+|---------|--------|
+| GetBatteryChargePercentage (0) | 100 |
+| GetChargerType (1) | 1, EnoughPower |
+| IsBatteryChargingEnabled (4), IsEnoughPowerSupplied (14) | true |
+| GetBatteryVoltageState (12) | 3, Good |
+| GetRawBatteryChargePercentage (13), GetBatteryAgePercentage (15) | 100.0 |
+| OpenSession (7) | IPsmSession |
+| IPsmSession BindStateChangeEvent (0) | an event nothing signals: the state never changes |
+| IPsmSession UnbindStateChangeEvent (1), the three Set...ChangeEventEnabled (2-4) | accepted |
+
+Error reports and logging. Homebrew prints through svcOutputDebugString,
+which kestrel already passes on; libnx has no client for the log service
+(lm) that official software uses. What a program reports when it fails
+is now readable:
+
+- svcBreak (Switchbrew, "SVC"): with bit 31 of the reason set it only
+  notifies a debugger, so kestrel notes it and returns 0. Otherwise the
+  program stops (`Stop::Abort`) with the reason (named as libnx's
+  BreakReason) and, when the size argument is 4, the result libnx's
+  diagAbortWithResult passes by address.
+- fatal:u ThrowFatalWithPolicy (Switchbrew, "Fatal services"), with the
+  process ID: FatalType ErrorReport (1) only files a report, so kestrel
+  notes it and the program goes on; ErrorReportAndErrorScreen (0) and
+  ErrorScreen (2) end it (`Stop::Fatal`).
+- `hle/results.rs` writes a result as Switchbrew's "Error codes" page
+  does (2000 plus the module, then the description: "2002-0001") with
+  the module's name from that page, and libnx's own modules and error
+  names from its `result.h`. It is generated from those two lists.
+- Kestrel's notes go to `Process::log`, and `kestrel run` prints them on
+  stderr as "kestrel: ...". The unimplemented-call log will use the same
+  log.
+
+Gaps:
+
+- psm's charging controls (2, 3, 5, 6, 8-11), GetBatteryChargeInfoEvent
+  and Fields, and the commands Switchbrew lists without names stop.
+- fatal:u ThrowFatal (0) and ThrowFatalWithCpuContext (2) stop; libnx
+  sends ThrowFatalWithPolicy.
+- No lm: official software's log service is for later phases.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
@@ -655,7 +701,12 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. Power state and logging, then the unimplemented-call log.
+1. The unimplemented-call log (`PLAN.md` phase 2): a record of every
+   service, command and SVC kestrel does not implement, with its
+   identifiers, through `Process::note`. Today each one stops the
+   program; ask the owner whether the log should let a program go on
+   past an unimplemented command (answering an error) or keep stopping
+   and only record it.
 2. Host input into hid's shared memory, with the frontend (window and
    keyboard or gamepad), once there is one.
 
