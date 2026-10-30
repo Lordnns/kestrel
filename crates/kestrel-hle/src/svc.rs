@@ -15,6 +15,7 @@ pub mod nr {
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
     pub const BREAK: u16 = 0x26;
     pub const OUTPUT_DEBUG_STRING: u16 = 0x27;
+    pub const GET_INFO: u16 = 0x29;
 }
 
 /// Result codes (module 1 = kernel). Values match the public ABI.
@@ -22,6 +23,77 @@ pub mod result {
     pub const SUCCESS: u64 = 0;
     pub const INVALID_SIZE: u64 = 0xca01;
     pub const INVALID_ADDRESS: u64 = 0xcc01;
+    pub const INVALID_HANDLE: u64 = 0xe401;
+    pub const INVALID_COMBINATION: u64 = 0xf601;
+}
+
+/// Pseudo-handles that always name the caller.
+pub mod handle {
+    pub const CURRENT_THREAD: u64 = 0xffff_8000;
+    pub const CURRENT_PROCESS: u64 = 0xffff_8001;
+}
+
+/// Why svcGetInfo gave no value.
+enum InfoError {
+    /// The guest asked for something invalid: return this result code.
+    Result(u64),
+    /// A valid request kestrel does not answer yet.
+    Unimplemented(&'static str),
+}
+
+/// svcGetInfo (Switchbrew, "SVC"): W1 = info type, W2 = handle, X3 =
+/// subtype. Process-wide types take the current-process handle and
+/// subtype 0; the rest take handle 0.
+fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> {
+    use layout::*;
+    use InfoError::*;
+    let process = |v: u64| {
+        if h != handle::CURRENT_PROCESS {
+            Err(Result(result::INVALID_HANDLE))
+        } else if sub != 0 {
+            Err(Result(result::INVALID_COMBINATION))
+        } else {
+            Ok(v)
+        }
+    };
+    let used = p.image_size + STACK_SIZE + p.heap_size;
+    match kind {
+        2 => process(ALIAS_REGION.0),
+        3 => process(ALIAS_REGION.1),
+        4 => process(HEAP_REGION.0),
+        5 => process(HEAP_REGION.1),
+        // Total and used; with no system resource, the non-system sizes
+        // (21, 22) are the same.
+        6 | 21 => process(TOTAL_MEMORY),
+        7 | 22 => process(used),
+        8 => match (h, sub) {
+            (0, 0) => Ok(0), // no debugger
+            (0, _) => Err(Result(result::INVALID_COMBINATION)),
+            _ => Err(Result(result::INVALID_HANDLE)),
+        },
+        11 => match (h, sub) {
+            (0, 0..=3) => Ok(RANDOM_ENTROPY[sub as usize]),
+            (0, _) => Err(Result(result::INVALID_COMBINATION)),
+            _ => Err(Result(result::INVALID_HANDLE)),
+        },
+        12 => process(ASLR_REGION.0),
+        13 => process(ASLR_REGION.1),
+        14 => process(STACK_REGION.0),
+        15 => process(STACK_REGION.1),
+        16 | 17 => process(0), // system resource size: none reserved
+        18 => process(PROGRAM_ID),
+        23 => process(1), // IsApplication, as the AppletType entry says
+        0 => Err(Unimplemented("CoreMask")),
+        1 => Err(Unimplemented("PriorityMask")),
+        9 => Err(Unimplemented("ResourceLimit")),
+        10 => Err(Unimplemented("IdleTickCount")),
+        19 => Err(Unimplemented("InitialProcessIdRange")),
+        20 => Err(Unimplemented("UserExceptionContextAddress")),
+        24 => Err(Unimplemented("FreeThreadCount")),
+        25 => Err(Unimplemented("ThreadTickCount")),
+        26 => Err(Unimplemented("IsSvcPermitted")),
+        _ => Err(Unimplemented("unknown info type")),
+    }
 }
 
 /// Handle one SVC. Returns `Some(stop)` if the process should stop.
@@ -76,6 +148,23 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
             }
             None
         }
+        nr::GET_INFO => {
+            let (kind, h, sub) = (p.cpu.x[1] as u32, p.cpu.x[2] & 0xffff_ffff, p.cpu.x[3]);
+            match get_info(p, kind, h, sub) {
+                Ok(v) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = v;
+                }
+                Err(InfoError::Result(code)) => p.cpu.x[0] = code,
+                Err(InfoError::Unimplemented(name)) => {
+                    return Some(Stop::Error(format!(
+                    "unimplemented svcGetInfo type {kind} ({name}), subtype {sub:#x}, at pc {:#x}",
+                    p.cpu.pc.wrapping_sub(4)
+                )))
+                }
+            }
+            None
+        }
         other => Some(Stop::Error(format!(
             "unimplemented SVC {other:#04x} at pc {:#x}",
             p.cpu.pc - 4
@@ -123,6 +212,81 @@ mod tests {
         assert_eq!(dispatch(&mut p, nr::OUTPUT_DEBUG_STRING), None);
         assert_eq!(p.cpu.x[0], result::SUCCESS);
         assert_eq!(p.debug_output.len() as u64, len);
+    }
+
+    /// Call svcGetInfo; Ok(value) on success, Err(result) otherwise.
+    fn info(p: &mut Process, kind: u64, h: u64, sub: u64) -> Result<u64, u64> {
+        (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3]) = (kind, h, sub);
+        assert_eq!(dispatch(p, nr::GET_INFO), None);
+        match p.cpu.x[0] {
+            0 => Ok(p.cpu.x[1]),
+            code => Err(code),
+        }
+    }
+
+    #[test]
+    fn reported_regions_are_disjoint_and_inside_the_39_bit_space() {
+        let mut p = process();
+        let cur = handle::CURRENT_PROCESS;
+        let mut region = |base, size| {
+            let b = info(&mut p, base, cur, 0).unwrap();
+            (b, b + info(&mut p, size, cur, 0).unwrap())
+        };
+        let aslr = region(12, 13);
+        let regions = [region(2, 3), region(4, 5), region(14, 15)];
+        assert!(aslr.0 > 0 && aslr.1 <= 1 << 39);
+        for (i, r) in regions.iter().enumerate() {
+            assert!(aslr.0 <= r.0 && r.1 <= aslr.1, "region {i} outside ASLR");
+            for s in &regions[i + 1..] {
+                assert!(r.1 <= s.0 || s.1 <= r.0, "{r:x?} overlaps {s:x?}");
+            }
+        }
+        // Switchbrew "16.0.0": 39-bit defaults are 64 GiB alias, 8 GiB heap.
+        assert_eq!(regions[0].1 - regions[0].0, 64 << 30);
+        assert_eq!(regions[1].1 - regions[1].0, 8 << 30);
+        // The main stack is in the stack region; the heap starts the heap region.
+        let (stack, sp) = (regions[2], p.cpu.sp);
+        assert!(stack.0 < sp - layout::STACK_SIZE && sp <= stack.1);
+        p.cpu.x[1] = 0x20_0000;
+        assert_eq!(dispatch(&mut p, nr::SET_HEAP_SIZE), None);
+        assert_eq!(p.cpu.x[1], regions[1].0);
+    }
+
+    #[test]
+    fn used_memory_follows_the_heap() {
+        let mut p = process();
+        let cur = handle::CURRENT_PROCESS;
+        let before = info(&mut p, 7, cur, 0).unwrap();
+        p.cpu.x[1] = 0x40_0000;
+        dispatch(&mut p, nr::SET_HEAP_SIZE);
+        assert_eq!(info(&mut p, 7, cur, 0).unwrap(), before + 0x40_0000);
+        assert!(info(&mut p, 6, cur, 0).unwrap() > before + 0x40_0000);
+    }
+
+    #[test]
+    fn wrong_handles_and_subtypes_give_the_documented_results() {
+        let mut p = process();
+        let cur = handle::CURRENT_PROCESS;
+        assert_eq!(info(&mut p, 4, 0, 0), Err(result::INVALID_HANDLE));
+        assert_eq!(info(&mut p, 4, cur, 1), Err(result::INVALID_COMBINATION));
+        assert_eq!(info(&mut p, 8, cur, 0), Err(result::INVALID_HANDLE));
+        assert_eq!(info(&mut p, 8, 0, 0), Ok(0));
+        for sub in 0..4 {
+            assert!(info(&mut p, 11, 0, sub).is_ok());
+        }
+        assert_eq!(info(&mut p, 11, 0, 4), Err(result::INVALID_COMBINATION));
+        // Only the low 32 bits of the handle register count.
+        assert!(info(&mut p, 18, 0xdead_0000_ffff_8001, 0).is_ok());
+    }
+
+    #[test]
+    fn unanswered_info_types_stop_with_their_name() {
+        let mut p = process();
+        (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3]) = (0, handle::CURRENT_PROCESS, 0);
+        match dispatch(&mut p, nr::GET_INFO) {
+            Some(Stop::Error(e)) => assert!(e.contains("type 0 (CoreMask)"), "{e}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
     }
 
     #[test]

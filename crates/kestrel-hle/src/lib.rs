@@ -15,18 +15,49 @@ use kestrel_core::{Memory, Perm};
 use kestrel_cpu::{CpuBackend, CpuState, Exit};
 use kestrel_loader::Loaded;
 
-/// Fixed process layout for now. Real titles use ASLR'd regions reported
-/// through svcGetInfo; these constants stand in until that is implemented.
+/// The process layout: one fixed 39-bit address space ("AddressSpace64Bit"
+/// on Switchbrew's "SVC" page), reported through svcGetInfo. The heap and
+/// alias region sizes are the 39-bit defaults from Switchbrew's "16.0.0"
+/// page; where the regions sit is kestrel's choice, without randomisation.
+/// The ELF test programs are linked at 0x200000, below the address space.
 pub mod layout {
+    /// A region as (base, size).
+    pub type Region = (u64, u64);
+
+    pub const ADDRESS_SPACE_BASE: u64 = 0x800_0000;
+    pub const ADDRESS_SPACE_END: u64 = 1 << 39;
+    /// Code may go anywhere in the address space.
+    pub const ASLR_REGION: Region = (ADDRESS_SPACE_BASE, ADDRESS_SPACE_END - ADDRESS_SPACE_BASE);
+    /// 64 GiB.
+    pub const ALIAS_REGION: Region = (0x10_0000_0000, 0x10_0000_0000);
+    /// 8 GiB; svcSetHeapSize maps the heap at its start.
+    pub const HEAP_REGION: Region = (HEAP_BASE, 0x2_0000_0000);
+    /// 2 GiB, ending at the top of the main thread's stack.
+    pub const STACK_REGION: Region = (STACK_TOP - 0x8000_0000, 0x8000_0000);
+
     pub const STACK_TOP: u64 = 0x7f_0000_0000;
     pub const STACK_SIZE: u64 = 1 << 20;
     pub const HEAP_BASE: u64 = 0x60_0000_0000;
     pub const TLS_BASE: u64 = 0x7e_0000_0000;
     pub const TLS_SIZE: u64 = 0x1000;
-    /// Where homebrew NROs are loaded.
-    pub const NRO_BASE: u64 = 0x800_0000;
+    /// Where homebrew NROs are loaded: the start of the ASLR region.
+    pub const NRO_BASE: u64 = ADDRESS_SPACE_BASE;
     /// The homebrew loader config entries and their strings.
     pub const HOMEBREW_CONFIG: u64 = 0x7d_0000_0000;
+
+    /// Memory the process may use (svcGetInfo TotalMemorySize). Kept
+    /// small while guest memory is backed by ordinary host allocations.
+    pub const TOTAL_MEMORY: u64 = 0x4000_0000;
+    /// The program ID reported for every program: "kestrel" in ASCII, so it
+    /// cannot be mistaken for a real title.
+    pub const PROGRAM_ID: u64 = u64::from_be_bytes(*b"kestrel\0");
+    /// svcGetInfo RandomEntropy, subtypes 0 to 3: fixed, so runs repeat.
+    pub const RANDOM_ENTROPY: [u64; 4] = [
+        0x243f_6a88_85a3_08d3,
+        0x1319_8a2e_0370_7344,
+        0xa409_3822_299f_31d0,
+        0x082e_fa98_ec4e_6c89,
+    ];
 }
 
 /// Why a process stopped.
@@ -47,6 +78,8 @@ pub struct Process {
     pub mem: Memory,
     pub cpu: CpuState,
     pub heap_size: u64,
+    /// Size of the loaded image, for svcGetInfo UsedMemorySize.
+    pub image_size: u64,
     /// Bytes the guest wrote through svcOutputDebugString.
     pub debug_output: Vec<u8>,
     /// Echo debug output to stdout as it arrives.
@@ -72,6 +105,7 @@ impl Process {
             mem,
             cpu,
             heap_size: 0,
+            image_size: image.image_end - image.image_start,
             debug_output: Vec::new(),
             echo: false,
             svc_count: 0,

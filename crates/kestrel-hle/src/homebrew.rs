@@ -6,6 +6,7 @@
 //! The program arguments are one string, split on spaces with double quotes
 //! grouping, whose first word is argv[0].
 
+use crate::svc::handle;
 use crate::{layout, Process};
 use kestrel_core::{Perm, PAGE_SIZE};
 
@@ -18,9 +19,6 @@ pub mod key {
     pub const RANDOM_SEED: u32 = 14;
 }
 
-/// The pseudo-handle for the current thread. With a single thread it names
-/// the main thread; a real handle replaces it once the handle table exists.
-pub const CURRENT_THREAD_HANDLE: u64 = 0xffff_8000;
 /// AppletType "Application".
 pub const APPLET_TYPE_APPLICATION: u64 = 0;
 /// A fixed random seed, so runs are reproducible.
@@ -62,7 +60,9 @@ impl Process {
         let args_at = info_at + info.len() as u64;
         let end = args_at + args.len() as u64;
         let entries: [(u32, u64, u64); ENTRIES] = [
-            (key::MAIN_THREAD_HANDLE, CURRENT_THREAD_HANDLE, 0),
+            // With a single thread, the current-thread pseudo-handle names
+            // the main thread; a real handle replaces it with the handle table.
+            (key::MAIN_THREAD_HANDLE, handle::CURRENT_THREAD, 0),
             (key::APPLET_TYPE, APPLET_TYPE_APPLICATION, 0),
             (key::ARGV, 0, args_at),
             (key::RANDOM_SEED, RANDOM_SEED[0], RANDOM_SEED[1]),
