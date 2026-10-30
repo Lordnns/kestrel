@@ -1,65 +1,13 @@
 //! Minimal static ELF64 (AArch64, little-endian) loader.
 
-use kestrel_core::{MemFault, Memory, Perm, PAGE_SIZE};
-use std::fmt;
+use crate::{rd16, rd32, rd64, LoadError, Loaded};
+use kestrel_core::{Memory, Perm, PAGE_SIZE};
 
 const EM_AARCH64: u16 = 183;
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
-
-#[derive(Debug)]
-pub enum LoadError {
-    NotElf,
-    Unsupported(&'static str),
-    Truncated,
-    Memory(MemFault),
-}
-
-impl fmt::Display for LoadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LoadError::NotElf => write!(f, "not an ELF file"),
-            LoadError::Unsupported(what) => write!(f, "unsupported ELF: {what}"),
-            LoadError::Truncated => write!(f, "ELF file is truncated"),
-            LoadError::Memory(e) => write!(f, "could not map segment: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for LoadError {}
-
-impl From<MemFault> for LoadError {
-    fn from(e: MemFault) -> Self {
-        LoadError::Memory(e)
-    }
-}
-
-/// Result of loading an image.
-#[derive(Debug, Clone)]
-pub struct Loaded {
-    pub entry: u64,
-    /// Lowest and highest (exclusive) mapped addresses of the image.
-    pub image_start: u64,
-    pub image_end: u64,
-}
-
-fn rd16(b: &[u8], o: usize) -> Result<u16, LoadError> {
-    b.get(o..o + 2)
-        .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
-        .ok_or(LoadError::Truncated)
-}
-fn rd32(b: &[u8], o: usize) -> Result<u32, LoadError> {
-    b.get(o..o + 4)
-        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
-        .ok_or(LoadError::Truncated)
-}
-fn rd64(b: &[u8], o: usize) -> Result<u64, LoadError> {
-    b.get(o..o + 8)
-        .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
-        .ok_or(LoadError::Truncated)
-}
 
 /// Map every PT_LOAD segment of `file` into `mem`.
 pub fn load_elf(file: &[u8], mem: &mut Memory) -> Result<Loaded, LoadError> {
