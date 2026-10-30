@@ -11,3 +11,4 @@ title.keys
 /firmware/
 /dist
 __pycache__/
+/.idea/
