@@ -129,6 +129,9 @@ fn checked_range(addr: u64, size: u64) -> Result<Option<u64>, u64> {
     Ok(addr.checked_add(size))
 }
 
+/// A range as (base, size).
+type Part = (u64, u64);
+
 /// Whether `[addr, end)` lies inside `(base, size)`.
 fn within((base, size): layout::Region, addr: u64, end: u64) -> bool {
     base <= addr && end <= base + size
@@ -272,10 +275,70 @@ impl Process {
         Ok(())
     }
 
-    /// Memory counted against TotalMemorySize: the image, the main stack
-    /// and the heap (Switchbrew, "SVC", svcGetInfo UsedMemorySize).
+    /// Check an svcMapPhysicalMemory or svcUnmapPhysicalMemory range and
+    /// split it into (mapped, unmapped) parts. Mapped parts must be
+    /// unlocked Normal memory.
+    fn physical_parts(&self, addr: u64, size: u64) -> Result<(Vec<Part>, Vec<Part>), u64> {
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_MEMORY_RANGE)?;
+        if !within(layout::ALIAS_REGION, addr, end) {
+            return Err(result::INVALID_MEMORY_RANGE);
+        }
+        let (mut mapped, mut free) = (Vec::new(), Vec::new());
+        let mut at = addr;
+        while at < end {
+            if let Some(b) = self.mem.region(at) {
+                if b.tag != tag(state::NORMAL) {
+                    return Err(result::INVALID_STATE);
+                }
+                let stop = (b.base + b.size).min(end);
+                mapped.push((at, stop - at));
+                at = stop;
+            } else {
+                let (_, next) = self.mem.gap(at).expect("unmapped address has a gap");
+                let stop = next.map_or(end, |n| n.min(end));
+                free.push((at, stop - at));
+                at = stop;
+            }
+        }
+        Ok((mapped, free))
+    }
+
+    /// svcMapPhysicalMemory (Switchbrew, "SVC"): heap-like memory at any
+    /// page-aligned range of the alias region; pages already mapped there
+    /// stay as they are.
+    pub fn map_physical_memory(&mut self, addr: u64, size: u64) -> Result<(), u64> {
+        let (_, free) = self.physical_parts(addr, size)?;
+        let new: u64 = free.iter().map(|&(_, n)| n).sum();
+        if self.used_memory() + new > layout::TOTAL_MEMORY {
+            return Err(result::LIMIT_REACHED);
+        }
+        for (base, n) in free {
+            self.mem
+                .map_tagged(base, n, Perm::RW, tag(state::NORMAL), "physical")
+                .map_err(|_| result::INVALID_STATE)?;
+        }
+        self.physical_size += new;
+        Ok(())
+    }
+
+    /// svcUnmapPhysicalMemory: release whatever svcMapPhysicalMemory
+    /// mapped in the range.
+    pub fn unmap_physical_memory(&mut self, addr: u64, size: u64) -> Result<(), u64> {
+        let (mapped, _) = self.physical_parts(addr, size)?;
+        for &(base, n) in &mapped {
+            self.mem
+                .unmap_range(base, n)
+                .map_err(|_| result::INVALID_STATE)?;
+            self.physical_size -= n;
+        }
+        Ok(())
+    }
+
+    /// Memory counted against TotalMemorySize: the image, the main stack,
+    /// the heap (Switchbrew, "SVC", svcGetInfo UsedMemorySize) and
+    /// physical memory mapped by the program.
     pub fn used_memory(&self) -> u64 {
-        self.image_size + layout::STACK_SIZE + self.heap_size
+        self.image_size + layout::STACK_SIZE + self.heap_size + self.physical_size
     }
 
     /// svcSetHeapSize (Switchbrew, "SVC"): grow or shrink the heap at the
@@ -505,6 +568,58 @@ mod tests {
             Err(result::INVALID_STATE)
         );
         assert_eq!(p.unmap_memory(dst, heap, 0x2000), Ok(()));
+    }
+
+    #[test]
+    fn physical_memory_fills_only_the_gaps_of_the_alias_range() {
+        let mut p = process();
+        let a = layout::ALIAS_REGION.0;
+        let used = p.used_memory();
+        assert_eq!(p.map_physical_memory(a + 0x1000, 0x2000), Ok(()));
+        p.mem.write64(a + 0x1000, 77).unwrap();
+        let q = query(&p.mem, a + 0x1000);
+        assert_eq!(
+            (q.base, q.size, q.state, q.perm),
+            (a + 0x1000, 0x2000, state::NORMAL, 3)
+        );
+        // Mapping a larger range adds only the missing pages.
+        assert_eq!(p.map_physical_memory(a, 0x5000), Ok(()));
+        assert_eq!(p.used_memory(), used + 0x5000);
+        assert_eq!(p.mem.read64(a + 0x1000).unwrap(), 77);
+        assert_eq!(query(&p.mem, a).size, 0x5000);
+        // Unmapping releases what is mapped, gaps included.
+        assert_eq!(p.unmap_physical_memory(a + 0x1000, 0x1000), Ok(()));
+        assert_eq!(p.unmap_physical_memory(a, 0x6000), Ok(()));
+        assert_eq!(p.used_memory(), used);
+        assert!(p.mem.is_free(a, 0x6000));
+    }
+
+    #[test]
+    fn physical_memory_is_checked_as_documented() {
+        let mut p = process();
+        let a = layout::ALIAS_REGION.0;
+        assert_eq!(
+            p.map_physical_memory(a + 1, 0x1000),
+            Err(result::INVALID_ADDRESS)
+        );
+        assert_eq!(p.map_physical_memory(a, 0), Err(result::INVALID_SIZE));
+        assert_eq!(p.map_physical_memory(a, 0x1800), Err(result::INVALID_SIZE));
+        let heap = layout::HEAP_REGION.0;
+        assert_eq!(
+            p.map_physical_memory(heap, 0x1000),
+            Err(result::INVALID_MEMORY_RANGE)
+        );
+        let wrap = 0u64.wrapping_sub(0x1000);
+        assert_eq!(
+            p.map_physical_memory(wrap, 0x2000),
+            Err(result::INVALID_MEMORY_RANGE)
+        );
+        let too_much = layout::TOTAL_MEMORY;
+        assert_eq!(
+            p.map_physical_memory(a, too_much),
+            Err(result::LIMIT_REACHED)
+        );
+        assert!(p.mem.is_free(a, 0x1000));
     }
 
     #[test]

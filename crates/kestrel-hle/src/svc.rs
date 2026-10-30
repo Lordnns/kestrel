@@ -20,6 +20,8 @@ pub mod nr {
     pub const BREAK: u16 = 0x26;
     pub const OUTPUT_DEBUG_STRING: u16 = 0x27;
     pub const GET_INFO: u16 = 0x29;
+    pub const MAP_PHYSICAL_MEMORY: u16 = 0x2c;
+    pub const UNMAP_PHYSICAL_MEMORY: u16 = 0x2d;
 }
 
 /// Result codes (module 1 = kernel). Values match the public ABI.
@@ -140,6 +142,15 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 p.map_memory(dst, src, size)
             } else {
                 p.unmap_memory(dst, src, size)
+            });
+            None
+        }
+        nr::MAP_PHYSICAL_MEMORY | nr::UNMAP_PHYSICAL_MEMORY => {
+            let (addr, size) = (p.cpu.x[0], p.cpu.x[1]);
+            p.cpu.x[0] = code(if n == nr::MAP_PHYSICAL_MEMORY {
+                p.map_physical_memory(addr, size)
+            } else {
+                p.unmap_physical_memory(addr, size)
             });
             None
         }
