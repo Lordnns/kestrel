@@ -16,7 +16,10 @@ pub mod nr {
     pub const QUERY_MEMORY: u16 = 0x06;
     pub const EXIT_PROCESS: u16 = 0x07;
     pub const SLEEP_THREAD: u16 = 0x0b;
+    pub const CLOSE_HANDLE: u16 = 0x16;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
+    pub const GET_PROCESS_ID: u16 = 0x24;
+    pub const GET_THREAD_ID: u16 = 0x25;
     pub const BREAK: u16 = 0x26;
     pub const OUTPUT_DEBUG_STRING: u16 = 0x27;
     pub const GET_INFO: u16 = 0x29;
@@ -31,6 +34,7 @@ pub mod result {
     pub const INVALID_SIZE: u64 = 0xca01;
     pub const INVALID_ADDRESS: u64 = 0xcc01;
     pub const OUT_OF_MEMORY: u64 = 0xd001;
+    pub const OUT_OF_HANDLES: u64 = 0xd201;
     pub const INVALID_CURRENT_MEMORY: u64 = 0xd401;
     pub const INVALID_NEW_MEMORY_PERMISSION: u64 = 0xd801;
     pub const INVALID_MEMORY_REGION: u64 = 0xdc01;
@@ -172,6 +176,26 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
         nr::SLEEP_THREAD => {
             // Single thread: yielding or sleeping just returns.
             p.cpu.x[0] = result::SUCCESS;
+            None
+        }
+        nr::CLOSE_HANDLE => {
+            p.cpu.x[0] = code(p.close_handle(p.cpu.x[0]));
+            None
+        }
+        nr::GET_PROCESS_ID | nr::GET_THREAD_ID => {
+            // W1 = handle; X1 = the ID.
+            let h = p.cpu.x[1];
+            match if n == nr::GET_PROCESS_ID {
+                p.process_id(h)
+            } else {
+                p.thread_id(h)
+            } {
+                Ok(id) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = id;
+                }
+                Err(code) => p.cpu.x[0] = code,
+            }
             None
         }
         nr::GET_SYSTEM_TICK => {

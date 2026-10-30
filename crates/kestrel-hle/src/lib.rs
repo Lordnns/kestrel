@@ -9,6 +9,7 @@
 //! documentation and from observing homebrew, never from console firmware.
 
 pub mod homebrew;
+pub mod kernel;
 pub mod memory;
 pub mod svc;
 
@@ -78,6 +79,11 @@ pub enum Stop {
 pub struct Process {
     pub mem: Memory,
     pub cpu: CpuState,
+    pub handles: kernel::HandleTable,
+    /// The running thread's ID, for the current-thread pseudo-handle.
+    pub thread_id: u64,
+    /// The main thread's handle, passed to homebrew as MainThreadHandle.
+    pub main_thread: u32,
     pub heap_size: u64,
     /// Size of the loaded image, for svcGetInfo UsedMemorySize.
     pub image_size: u64,
@@ -124,6 +130,15 @@ impl Process {
             "tls",
         )
         .map_err(|e| e.to_string())?;
+        let mut handles = kernel::HandleTable::default();
+        let main_thread = handles
+            .insert(
+                kernel::Object::Thread {
+                    id: kernel::MAIN_THREAD_ID,
+                },
+                &[kernel::Kind::Thread],
+            )
+            .map_err(|code| format!("cannot open the main thread handle: {code:#x}"))?[0];
         let cpu = CpuState {
             pc: image.entry,
             sp: STACK_TOP,
@@ -133,6 +148,9 @@ impl Process {
         Ok(Process {
             mem,
             cpu,
+            handles,
+            thread_id: kernel::MAIN_THREAD_ID,
+            main_thread,
             heap_size: 0,
             image_size: image.image_end - image.image_start,
             physical_size: 0,

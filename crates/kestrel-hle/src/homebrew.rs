@@ -6,7 +6,6 @@
 //! The program arguments are one string, split on spaces with double quotes
 //! grouping, whose first word is argv[0].
 
-use crate::svc::handle;
 use crate::{layout, Process};
 use kestrel_core::{Perm, PAGE_SIZE};
 
@@ -60,9 +59,7 @@ impl Process {
         let args_at = info_at + info.len() as u64;
         let end = args_at + args.len() as u64;
         let entries: [(u32, u64, u64); ENTRIES] = [
-            // With a single thread, the current-thread pseudo-handle names
-            // the main thread; a real handle replaces it with the handle table.
-            (key::MAIN_THREAD_HANDLE, handle::CURRENT_THREAD, 0),
+            (key::MAIN_THREAD_HANDLE, self.main_thread as u64, 0),
             (key::APPLET_TYPE, APPLET_TYPE_APPLICATION, 0),
             (key::ARGV, 0, args_at),
             (key::RANDOM_SEED, RANDOM_SEED[0], RANDOM_SEED[1]),
@@ -137,7 +134,10 @@ mod tests {
             assert_eq!(flags, 0);
             seen.push(k);
             match k {
-                1 => assert_eq!(v, [0xffff_8000, 0]),
+                1 => {
+                    assert_eq!(p.thread_id(v[0]), Ok(crate::kernel::MAIN_THREAD_ID));
+                    assert_eq!(v[1], 0);
+                }
                 7 => assert_eq!(v, [0, 0]),
                 5 => {
                     let s = p.mem.read_vec(v[1], 13).unwrap();
