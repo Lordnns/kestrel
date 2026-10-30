@@ -18,6 +18,9 @@ pub mod state {
     pub const THREAD_LOCAL: u32 = 0x0040_200c;
     pub const INACCESSIBLE: u32 = 0x0000_0010;
     pub const SHARED: u32 = 0x0040_2006;
+    /// MemoryState bit 8, FlagCanReprotect: svcSetMemoryPermission may
+    /// change the memory's permission.
+    pub const CAN_REPROTECT: u32 = 1 << 8;
     /// MemoryState bit 17, FlagCanTransfer: svcCreateTransferMemory may
     /// lend the memory.
     pub const CAN_TRANSFER: u32 = 1 << 17;
@@ -27,6 +30,7 @@ pub mod state {
 pub mod attr {
     pub const LOCKED: u32 = 1 << 0;
     pub const UNCACHED: u32 = 1 << 3;
+    pub const PERMISSION_LOCKED: u32 = 1 << 4;
 }
 
 pub const fn tag(state: u32) -> Tag {
@@ -182,17 +186,34 @@ impl Process {
         Ok(())
     }
 
-    /// svcSetMemoryPermission (Switchbrew, "SVC"): move heap-like memory
-    /// between ---, r-- and rw-.
+    /// svcSetMemoryPermission (Switchbrew, "SVC"): move memory between ---,
+    /// r-- and rw-. Every block must have FlagCanReprotect (the heap, and a
+    /// program's data segment, which libnx makes partly read-only after
+    /// relocating itself) and neither the Locked nor the Uncached
+    /// attribute; kestrel also refuses PermissionLocked memory, which the
+    /// name says may not change.
     pub fn set_memory_permission(&mut self, addr: u64, size: u64, perm: u32) -> Result<(), u64> {
-        checked_range(addr, size)?;
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_CURRENT_MEMORY)?;
         let new = match perm {
             0 => Perm::NONE,
             1 => Perm::R,
             3 => Perm::RW,
             _ => return Err(result::INVALID_NEW_MEMORY_PERMISSION),
         };
-        self.check_normal(addr, size)?;
+        if !within(layout::ASLR_REGION, addr, end) {
+            return Err(result::INVALID_CURRENT_MEMORY);
+        }
+        let blocks = self
+            .mem
+            .range_regions(addr, size)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+        let refused = attr::LOCKED | attr::UNCACHED | attr::PERMISSION_LOCKED;
+        if blocks
+            .iter()
+            .any(|b| b.tag.state & state::CAN_REPROTECT == 0 || b.tag.attr & refused != 0)
+        {
+            return Err(result::INVALID_CURRENT_MEMORY);
+        }
         self.mem
             .update_range(addr, size, |p, _| *p = new)
             .map_err(|_| result::INVALID_CURRENT_MEMORY)
@@ -757,9 +778,37 @@ mod tests {
             p.set_memory_permission(stack, 0x1000, 1),
             Err(result::INVALID_CURRENT_MEMORY)
         );
-        // Only Uncached (bit 3) can change.
+        // A program's data segment can be reprotected, as libnx does with
+        // its relocated read-only data; its code cannot.
+        let (code, data) = (layout::NRO_BASE, layout::NRO_BASE + 0x1000);
+        p.mem
+            .map_tagged(code, 0x1000, Perm::RX, tag(state::CODE), "code")
+            .unwrap();
+        p.mem
+            .map_tagged(data, 0x2000, Perm::RW, tag(state::CODE_DATA), "data")
+            .unwrap();
+        assert_eq!(p.set_memory_permission(data + 0x1000, 0x1000, 1), Ok(()));
+        assert_eq!(query(&p.mem, data + 0x1000).perm, 1);
+        assert!(p.mem.write8(data + 0x1000, 1).is_err());
+        assert_eq!(query(&p.mem, data).perm, 3);
+        assert_eq!(
+            p.set_memory_permission(code, 0x2000, 1),
+            Err(result::INVALID_CURRENT_MEMORY)
+        );
+        // Only Uncached (bit 3) can change, and uncached memory keeps its
+        // permission.
         assert_eq!(p.set_memory_attribute(base, 0x1000, 8, 8), Ok(()));
         assert_eq!(query(&p.mem, base).attr, attr::UNCACHED);
+        assert_eq!(
+            p.set_memory_permission(base, 0x1000, 1),
+            Err(result::INVALID_CURRENT_MEMORY)
+        );
+        // libnx asks for PermissionLocked (bit 4) after reprotecting; the
+        // page allows only bit 3, and libnx ignores the answer.
+        assert_eq!(
+            p.set_memory_attribute(data, 0x1000, 0x10, 0x10),
+            Err(result::INVALID_COMBINATION)
+        );
         assert_eq!(p.set_memory_attribute(base, 0x1000, 8, 0), Ok(()));
         assert_eq!(query(&p.mem, base).attr, 0);
         assert_eq!(
