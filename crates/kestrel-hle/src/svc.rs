@@ -24,7 +24,7 @@ pub mod nr {
     pub const UNMAP_PHYSICAL_MEMORY: u16 = 0x2d;
 }
 
-/// Result codes (module 1 = kernel). Values match the public ABI.
+/// Result codes (module 1 = kernel), from Switchbrew's "Error codes" page.
 pub mod result {
     pub const SUCCESS: u64 = 0;
     pub const INVALID_SIZE: u64 = 0xca01;
@@ -35,7 +35,7 @@ pub mod result {
     pub const INVALID_MEMORY_RANGE: u64 = 0xdc01;
     pub const LIMIT_REACHED: u64 = 0x10801;
     pub const INVALID_HANDLE: u64 = 0xe401;
-    pub const INVALID_COMBINATION: u64 = 0xf601;
+    pub const INVALID_COMBINATION: u64 = 0xe801;
 }
 
 /// Pseudo-handles that always name the caller.

@@ -219,7 +219,8 @@ memory is ordinary host allocations), UsedMemorySize as image plus main
 stack plus heap, the same for the non-system variants, system resource
 sizes 0, no debugger, IsApplication 1, a fixed RandomEntropy, and the
 program ID "kestrel" in ASCII so it cannot pass for a real title. A wrong
-handle gives 0xe401 and a wrong subtype 0xf601.
+handle gives InvalidHandle 0xe401 and a wrong subtype InvalidCombination
+0xe801 (kestrel's choice; Switchbrew lists no result codes for svcGetInfo).
 
 Gaps:
 
@@ -250,7 +251,8 @@ Gaps:
 - Where Switchbrew is silent, kestrel chose: the main stack and the
   homebrew config types, the reporting of unmapped and out-of-space
   addresses, accepting only Normal memory for svcSetMemoryPermission and
-  svcSetMemoryAttribute, and 0xf601 for an attribute other than Uncached.
+  svcSetMemoryAttribute, and InvalidCombination 0xe801 for an attribute
+  other than Uncached.
 - svcMapPhysicalMemory needs a system resource on the console (0xfa01
   without one); kestrel does not model the system resource and allows it.
 - Memory is not shared yet (IPC and shared memory come later), so the

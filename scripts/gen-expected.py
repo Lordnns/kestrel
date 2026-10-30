@@ -312,10 +312,12 @@ def hblayout():
     Switchbrew documents. The regions fit the 39-bit address space ("SVC",
     AddressSpace64Bit) without overlapping; the alias and heap regions have
     the 39-bit default sizes ("16.0.0": 64 GiB and 8 GiB); a wrong handle is
-    0xe401 and a wrong subtype 0xf601 ("SVC", svcGetInfo); entropy has
+    InvalidHandle 0xe401 and a wrong subtype InvalidCombination 0xe801
+    ("Error codes"; the svcGetInfo section lists no result codes, so which
+    result a wrong subtype gives is kestrel's choice); entropy has
     subtypes 0 to 3. With AppletType Application the process is an
     application, and no debugger is attached."""
-    ok, bad_handle, bad_sub = hex64(0), hex64(0xE401), hex64(0xF601)
+    ok, bad_handle, bad_sub = hex64(0), hex64(0xE401), hex64(0xE801)
     out = [
         "homebrew layout test",
         "aslr region inside the 39-bit space: yes",

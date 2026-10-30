@@ -14,9 +14,9 @@ entropy subtype 0: 0x0000000000000000
 entropy subtype 1: 0x0000000000000000
 entropy subtype 2: 0x0000000000000000
 entropy subtype 3: 0x0000000000000000
-entropy subtype 4: 0x000000000000f601
+entropy subtype 4: 0x000000000000e801
 heap region with handle 0: 0x000000000000e401
-heap region with subtype 1: 0x000000000000f601
+heap region with subtype 1: 0x000000000000e801
 debugger attached with the process handle: 0x000000000000e401
 debugger attached: 0
 is application: 1
