@@ -12,6 +12,7 @@ kestrel-cli ──► kestrel-hle ──► kestrel-cpu ──► kestrel-core
 | `kestrel-cpu`    | `CpuState`, the `CpuBackend` trait, the portable interpreter      |
 | `kestrel-loader` | Executable loaders: ELF test programs, homebrew NRO               |
 | `kestrel-hle`    | Process model and supervisor-call (SVC) handling                  |
+| `kestrel-testsuite` | Guest test programs embedded in the binary, with expected output |
 | `kestrel-cli`    | Command-line front end                                            |
 
 ## CPU backends
@@ -60,7 +61,8 @@ on the host CPU inside a hardware-virtualised sandbox:
 The VM runs only guest user code. SVCs trap to the host, which forwards them
 to `kestrel-hle`. This requires `Memory` to become a host `mmap`'d arena that
 can be mapped into the VM's stage-2 tables, which is the next refactor of
-`kestrel-core`.
+`kestrel-core`. macOS comes first, developed alongside the IPC and service
+work once threads and synchronisation exist; then Linux and Windows.
 
 ### JIT (x86_64 hosts, planned)
 
@@ -84,6 +86,33 @@ or a stage-2 mapping (native).
 ## OS emulation (HLE)
 
 Guest software talks to the OS through SVCs and, above that, IPC to system
-services. kestrel answers both in Rust from public documentation. The current
-process layout uses fixed addresses (`kestrel_hle::layout`); real titles get
-their region addresses through `svcGetInfo`, which is on the roadmap.
+services. kestrel answers both in Rust from public documentation. The process
+layout is one fixed, documented 39-bit layout (`kestrel_hle::layout`),
+reported to guests through `svcGetInfo`; the console randomises placement,
+kestrel does not, so runs are reproducible. Behaviour learned by observation
+rather than documentation is described in `docs/SWITCH2_NOTES.md` before it
+is implemented.
+
+Today the process has one thread and no handles beyond the current-thread
+pseudo-handle; memory calls live in `kestrel_hle::memory`. Planned, in
+order: a per-process handle table with kernel objects (threads, events,
+shared and transfer memory, later sessions), a cooperative scheduler on one
+host thread, synchronisation, then IPC and the system services.
+
+## Graphics (planned)
+
+Two levels, both needed (`PLAN.md` phase 5):
+
+- **GPU level.** GPU driver services, GPU address space, command-stream
+  processing for the 3D, compute and copy engines, and a shader translator.
+  Shaders go through one intermediate representation with a Maxwell decoder
+  (Switch 1 and homebrew) and an Ampere decoder (Switch 2), both emitting
+  SPIR-V for Vulkan. Works for any guest software.
+- **API level.** Commercial games link Nintendo's NVN graphics API into their
+  own code. Intercepting those calls and translating them directly to Vulkan
+  skips command-stream emulation. Applies only to commercial software and
+  depends on owner approval (`PLAN.md` section 7).
+
+Both levels render through one Vulkan renderer (MoltenVK on macOS) with a
+cross-platform window and presentation layer, fed by the display services
+and buffer queue.

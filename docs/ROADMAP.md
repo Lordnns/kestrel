@@ -61,6 +61,9 @@ qemu for Linux ARM64.
 
 ### Phase 3: Native execution on ARM hosts: **not started**
 
+Starts on macOS once phase 2's threads and synchronisation are done
+(`PLAN.md` phase 3 priority).
+
 | Task | Status | Evidence |
 |------|--------|----------|
 | Memory arena refactor | not started | `Memory` is a `BTreeMap` of `Vec<u8>` regions |
@@ -72,7 +75,8 @@ qemu for Linux ARM64.
 ### Phases 4 to 7: **not started**
 
 - Phase 4 x86_64 recompiler: `create_backend(Jit)` returns "not implemented yet".
-- Phase 5 graphics, phase 6 commercial software, phase 7 polish: no code.
+- Phase 5 graphics (5A display, 5B Maxwell GPU level, 5C Ampere GPU level,
+  5D NVN API level), phase 6 commercial software, phase 7 polish: no code.
 
 ### Deviations from the hard rules found in the audit
 
@@ -89,7 +93,23 @@ qemu for Linux ARM64.
 
 - CI stays release-only (tags and manual runs); `PLAN.md` section 3 updated.
 - Fix the platform coverage gap, the missing expected-output generator and
-  the silently ignored system instructions, then start phase 1A.
+  the silently ignored system instructions, then start phase 1A. (Done:
+  phase 1 is complete.)
+
+### Plan changes (2026-10-29, evening)
+
+Prompted by the first public Switch 2 demos on Apple hardware
+(`PLAN.md` section 6). What changed and what it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Section 0 replaced: the audit is done; sessions start from this file's status and "Next task" | session start-up |
+| Section 1 adds the goal of emulating graphics at the highest level that works | phase 5 |
+| Section 2 adds: no ROM or key sites even for testing; no leaked SDK or NVN material and no private forks; rules for reusing other emulators' code; observed behaviour is written to `docs/SWITCH2_NOTES.md` before it is implemented | all phases |
+| Phase 3 starts on macOS once phase 2's threads and synchronisation are done, in parallel with IPC and services | order of work after the handle table |
+| Phase 5 split into 5A display, 5B Maxwell GPU level (homebrew, deko3d), 5C Ampere GPU level, 5D NVN API level for commercial games | graphics; resolves the old Maxwell question: both are needed |
+| Phase 6 uses 5C or 5D, whichever gets a title further first | commercial software |
+| New sections 6 (external landscape) and 7 (open decisions for the owner) | owner decisions: strategy, 5D approval, code reuse |
 
 ### Phase 1A notes
 
@@ -242,3 +262,20 @@ Phase 2, handle table and kernel objects: a per-process handle table with
 the current-thread and current-process pseudo-handles, svcCloseHandle,
 and the first kernel objects (threads, events, shared and transfer
 memory), with the main thread getting a real handle.
+
+Create `docs/SWITCH2_NOTES.md` alongside it (phase 2 task, required by
+`PLAN.md` section 2 before any behaviour learned by observation is
+implemented), with a short header explaining its purpose and format.
+
+### Order after that
+
+1. Phase 2: threads, then synchronisation.
+2. Then two tracks in parallel (`PLAN.md` phase 3 priority):
+   - Phase 2: IPC, first services, SD folder option, unimplemented-call log.
+   - Phase 3 on macOS: memory arena refactor, native backend,
+     differential tester.
+3. Phase 2 acceptance (homebrew console examples on all five platforms),
+   then phase 3 on Linux KVM and Windows.
+
+Owner decisions pending in `PLAN.md` section 7 (strategy, API-level
+graphics, code reuse) do not block any of the above; ask before phase 5.

@@ -27,14 +27,16 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
 - **Backend selection** that reports which fast path the host will get.
 
 ```
-$ cargo run --release -p kestrel-cli -- run guest/bin/algos.elf --stats
+$ cargo run --release -p kestrel-cli -- run guest/bin/algos.elf
 fib(25) = 75025
 crc32 = 0x00000000414fa339
 primes <= 100000 = 9592
 sort ok
 signed div/mod = 97 99
-[interp] 4890955 instructions, 17 SVCs in 0.106s (46.1 MIPS)
 ```
+
+Add `--stats` to see the instruction count and speed; `kestrel selftest`
+reports speed for the whole suite.
 
 ## Building
 
@@ -139,11 +141,18 @@ reference: faster backends are differentially tested against it. See
 
 ## Roadmap
 
+The plan of record, with its rules and acceptance criteria, is
+[PLAN.md](PLAN.md); progress against it is tracked in
+[docs/ROADMAP.md](docs/ROADMAP.md). In short:
+
 1. Homebrew (in progress: the NRO loader, process layout and memory calls
-   are done): handles, threads and synchronisation SVCs.
-2. IPC and the first OS services, from public documentation.
-3. `native` backend on aarch64 hosts; `jit` backend on x86_64.
-4. GPU command processing and shader translation to Vulkan.
+   are done): handles, threads and synchronisation, then IPC and the first
+   OS services, from public documentation.
+2. `native` backend on aarch64 hosts, starting on macOS, developed alongside
+   the OS services; then a `jit` backend on x86_64.
+3. Graphics at two levels: GPU emulation with shader translation to Vulkan
+   for any software, and graphics-API-level translation for commercial games.
+4. Running software owners have legally obtained, tested locally only.
 
 ## Legal and project rules
 

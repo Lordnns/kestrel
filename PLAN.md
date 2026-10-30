@@ -8,23 +8,26 @@ source of truth for how things are currently implemented.
 
 ---
 
-## 0. First session: audit before building
+## 0. Starting a session
 
-The repository has been modified by hand since this plan was written. Before
-starting any phase:
+The initial audit is done (see `docs/ROADMAP.md`, audit of 2026-10-29).
+At the start of every session:
 
-1. Read the whole repository: crate layout, CPU backends, loaders, OS
-   emulation, test suite, CI workflows, scripts and docs.
-2. Build it, run the full test suite, the linter and the built-in self-test,
-   and record what passes.
-3. Map what exists onto the phases below. Write the result into a status
-   section at the top of `docs/ROADMAP.md` (create it if missing): for every
-   task, mark done, partial or not started, with one line of evidence.
-4. Report any conflict between the code and this plan to the owner instead
+1. Read this plan, then the status and "Next task" sections of
+   `docs/ROADMAP.md`. ROADMAP tracks progress; this plan holds the rules and
+   the order of work. If they disagree, this plan wins and the ROADMAP is
+   corrected.
+2. Check whether the repository changed outside your last session (commits
+   by the owner). Re-audit only what changed, and record it in the ROADMAP.
+3. Report any conflict between the code and this plan to the owner instead
    of silently picking one. The owner's changes win unless they break a hard
    rule in section 2.
 
-Then continue with the first unfinished task of the earliest unfinished phase.
+Then continue with the ROADMAP's "Next task", or the owner's instruction if
+it differs.
+
+When this plan changes, the ROADMAP gets a dated "Plan changes" entry saying
+what changed and which tasks it affects.
 
 ---
 
@@ -38,6 +41,9 @@ Then continue with the first unfinished task of the earliest unfinished phase.
   correctness.
 - Emulate the console OS at a high level (system calls and services written
   in Rust), never by running console firmware.
+- Emulate graphics at the highest level that works: intercept the graphics
+  API games use where that is possible, and emulate the GPU's command stream
+  where it is not (phase 5).
 - Ship self-testing packages so any tester can verify their machine with a
   single command.
 
@@ -58,7 +64,22 @@ Then continue with the first unfinished task of the earliest unfinished phase.
 - Cite the public source of any non-obvious behaviour in a comment next to the
   implementation.
 - Commercial game files are used only locally by the owner. They never enter
-  the repository, CI, test fixtures, issues, logs or release packages.
+  the repository, CI, test fixtures, issues, logs or release packages. Never
+  help find, download or use games, keys or firmware from download sites,
+  including "for testing only".
+- No leaked material of any kind: no leaked SDK headers, NVN graphics API
+  headers or documentation, leaked source code, or code from private or
+  unreleased forks of other projects. Do not read them, even for reference.
+- Code from other open-source emulators may be reused only with the owner's
+  approval, with a compatible license (MIT, BSD, Apache 2.0, zlib; GPL code
+  cannot enter this MIT project), with attribution in the file and in
+  `docs/THIRD_PARTY.md` (created with the first reuse), and only from the
+  project's own public releases.
+- Behaviour learned by observing software (rather than from public
+  documentation) is first written down as a behaviour description in
+  `docs/SWITCH2_NOTES.md` (what happens, how it was observed, on what), and
+  implemented from that description. This keeps the observation step and the
+  implementation step separate, which is the core of a clean-room process.
 
 ### Correctness
 - Every instruction the CPU supports has a unit test whose encoding comes from
@@ -119,9 +140,10 @@ Then continue with the first unfinished task of the earliest unfinished phase.
 
 Each phase lists its goal, tasks, provisions (decisions already made) and
 acceptance criteria. Finish a phase's acceptance criteria before starting the
-next, unless the owner says otherwise.
+next, unless the owner says otherwise or a phase's provisions allow an earlier
+start (phase 3 does).
 
-### Phase 0: Foundation (expected done; confirm in the audit)
+### Phase 0: Foundation
 - Workspace split into memory, CPU, loader, OS emulation, test suite and
   command-line crates.
 - Portable interpreter covering integer instructions, branches, all load and
@@ -248,6 +270,11 @@ Provisions (decided):
 - Guest memory becomes one host-allocated arena shared by every backend,
   mappable into the VM.
 - Order: macOS first (owner's development Mac), then Linux KVM, then Windows.
+- Priority (2026-10-29): native execution on ARM is the approach the first
+  public Switch 2 demos use (section 6), so it is not deferred until phase 2
+  is complete. Start phase 3 on macOS as soon as phase 2's threads and
+  synchronisation are done, and run it alongside phase 2's IPC and services.
+  The differential tester keeps the two tracks honest.
 
 Tasks: memory arena refactor; the native backend (VM setup, user-level page
 tables, exception forwarding, register synchronisation); a differential tester
@@ -273,26 +300,59 @@ Acceptance: the self-test passes on the recompiler on Linux, Windows and
 macOS Intel; zero divergences against the interpreter.
 
 ### Phase 5: Graphics
-Goal: homebrew that draws, then first 3D output.
+Goal: homebrew that draws, then 3D, then a graphics path for commercial games.
 
-Provisions: the Switch 2 GPU is NVIDIA Ampere-based. Use public references
-(NVIDIA open-gpu-doc class definitions, Mesa NVK for command submission, Mesa
-NAK for the shader instruction encoding) and record anything learned by
-observation in `docs/SWITCH2_NOTES.md`. Render with Vulkan (MoltenVK on
-macOS) and a cross-platform windowing library.
+Graphics can be emulated at two levels, and kestrel needs both:
 
-Tasks: GPU driver services and their control calls, GPU address space,
-display services and buffer queue with presentation to a window, command
-stream processing for the 3D, compute and copy engines, a shader translator
-from the GPU's instruction set to SPIR-V, texture formats, render targets and
-caches.
+- **GPU level:** emulate the GPU driver services, the command stream and the
+  shader instruction set, then render with Vulkan. Works for any software,
+  including homebrew, which talks to the GPU through open-source libraries.
+  Most accurate, most work.
+- **API level:** commercial games draw through Nintendo's NVN graphics API,
+  which is part of the game's own code. Recognising those calls and
+  translating them straight to Vulkan or Metal skips the command stream and
+  much of the GPU emulation. This is how the first Switch 2 demos on Apple
+  hardware render (section 6). Much less work per game, but it only applies
+  to commercial software, and the API itself is not publicly documented.
 
-Acceptance: homebrew framebuffer and 2D examples display correctly on all
-five platforms; a first 3D sample renders.
+Provisions:
+- The Switch 2 GPU is NVIDIA Ampere-based; Switch 1 and its homebrew target
+  Maxwell. Public references: NVIDIA open-gpu-doc class definitions, Mesa NVK
+  (command submission), Mesa NAK (shader encodings), and the open-source
+  homebrew graphics library deko3d, which documents by example how Maxwell is
+  driven. Everything learned by observation goes to `docs/SWITCH2_NOTES.md`.
+- Render with Vulkan everywhere (MoltenVK on macOS). A native Metal backend
+  is an option later if MoltenVK limits performance.
+- One shader intermediate representation, with a Maxwell decoder first and
+  an Ampere decoder second, both producing SPIR-V. Ampere uses a different
+  instruction encoding from Maxwell; it is a new decoder, not a table of
+  renamed instructions.
+- API-level work follows the clean-room note-taking rule in section 2
+  strictly: the NVN API is known only from observation of software the owner
+  legally has, never from leaked headers or SDK documentation. Owner approval
+  is required before 5D starts (section 7).
 
-Open question for the owner: Switch 1 homebrew 3D targets the older Maxwell
-GPU. Decide whether to support Maxwell as a stepping stone or rely on locally
-dumped Switch 2 software for Ampere testing.
+5A. Display and framebuffer
+- GPU driver services and their control calls, GPU address space, display
+  services and buffer queue, presentation to a window on all five platforms.
+- Acceptance: homebrew framebuffer and 2D examples display correctly.
+
+5B. GPU level for homebrew (Maxwell)
+- Command stream processing for the 3D, compute and copy engines; Maxwell
+  shader decoder to SPIR-V; texture formats and layouts; render targets;
+  caches.
+- Acceptance: the deko3d examples built from source render correctly.
+
+5C. GPU level for Switch 2 (Ampere)
+- Ampere engine classes and the Ampere shader decoder into the same
+  representation; Switch 2 texture formats.
+- Acceptance: test software the owner has locally renders its first frames.
+
+5D. API level for commercial games
+- Identify how a game's graphics calls can be intercepted, document the
+  observed behaviour of each call, and translate the used subset to Vulkan.
+- Acceptance: one game the owner legally has reaches its menu through the
+  API path, on at least one platform.
 
 ### Phase 6: Commercial software (local testing only)
 Goal: the owner's own legally dumped games boot, and progress is tracked.
@@ -303,7 +363,8 @@ keys; game files never leave the owner's machines; testing happens on the
 three physical machines in section 3.
 
 Tasks: a loader for extracted executables (compressed segments, module
-headers, relocations) and game data from a host folder; the remaining services
+headers, relocations) and game data from a host folder; the graphics path
+from 5C or 5D, whichever gets a title further first; the remaining services
 discovered by booting titles, in order of need; a compatibility tracker in
 `docs/COMPATIBILITY.md` (title, platform, backend, status from boots to
 playable, frame rate, first blocking issue).
@@ -326,3 +387,53 @@ per-game configuration; shader and pipeline caches; a performance overlay.
   plan, or making anything that touches legal boundaries.
 - At the end of each session, summarise what changed, what was verified, and
   the next task.
+
+---
+
+## 6. External landscape (as of 2026-10-29)
+
+Public facts that shaped this plan. Re-check them before relying on them;
+this field moves weekly.
+
+- The first Switch 2 jailbreak became public in late October 2026, so dumps
+  of Switch 2 software now exist. Expect stronger legal action from Nintendo
+  against emulator projects in the following months. Section 2 matters more,
+  not less.
+- A private fork of nxnative (an open-source compatibility layer that runs
+  Switch software natively on Apple Silicon, with its own stand-in for OS
+  services, NVN graphics translated to Metal, and shader translation reused
+  from Ryujinx) showed a Switch 2 game running on macOS and iPhone on
+  27-28 October 2026, with visible rendering errors. The fork's author says it
+  will not be released. As of 26 October, no commercial Switch 2 game ran
+  under any public emulator.
+- On x86 hosts nothing comparable exists yet; that needs a recompiler
+  (phase 4).
+- Other Switch 2 projects (oboromi, Pound) are early foundations; Pound's
+  developers estimate a decade to a functional emulator.
+- A Switch 1 emulator (Eden, GPL) could in principle be extended for Switch 2,
+  since the OS and CPU architecture carry over; unverified claims of such a
+  patch circulate. See section 7.
+
+What this means for kestrel: the strategy in this plan (native ARM
+execution, OS emulated at a high level, graphics at the highest level that
+works) is the one the first working demos use. The ordering in phases 3 and 5
+reflects that.
+
+---
+
+## 7. Open decisions for the owner
+
+Claude Code must not decide these. Ask, then record the answer here with the
+date.
+
+1. **Strategy.** Keep building kestrel from scratch, or contribute Switch 2
+   support to an existing Switch 1 emulator? Contributing is faster but means
+   GPL code, a project already under DMCA pressure, and less control. kestrel
+   keeps its value either way as a clean-room, research-friendly project
+   (native ARM execution, cross-platform benchmarking).
+2. **API-level graphics (5D).** Approve or decline working at the NVN level,
+   given that the API can only be learned from observing commercial software
+   under the clean-room process in section 2.
+3. **Code reuse.** Approve or decline reusing MIT-licensed code from other
+   emulators (for example a shader translator), with attribution, instead of
+   writing it from scratch.
