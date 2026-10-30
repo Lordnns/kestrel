@@ -7,6 +7,7 @@
 //! `kestrel selftest` on their machine.
 
 use kestrel_cpu::{create_backend, BackendKind};
+use kestrel_hle::input::{button, Controller, Pad, Source, STICK_MAX};
 use kestrel_hle::{Process, Stop};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,39 @@ pub struct Case {
     /// NRO arguments after argv[0], one per line (`guest/src/nro/*.args`).
     pub args: &'static str,
     pub expected: &'static str,
+    /// The controller the program sees, if any.
+    pub input: Option<fn() -> Box<dyn Source>>,
+}
+
+/// The controller `hbinput` sees, modelled in scripts/gen-expected.py: a
+/// Pro Controller holding A and ZR with the left stick fully right and the
+/// right stick up and to the left for its first 8 samples, then B and
+/// Minus with both sticks centred.
+pub struct ScriptedPad;
+
+impl Source for ScriptedPad {
+    fn controller(&self) -> Controller {
+        Controller::ProController
+    }
+
+    fn sample(&mut self, n: u64) -> Pad {
+        if n < 8 {
+            Pad {
+                buttons: button::A | button::ZR,
+                left: (STICK_MAX, 0),
+                right: (-0x6000, STICK_MAX),
+            }
+        } else {
+            Pad {
+                buttons: button::B | button::MINUS,
+                ..Pad::default()
+            }
+        }
+    }
+}
+
+fn scripted_pad() -> Box<dyn Source> {
+    Box::new(ScriptedPad)
 }
 
 impl Case {
@@ -49,13 +83,18 @@ macro_rules! case {
                 $program,
                 ".txt"
             )),
+            input: None,
         }
     };
 }
 
-/// A homebrew NRO, run with the arguments in `guest/src/nro/<name>.args`.
+/// A homebrew NRO, run with the arguments in `guest/src/nro/<name>.args`,
+/// and optionally a controller.
 macro_rules! homebrew {
     ($name:literal, $desc:literal) => {
+        homebrew!($name, $desc, None)
+    };
+    ($name:literal, $desc:literal, $input:expr) => {
         Case {
             name: $name,
             description: $desc,
@@ -77,6 +116,7 @@ macro_rules! homebrew {
                 $name,
                 ".txt"
             )),
+            input: $input,
         }
     };
 }
@@ -120,6 +160,11 @@ pub const CASES: &[Case] = &[
     homebrew!("hbtime", "homebrew NRO: time startup, clocks, UTC calendar"),
     homebrew!("hbfs", "homebrew NRO: fsp-srv, the SD card folder"),
     homebrew!("hbpower", "homebrew NRO: psm power state, error reports"),
+    homebrew!(
+        "hbinput",
+        "homebrew NRO: a scripted Pro Controller through hid",
+        Some(scripted_pad)
+    ),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
@@ -176,6 +221,7 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
         std::fs::create_dir_all(&sd).map_err(|e| format!("cannot create {}: {e}", sd.display()))?;
         proc.services.fs.sd = Some(sd.clone());
     }
+    proc.input = case.input.map(|make| make());
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
     let stop = proc.run(cpu.as_mut(), MAX_STEPS);

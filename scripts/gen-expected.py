@@ -1030,6 +1030,83 @@ def hbpower():
     return "".join(line + "\n" for line in out)
 
 
+def hbinput():
+    """guest/src/nro/hbinput.c: player 1 read as libnx's padUpdate reads it,
+    driven by the self-test's ScriptedPad (crates/kestrel-testsuite): a Pro
+    Controller holding A and ZR with the left stick at (0x7fff, 0) and the
+    right stick at (-0x6000, 0x7fff) for its first 8 samples, then B and
+    Minus with both sticks centred. Switchbrew's "HID services": NpadButton
+    bits (A 0, B 1, ZR 9, Minus 11, StickLLeft 16 to StickRDown 23 in the
+    order Left, Up, Right, Down), NpadStyleTag FullKey (bit 0) and Handheld
+    (bit 1), NpadAttribute IsConnected (bit 0), DeviceType FullKey (bit 0),
+    NpadSystemProperties IsAbxyButtonOriented (11), IsPlusAvailable (13),
+    IsMinusAvailable (14), IsDirectionalButtonsAvailable (15),
+    AppletFooterUiType SwitchProController (12), ColorAttribute Ok (0),
+    NpadJoyAssignmentMode Dual (0), a RingLifo of 17 entries. Kestrel's
+    documented choices (docs/ROADMAP.md, phase 2 notes): no controller until
+    the program has activated npads and accepts its style and ID; a stick
+    past half its range (0x7fff / 2) presses its direction buttons; the Pro
+    Controller is player 1 and wireless."""
+    ok = hex64(0)
+    A, B, ZR, MINUS = 1 << 0, 1 << 1, 1 << 9, 1 << 11
+
+    def directions(x, y, first):
+        half = 0x7FFF // 2
+        bits = 0
+        for i, on in enumerate([x < -half, y > half, x > half, y < -half]):
+            if on:
+                bits |= 1 << (first + i)
+        return bits
+
+    def state(buttons, left, right):
+        b = buttons | directions(*left, 16) | directions(*right, 20)
+        return [
+            f"  buttons: {hex64(b)}",
+            f"  left stick x: {left[0]}",
+            f"  left stick y: {left[1]}",
+            f"  right stick x: {right[0]}",
+            f"  right stick y: {right[1]}",
+            f"  attributes: {hex64(1)}",
+        ]
+
+    out = [
+        "homebrew input test",
+        f"sm: register: {ok}",
+        f"CreateAppletResource: {ok}",
+        f"GetSharedMemoryHandle: {ok}",
+        f"map: {ok}",
+        f"player 1 style set before setup: {ok}",
+        f"ActivateNpadWithRevision 5: {ok}",
+        f"SetSupportedNpadIdType: {ok}",
+        f"SetSupportedNpadStyleSet: {ok}",
+        f"player 1 style set: {hex64(1)}",
+        f"joy assignment mode: {ok}",
+        f"device type: {hex64(1)}",
+        f"system properties: {hex64(1 << 11 | 1 << 13 | 1 << 14 | 1 << 15)}",
+        f"applet footer type: {hex64(12)}",
+        f"full key colour attribute: {ok}",
+        f"handheld style set: {ok}",
+        f"ring buffer count: {hex64(17)}",
+        f"states read: {hex64(1)}",
+        "newest state:",
+    ]
+    out += state(A | ZR, (0x7FFF, 0), (-0x6000, 0x7FFF))
+    out += [
+        "its sampling numbers agree: yes",
+        "more than one state, numbered one apart: yes",
+        "after the script lets go:",
+    ]
+    out += state(B | MINUS, (0, 0), (0, 0))
+    out += [
+        f"unmap: {ok}",
+        f"close the shared memory: {ok}",
+        f"close IAppletResource: {ok}",
+        f"close hid: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -1051,6 +1128,7 @@ PROGRAMS = {
     "hbtime": hbtime,
     "hbfs": hbfs,
     "hbpower": hbpower,
+    "hbinput": hbinput,
 }
 
 

@@ -1,0 +1,39 @@
+homebrew input test
+sm: register: 0x0000000000000000
+CreateAppletResource: 0x0000000000000000
+GetSharedMemoryHandle: 0x0000000000000000
+map: 0x0000000000000000
+player 1 style set before setup: 0x0000000000000000
+ActivateNpadWithRevision 5: 0x0000000000000000
+SetSupportedNpadIdType: 0x0000000000000000
+SetSupportedNpadStyleSet: 0x0000000000000000
+player 1 style set: 0x0000000000000001
+joy assignment mode: 0x0000000000000000
+device type: 0x0000000000000001
+system properties: 0x000000000000e800
+applet footer type: 0x000000000000000c
+full key colour attribute: 0x0000000000000000
+handheld style set: 0x0000000000000000
+ring buffer count: 0x0000000000000011
+states read: 0x0000000000000001
+newest state:
+  buttons: 0x0000000000340201
+  left stick x: 32767
+  left stick y: 0
+  right stick x: -24576
+  right stick y: 32767
+  attributes: 0x0000000000000001
+its sampling numbers agree: yes
+more than one state, numbered one apart: yes
+after the script lets go:
+  buttons: 0x0000000000000802
+  left stick x: 0
+  left stick y: 0
+  right stick x: 0
+  right stick y: 0
+  attributes: 0x0000000000000001
+unmap: 0x0000000000000000
+close the shared memory: 0x0000000000000000
+close IAppletResource: 0x0000000000000000
+close hid: 0x0000000000000000
+close sm: 0x0000000000000000
