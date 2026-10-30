@@ -7,8 +7,11 @@
 //! `kestrel selftest` on their machine.
 
 use kestrel_cpu::{create_backend, BackendKind};
+use kestrel_hle::display::{Frame, Screen};
 use kestrel_hle::input::{button, Controller, Pad, Source, STICK_MAX};
 use kestrel_hle::{Process, Stop};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 pub struct Case {
@@ -52,6 +55,42 @@ impl Source for ScriptedPad {
 
 fn scripted_pad() -> Box<dyn Source> {
     Box::new(ScriptedPad)
+}
+
+/// CRC-32 as zlib computes it (reflected, polynomial 0xedb88320).
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                crc >> 1 ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// The frames a program shows, as lines the self-test adds to its output:
+/// each frame's size and the CRC-32 of its pixels as little-endian
+/// 0x00RRGGBB words (modelled in scripts/gen-expected.py).
+struct FrameLog(Rc<RefCell<Vec<String>>>);
+
+impl Screen for FrameLog {
+    fn present(&mut self, frame: &Frame) {
+        let bytes: Vec<u8> = frame.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
+        let mut log = self.0.borrow_mut();
+        let line = format!(
+            "frame {}: {}x{}, crc32 {:#010x}",
+            log.len() + 1,
+            frame.width,
+            frame.height,
+            crc32(&bytes)
+        );
+        log.push(line);
+    }
 }
 
 impl Case {
@@ -165,6 +204,7 @@ pub const CASES: &[Case] = &[
         "homebrew NRO: a scripted Pro Controller through hid",
         Some(scripted_pad)
     ),
+    homebrew!("hbdisplay", "homebrew NRO: vi, nvdrv, frames at vsync"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
@@ -222,6 +262,8 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
         proc.services.fs.sd = Some(sd.clone());
     }
     proc.input = case.input.map(|make| make());
+    let frames = Rc::new(RefCell::new(Vec::new()));
+    proc.screen = Some(Box::new(FrameLog(frames.clone())));
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
     let stop = proc.run(cpu.as_mut(), MAX_STEPS);
@@ -229,7 +271,11 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
     if nro {
         let _ = std::fs::remove_dir_all(&sd);
     }
-    let output = proc.debug_output_str();
+    let mut output = proc.debug_output_str();
+    for line in frames.borrow().iter() {
+        output.push_str(line);
+        output.push('\n');
+    }
     Ok(Outcome {
         passed: stop == Stop::Exited && output == case.expected,
         stop,
@@ -238,4 +284,16 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
         elapsed,
         backend: cpu.name(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_matches_zlib() {
+        // The CRC-32 check value (zlib.crc32(b"123456789")).
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!(crc32(b""), 0);
+    }
 }

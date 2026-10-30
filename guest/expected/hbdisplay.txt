@@ -1,0 +1,134 @@
+homebrew display test
+sm: register: 0x0000000000000000
+vi:m: 0x0000000000001015
+vi:s: 0x0000000000001015
+vi:u: 0x0000000000000000
+GetDisplayService: 0x0000000000000000
+GetRelayService: 0x0000000000000000
+GetSystemDisplayService: 0x0000000000000a72
+OpenDisplay: 0x0000000000000000
+display: 0x0000000000000001
+GetDisplayResolution: 0x0000000000000000
+width: 1920
+height: 1080
+appletOE: 0x0000000000000000
+OpenApplicationProxy: 0x0000000000000000
+GetSelfController: 0x0000000000000000
+CreateManagedDisplayLayer: 0x0000000000000000
+layer: 0x0000000000000001
+OpenLayer: 0x0000000000000000
+native window bytes: 0x000000000000003c
+binder: 0x0000000000000001
+SetLayerScalingMode: 0x0000000000000000
+QueryPointerBufferSize: 0x0000000000000000
+pointer buffer: 0x0000000000008000
+AdjustRefcount weak: 0x0000000000000000
+AdjustRefcount strong: 0x0000000000000000
+GetNativeHandle: 0x0000000000000000
+CONNECT: 0x0000000000000000
+  width: 1280
+  height: 720
+  transform hint: 0x0000000000000000
+  pending: 0
+  status: 0
+SetHeapSize: 0x0000000000000000
+CreateTransferMemory: 0x0000000000000000
+nvdrv: 0x0000000000000000
+Initialize: 0x0000000000000000
+  error: 0x0000000000000000
+close the transfer memory handle: 0x0000000000000000
+CloneCurrentObjectEx: 0x0000000000000000
+clone handed out: 0x0000000000000001
+SetAruid: 0x0000000000000000
+  error: 0x0000000000000000
+Open /dev/nvmap: 0x0000000000000000
+  fd: 0x0000000000000001
+  error: 0x0000000000000000
+Open /dev/nvhost-ctrl: 0x0000000000000000
+  fd: 0x0000000000000002
+  error: 0x0000000000000000
+NVMAP_IOC_CREATE: 0x0000000000000000
+  handle: 0x0000000000000001
+NVMAP_IOC_ALLOC: 0x0000000000000000
+NVMAP_IOC_GET_ID: 0x0000000000000000
+  id: 0x0000000000000001
+SET_PREALLOCATED_BUFFER 0
+  result: 0x0000000000000000
+  reply bytes: 0x0000000000000000
+SET_PREALLOCATED_BUFFER 1
+  result: 0x0000000000000000
+  reply bytes: 0x0000000000000000
+frame 1
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: 0
+  fence bytes: 0x0000000000000024
+  fence descriptors: 0x0000000000000000
+  fences: 0x0000000000000000
+  status: 0
+  REQUEST_BUFFER: 0x0000000000000000
+  non-null: 0x0000000000000001
+  buffer bytes: 0x000000000000016c
+  the buffer it was given: yes
+  status: 0
+  QUEUE_BUFFER: 0x0000000000000000
+  width: 96
+  height: 40
+  transform hint: 0x0000000000000000
+  pending: 1
+  status: 0
+frame 2
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: 1
+  fence bytes: 0x0000000000000024
+  fence descriptors: 0x0000000000000000
+  fences: 0x0000000000000000
+  status: 0
+  REQUEST_BUFFER: 0x0000000000000000
+  non-null: 0x0000000000000001
+  buffer bytes: 0x000000000000016c
+  the buffer it was given: yes
+  status: 0
+  QUEUE_BUFFER: 0x0000000000000000
+  width: 96
+  height: 40
+  transform hint: 0x0000000000000000
+  pending: 2
+  status: 0
+a third buffer:
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: -1
+  status: -11
+wait for the buffer-free event: 0x0000000000000000
+woken by the next vsync: yes
+frame 3
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: 0
+  fence bytes: 0x0000000000000024
+  fence descriptors: 0x0000000000000000
+  fences: 0x0000000000000000
+  status: 0
+  QUEUE_BUFFER: 0x0000000000000000
+  width: 96
+  height: 40
+  transform hint: 0x0000000000000000
+  pending: 1
+  status: 0
+DISCONNECT: 0x0000000000000000
+  status: 0
+NVMAP_IOC_FREE: 0x0000000000000000
+  address is the buffers: 0x0000000000000001
+  size: 0x0000000000010000
+Close /dev/nvmap: 0x0000000000000000
+  error: 0x0000000000000000
+close the clone: 0x0000000000000000
+close nvdrv: 0x0000000000000000
+CloseLayer: 0x0000000000000000
+CloseDisplay: 0x0000000000000000
+close the event: 0x0000000000000000
+close the relay: 0x0000000000000000
+close the display service: 0x0000000000000000
+close vi:u: 0x0000000000000000
+close sm: 0x0000000000000000
+frame 1: 96x40, crc32 0x81b28734
+frame 2: 96x40, crc32 0x1a7f5287
+frame 3: 96x40, crc32 0x8eb4d434

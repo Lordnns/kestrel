@@ -1107,6 +1107,162 @@ def hbinput():
     return "".join(line + "\n" for line in out)
 
 
+def hbdisplay():
+    """guest/src/nro/hbdisplay.c: the display set up as libnx's __nx_win_init,
+    nvInitialize and framebufferCreate do, then three frames queued.
+    Switchbrew: sm: NotAllowed is 0x1015 ("Error codes"); vi:u gives no
+    ISystemDisplayService (0xa72, "VI services"); the "Default" display is
+    1080p; the native window is a parcel of a 0x10-byte header, 0x28 bytes
+    of ParcelData and a 4-byte object; nvdrv answers NvError 0 ("NV
+    services"); the GraphicBuffer is 10 header words and 0x51 ints; an
+    NvMultiFence is 0x24 bytes. Android: WOULD_BLOCK is -11. Kestrel's
+    documented choices (docs/ROADMAP.md): display, layer and binder are 1;
+    the pointer buffer is 0x8000 bytes; the queue reports 1280x720 before it
+    has buffers; descriptors and nvmap handles count from 1; a dequeue
+    answers the free buffer freed longest ago with no fences; a queued
+    buffer is shown at once and freed at the next vsync (60 Hz of the 19.2
+    MHz clock); RGB 565 becomes 8 bits a channel with the top bits
+    repeated. The self-test adds a line per frame shown: its size and the
+    CRC-32 of its pixels as little-endian 0x00RRGGBB words."""
+    ok = hex64(0)
+    width, height = 96, 40
+    fb_size = 256 * 128
+
+    def pattern(f, x, y):
+        return ((x * 0x0841) ^ (y * 0x1003) ^ (f * 0x5555)) & 0xFFFF
+
+    def rgb(v):
+        r, g, b = v >> 11, v >> 5 & 0x3F, v & 0x1F
+        return (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2)
+
+    def frame_line(n, f):
+        pixels = b"".join(
+            struct.pack("<I", rgb(pattern(f, x, y)))
+            for y in range(height)
+            for x in range(width)
+        )
+        return f"frame {n}: {width}x{height}, crc32 0x{zlib.crc32(pixels):08x}"
+
+    def dequeue(slot):
+        return [
+            f"  DEQUEUE_BUFFER: {ok}",
+            f"  slot: {slot}",
+            f"  fence bytes: {hex64(0x24)}",
+            f"  fence descriptors: {ok}",
+            f"  fences: {ok}",
+            "  status: 0",
+        ]
+
+    def request():
+        return [
+            f"  REQUEST_BUFFER: {ok}",
+            f"  non-null: {hex64(1)}",
+            f"  buffer bytes: {hex64((10 + 0x51) * 4)}",
+            "  the buffer it was given: yes",
+            "  status: 0",
+        ]
+
+    def queue(pending):
+        return [
+            f"  QUEUE_BUFFER: {ok}",
+            f"  width: {width}",
+            f"  height: {height}",
+            f"  transform hint: {ok}",
+            f"  pending: {pending}",
+            "  status: 0",
+        ]
+
+    out = [
+        "homebrew display test",
+        f"sm: register: {ok}",
+        f"vi:m: {hex64(0x1015)}",
+        f"vi:s: {hex64(0x1015)}",
+        f"vi:u: {ok}",
+        f"GetDisplayService: {ok}",
+        f"GetRelayService: {ok}",
+        f"GetSystemDisplayService: {hex64(0xA72)}",
+        f"OpenDisplay: {ok}",
+        f"display: {hex64(1)}",
+        f"GetDisplayResolution: {ok}",
+        "width: 1920",
+        "height: 1080",
+        f"appletOE: {ok}",
+        f"OpenApplicationProxy: {ok}",
+        f"GetSelfController: {ok}",
+        f"CreateManagedDisplayLayer: {ok}",
+        f"layer: {hex64(1)}",
+        f"OpenLayer: {ok}",
+        f"native window bytes: {hex64(0x10 + 0x28 + 4)}",
+        f"binder: {hex64(1)}",
+        f"SetLayerScalingMode: {ok}",
+        f"QueryPointerBufferSize: {ok}",
+        f"pointer buffer: {hex64(0x8000)}",
+        f"AdjustRefcount weak: {ok}",
+        f"AdjustRefcount strong: {ok}",
+        f"GetNativeHandle: {ok}",
+        f"CONNECT: {ok}",
+        "  width: 1280",
+        "  height: 720",
+        f"  transform hint: {ok}",
+        "  pending: 0",
+        "  status: 0",
+        f"SetHeapSize: {ok}",
+        f"CreateTransferMemory: {ok}",
+        f"nvdrv: {ok}",
+        f"Initialize: {ok}",
+        f"  error: {ok}",
+        f"close the transfer memory handle: {ok}",
+        f"CloneCurrentObjectEx: {ok}",
+        f"clone handed out: {hex64(1)}",
+        f"SetAruid: {ok}",
+        f"  error: {ok}",
+        f"Open /dev/nvmap: {ok}",
+        f"  fd: {hex64(1)}",
+        f"  error: {ok}",
+        f"Open /dev/nvhost-ctrl: {ok}",
+        f"  fd: {hex64(2)}",
+        f"  error: {ok}",
+        f"NVMAP_IOC_CREATE: {ok}",
+        f"  handle: {hex64(1)}",
+        f"NVMAP_IOC_ALLOC: {ok}",
+        f"NVMAP_IOC_GET_ID: {ok}",
+        f"  id: {hex64(1)}",
+    ]
+    for slot in range(2):
+        out += [f"SET_PREALLOCATED_BUFFER {slot}", f"  result: {ok}", f"  reply bytes: {ok}"]
+    out += ["frame 1"] + dequeue(0) + request() + queue(1)
+    out += ["frame 2"] + dequeue(1) + request() + queue(2)
+    out += [
+        "a third buffer:",
+        f"  DEQUEUE_BUFFER: {ok}",
+        "  slot: -1",
+        "  status: -11",
+        f"wait for the buffer-free event: {ok}",
+        "woken by the next vsync: yes",
+    ]
+    out += ["frame 3"] + dequeue(0) + queue(1)
+    out += [
+        f"DISCONNECT: {ok}",
+        "  status: 0",
+        f"NVMAP_IOC_FREE: {ok}",
+        f"  address is the buffers: {hex64(1)}",
+        f"  size: {hex64(2 * fb_size)}",
+        f"Close /dev/nvmap: {ok}",
+        f"  error: {ok}",
+        f"close the clone: {ok}",
+        f"close nvdrv: {ok}",
+        f"CloseLayer: {ok}",
+        f"CloseDisplay: {ok}",
+        f"close the event: {ok}",
+        f"close the relay: {ok}",
+        f"close the display service: {ok}",
+        f"close vi:u: {ok}",
+        f"close sm: {ok}",
+    ]
+    out += [frame_line(n, f) for n, f in [(1, 1), (2, 2), (3, 3)]]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -1129,6 +1285,7 @@ PROGRAMS = {
     "hbfs": hbfs,
     "hbpower": hbpower,
     "hbinput": hbinput,
+    "hbdisplay": hbdisplay,
 }
 
 
