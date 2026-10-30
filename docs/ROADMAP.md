@@ -44,7 +44,7 @@ qemu for Linux ARM64.
 | 1D Real-hardware oracle | done | `rt.h` host mode (`KESTREL_HOST`) sends the three console calls to the C library; `scripts/check-host.sh` builds every C program natively (integer-only and NEON, 12 builds) and compares its output with `guest/expected`; CI job `hardware-oracle` runs it on `ubuntu-24.04-arm` and `macos-14`, both passing on releases `v0.1.8` and `v0.1.9` (12/12 on each; Apple clang 15 and clang 18). Not covered: `asm_checks.S`, which is console-only assembly |
 | Phase 1 acceptance | done | every C program with and without NEON passes the self-test on all five targets (CI, `v0.1.8`); the hardware oracle passes on both ARM runners; `scripts/check-optimised.sh` rebuilds every program at `-O3 -march=armv8.2-a` and runs it in kestrel: 13/13 reach the expected output with no unsupported instruction (CI, clang 18, `v0.1.9`) |
 
-### Phase 2: Homebrew: **in progress**
+### Phase 2: Homebrew: **done** (accepted on `v0.1.17`)
 
 | Task | Status | Evidence |
 |------|--------|----------|
@@ -58,7 +58,7 @@ qemu for Linux ARM64.
 | First services | done, with the gaps below | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; psm; fatal:u, svcBreak and result names; controller input in hid's shared memory, from a window (winit, softbuffer, gilrs) mapping keyboard and gamepads; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`, `hbpower`, `hbinput` |
 | SD folder option, unimplemented-call log | done | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, svcGetInfo types, named ports, services, commands and CMIF control commands stop as `Stop::Unimplemented` with their identifiers, and `kestrel run` appends each to `user/logs/unimplemented.log` |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
-| Phase 2 acceptance | done locally, CI pending | the four standard examples (hello-world, read-controls, sdmc, barrier), built from source in the pinned devkitPro container (libnx 4.12.0), run in kestrel with scripted presses, and their last frames read back with libnx's font and checked against their sources (`scripts/build-examples.sh`, `run-examples.sh`, `check-examples.py`): 4/4 on Windows x86_64; CI runs them on every native job from the next release tag |
+| Phase 2 acceptance | done | the four standard examples (hello-world, read-controls, sdmc, barrier), built from source in the pinned devkitPro container (libnx 4.12.0), run in kestrel with scripted presses, and their last frames read back with libnx's font and checked against their sources (`scripts/build-examples.sh`, `run-examples.sh`, `check-examples.py`): 4/4 on every native CI job (Linux, Windows and macOS, x86_64 and aarch64) on `v0.1.17`, which was all green; every unimplemented call stops with its name and number and is logged |
 
 ### Phase 3: Native execution on ARM hosts: **not started**
 
@@ -799,17 +799,20 @@ Gaps:
 
 ## Next task
 
-Two tracks now run in parallel (`PLAN.md` phase 3 priority).
+Phase 2 is accepted (`v0.1.17`, 2026-10-30). Ask the owner which comes
+next; the candidates:
 
-Phase 2, the rest of the first services (on any machine), each from
-its Switchbrew page, in the order libnx's startup opens them, and each
-checked by a homebrew test program:
-
-1. Phase 2 acceptance (`PLAN.md`): done locally (4/4 examples pass on
-   Windows x86_64); confirm the CI run on the next release tag, then mark
-   phase 2 accepted. See "Phase 2 acceptance" below. Raise with the owner
-   the clock-rate finding recorded there.
-2. Later input tasks the owner wants (2026-10-30): the other
+1. The clock rate (an owner decision, see "Phase 2 acceptance" below):
+   one tick per guest instruction makes programs see a CPU about 50 times
+   slower than a Switch's in guest time. Explain it plainly and ask.
+2. Phase 3 on Linux KVM and Windows (the native backend), now that
+   phase 2 is accepted; phase 3 on macOS needs a session on the owner's
+   Mac.
+3. A licence-notices file in the release packages, which now bundle
+   MIT/Apache crates (winit, softbuffer, gilrs and their dependencies).
+4. More homebrew: run other public homebrew in kestrel and fix what the
+   unimplemented-call log names (`user/logs/unimplemented.log`).
+5. Later input tasks the owner wants (2026-10-30): the other
    NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
    players, and real Joy-Con motion, rumble and pairing over their own
    protocol. A Wii Remote is not a Switch controller type; it can only be
@@ -911,9 +914,10 @@ Steps:
    against what the example's source prints (barrier against the
    barrier's rules). 4/4 pass; breaking the block-linear reading fails
    all four.
-7. Committed, not yet run: `ci.yml` builds the examples in a job of its
-   own and every native job runs and checks them. Verify on the next
-   release tag.
+7. Done: `ci.yml` builds the examples in a job of its own and every
+   native job runs and checks them: 4/4 on all six on `v0.1.17`.
+   (`v0.1.16` failed to build a Unix-only test, which Windows never
+   compiles; the checks now include a Linux type-check.)
 
 What libnx 4.12's startup and the examples needed (each found by
 running them):
@@ -995,7 +999,7 @@ native backend, and the differential tester.
 
 ### Order after that
 
-1. Phase 3 on Linux KVM and Windows, once phase 2 is accepted.
+1. Phase 3 on Linux KVM and Windows (phase 2 is accepted).
 
 Owner decisions pending in `PLAN.md` section 7 (strategy, API-level
 graphics, code reuse) do not block any of the above; ask before phase 5.

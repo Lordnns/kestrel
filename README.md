@@ -19,8 +19,10 @@ An experimental, clean-room ARM64 console emulator written in Rust, aimed at
 next-generation hybrid handheld consoles. It builds and runs on **x86_64 and
 aarch64 hosts** (Linux, macOS, Windows) from day one.
 
-> Status: early foundation. It runs freestanding ARM64 test programs. It does
-> not run commercial software, and nothing here helps anyone obtain it.
+> Status: early. It runs open-source homebrew console programs built with
+> libnx (the standard examples pass on every platform), with no GPU yet. It
+> does not run commercial software, and nothing here helps anyone obtain
+> it.
 
 ## What works
 
