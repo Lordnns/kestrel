@@ -30,6 +30,8 @@ pub const CORES: u32 = 4;
 pub const DEFAULT_CORE: u32 = 0;
 /// The main thread's priority. Kestrel's choice.
 pub const MAIN_PRIORITY: u32 = 0x2c;
+/// The lowest priority; 0 is the highest ("SVC", SetThreadPriority).
+pub const LOWEST_PRIORITY: u32 = 0x3f;
 /// The size of a thread local region ("Thread Local Region").
 pub const TLR_SIZE: u64 = 0x200;
 /// Thread local regions per page: the first slot of each page is reserved
@@ -212,6 +214,7 @@ impl Process {
     }
 
     /// The last handle to thread `id` closed: forget it once it has exited.
+    /// A thread that was never started can no longer be, so it goes too.
     pub(crate) fn thread_released(&mut self, id: u64) {
         let i = self
             .sched
@@ -220,7 +223,80 @@ impl Process {
             .position(|t| t.id == id)
             .expect("a thread object names a thread");
         self.sched.threads[i].object = None;
+        if self.sched.threads[i].state == State::Created {
+            self.end_thread(i);
+        }
         self.reap();
+    }
+
+    /// Mark thread `i` exited and free its thread local region.
+    fn end_thread(&mut self, i: usize) {
+        let t = &mut self.sched.threads[i];
+        t.state = State::Exited;
+        let tlr = t.tlr;
+        self.sched.tlrs.retain(|&a| a != tlr);
+    }
+
+    /// svcCreateThread ("SVC"): a thread that starts at `entry` with X0 =
+    /// `arg` and SP = `stack_top` once svcStartThread is called. Priority
+    /// is 0 to 0x3F (InvalidPriority otherwise); ProcessorId is 0 to 3, or
+    /// -2 for the process's default core (InvalidCoreId otherwise).
+    pub fn create_thread(
+        &mut self,
+        entry: u64,
+        arg: u64,
+        stack_top: u64,
+        priority: i32,
+        core: i32,
+    ) -> Result<u32, u64> {
+        if !(0..=LOWEST_PRIORITY as i32).contains(&priority) {
+            return Err(result::INVALID_PRIORITY);
+        }
+        let core = match core {
+            -2 => DEFAULT_CORE,
+            0..=3 => core as u32,
+            _ => return Err(result::INVALID_CORE_ID),
+        };
+        self.new_thread(entry, arg, stack_top, priority as u32, core)
+    }
+
+    /// svcStartThread: a created thread becomes ready. Starting it twice is
+    /// InvalidState (kestrel's choice; Switchbrew lists no result codes).
+    pub fn start_thread(&mut self, h: u64) -> Result<(), u64> {
+        let i = self.thread_index(h)?;
+        if self.sched.threads[i].state != State::Created {
+            return Err(result::INVALID_STATE);
+        }
+        let turn = self.sched.take_turn();
+        let t = &mut self.sched.threads[i];
+        t.state = State::Ready;
+        t.turn = turn;
+        Ok(())
+    }
+
+    /// svcExitThread: the running thread ends; its handles stay valid.
+    pub fn exit_thread(&mut self) {
+        self.end_thread(self.sched.current);
+        self.sched.rotate = true;
+    }
+
+    /// svcSleepThread: 0, -1 and -2 yield; kestrel treats all three alike,
+    /// as threads do not migrate between its cores. A positive time puts
+    /// the thread to sleep. Other negative values are not documented.
+    pub fn sleep_thread(&mut self, ns: i64) -> Result<(), String> {
+        let until = match ns {
+            1.. => Some(self.cpu.retired.saturating_add(ticks(ns as u64))),
+            -2..=0 => None,
+            _ => return Err(format!("svcSleepThread with {ns} nanoseconds")),
+        };
+        let turn = self.sched.take_turn();
+        let t = &mut self.sched.threads[self.sched.current];
+        t.turn = turn;
+        if let Some(until) = until {
+            t.state = State::Sleeping { until };
+        }
+        self.sched.rotate = true;
+        Ok(())
     }
 
     /// Drop exited threads no handle names, other than the running one.
@@ -321,6 +397,212 @@ impl Process {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::svc::{dispatch, nr};
+    use kestrel_core::Memory;
+    use kestrel_loader::Loaded;
+
+    fn process() -> Process {
+        let image = Loaded {
+            entry: 0x1000,
+            image_start: 0,
+            image_end: 0,
+        };
+        Process::new(Memory::new(), &image).unwrap()
+    }
+
+    /// Make system call `n` with X0.. = `args` as the run loop does, then
+    /// schedule. Returns W0 and X1 as the call left them.
+    fn svc(p: &mut Process, n: u16, args: &[u64]) -> (u64, u64) {
+        p.cpu.x[..args.len()].copy_from_slice(args);
+        assert_eq!(dispatch(p, n), None);
+        let regs = (p.cpu.x[0], p.cpu.x[1]);
+        let rotate = std::mem::take(&mut p.sched.rotate);
+        assert_eq!(p.schedule(rotate), None);
+        regs
+    }
+
+    /// Create a thread with SP 0x9000 and X0 0x55; returns its handle.
+    fn spawn(p: &mut Process, entry: u64, prio: u64, core: u64) -> u64 {
+        let (rc, h) = svc(p, nr::CREATE_THREAD, &[0, entry, 0x55, 0x9000, prio, core]);
+        assert_eq!(rc, 0);
+        h
+    }
+
+    /// Where the running thread is.
+    fn running(p: &Process) -> u64 {
+        p.cpu.pc
+    }
+
+    #[test]
+    fn create_thread_checks_priority_and_processor() {
+        let mut p = process();
+        let create = |p: &mut Process, prio: i64, core: i64| {
+            let args = [0, 0x2000, 0, 0x9000, prio as u64, core as u64];
+            svc(p, nr::CREATE_THREAD, &args).0
+        };
+        assert_eq!(create(&mut p, 0x40, 0), result::INVALID_PRIORITY);
+        assert_eq!(create(&mut p, -1, 0), result::INVALID_PRIORITY);
+        for core in [4, -1, -3] {
+            assert_eq!(
+                create(&mut p, 0x2c, core),
+                result::INVALID_CORE_ID,
+                "core {core}"
+            );
+        }
+        assert_eq!(create(&mut p, 0x3f, -2), 0);
+        assert_eq!(create(&mut p, 0, 3), 0);
+        let t = &p.sched.threads;
+        assert_eq!((t[1].priority, t[1].core), (0x3f, DEFAULT_CORE));
+        assert_eq!((t[2].priority, t[2].core), (0, 3));
+        assert_eq!(t[1].state, State::Created);
+    }
+
+    #[test]
+    fn a_started_thread_gets_its_registers_and_its_own_zeroed_tlr() {
+        let mut p = process();
+        let main_tlr = p.cpu.tpidrro_el0;
+        assert_eq!(main_tlr, layout::TLS_BASE + TLR_SIZE);
+        p.mem.write64(main_tlr, 7).unwrap();
+        let h = spawn(&mut p, 0x2000, 0x20, 0);
+        assert_eq!(running(&p), 0x1000, "created, not started");
+        assert_eq!(svc(&mut p, nr::START_THREAD, &[h]).0, 0);
+        // Higher priority on the same core: it runs at once.
+        assert_eq!(running(&p), 0x2000);
+        assert_eq!((p.cpu.x[0], p.cpu.sp), (0x55, 0x9000));
+        let tlr = p.cpu.tpidrro_el0;
+        assert_eq!(tlr, main_tlr + TLR_SIZE);
+        assert_eq!(p.mem.read64(tlr).unwrap(), 0);
+        assert_eq!(svc(&mut p, nr::START_THREAD, &[h]).0, result::INVALID_STATE);
+        assert_eq!(
+            svc(&mut p, nr::START_THREAD, &[0]).0,
+            result::INVALID_HANDLE
+        );
+    }
+
+    #[test]
+    fn priorities_order_a_core_and_yielding_lets_other_cores_run() {
+        let mut p = process();
+        // Lower priority on the main thread's core: does not preempt.
+        let low = spawn(&mut p, 0x2000, 0x30, 0);
+        svc(&mut p, nr::START_THREAD, &[low]);
+        assert_eq!(running(&p), 0x1000);
+        // Yielding gives other cores a turn, but core 0 has nothing better.
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x1000);
+        // A thread on core 1 runs when the main thread yields.
+        let other = spawn(&mut p, 0x3000, 0x30, 1);
+        svc(&mut p, nr::START_THREAD, &[other]);
+        assert_eq!(running(&p), 0x1000);
+        svc(&mut p, nr::SLEEP_THREAD, &[-1i64 as u64]);
+        assert_eq!(running(&p), 0x3000);
+        // When it yields, core 0's best thread, the main thread, runs.
+        svc(&mut p, nr::SLEEP_THREAD, &[-2i64 as u64]);
+        assert_eq!(running(&p), 0x1000);
+        // Once the main thread exits, the low-priority thread gets core 0.
+        svc(&mut p, nr::EXIT_THREAD, &[]);
+        assert_eq!(running(&p), 0x3000, "core 1 is next after core 0");
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x2000);
+    }
+
+    #[test]
+    fn equal_priorities_on_a_core_take_turns_on_yield() {
+        let mut p = process();
+        let h = spawn(&mut p, 0x2000, MAIN_PRIORITY as u64, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(running(&p), 0x1000, "equal priority does not preempt");
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x2000);
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x1000);
+    }
+
+    #[test]
+    fn sleeping_skips_idle_time_without_counting_instructions() {
+        let mut p = process();
+        p.cpu.retired = 100;
+        svc(&mut p, nr::SLEEP_THREAD, &[1_000_000]); // 1 ms
+        assert_eq!(running(&p), 0x1000);
+        assert_eq!(p.cpu.retired, 100 + 19_200);
+        assert_eq!(p.instructions(), 100);
+        // A sleeping thread lets a lower-priority one run until it wakes.
+        let h = spawn(&mut p, 0x2000, 0x3f, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        svc(&mut p, nr::SLEEP_THREAD, &[1_000_000]);
+        assert_eq!(running(&p), 0x2000);
+        p.cpu.retired += 19_200; // the low-priority thread runs for 1 ms
+        svc(&mut p, nr::GET_SYSTEM_TICK, &[]);
+        assert_eq!(running(&p), 0x1000, "woken and preempting");
+        assert_eq!(p.cpu.retired, 100 + 2 * 19_200);
+        assert_eq!(p.instructions(), 100 + 19_200);
+    }
+
+    #[test]
+    fn undocumented_sleep_values_stop_the_process() {
+        let mut p = process();
+        p.cpu.x[0] = -3i64 as u64;
+        match dispatch(&mut p, nr::SLEEP_THREAD) {
+            Some(Stop::Error(e)) => assert!(e.contains("svcSleepThread with -3"), "{e}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exited_threads_are_forgotten_once_no_handle_names_them() {
+        let mut p = process();
+        let h = spawn(&mut p, 0x2000, 0x20, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        let (tlr, id) = (p.cpu.tpidrro_el0, p.current_thread().id);
+        svc(&mut p, nr::EXIT_THREAD, &[]);
+        assert_eq!(running(&p), 0x1000);
+        // The handle still names the exited thread.
+        assert_eq!(svc(&mut p, nr::GET_THREAD_ID, &[0, h]), (0, id));
+        assert_eq!(svc(&mut p, nr::START_THREAD, &[h]).0, result::INVALID_STATE);
+        assert_eq!(p.sched.threads.len(), 2);
+        svc(&mut p, nr::CLOSE_HANDLE, &[h]);
+        assert_eq!(p.sched.threads.len(), 1);
+        // Its thread local region is reused, and the ID is not.
+        let h = spawn(&mut p, 0x3000, 0x20, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(p.cpu.tpidrro_el0, tlr);
+        assert_ne!(p.current_thread().id, id);
+        // Closing the handle of a thread never started forgets it too.
+        let h = spawn(&mut p, 0x4000, 0x20, 0);
+        svc(&mut p, nr::CLOSE_HANDLE, &[h]);
+        assert_eq!(p.sched.threads.len(), 2);
+    }
+
+    #[test]
+    fn the_process_ends_with_its_last_thread() {
+        let mut p = process();
+        let h = spawn(&mut p, 0x2000, 0x30, 1);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        svc(&mut p, nr::EXIT_THREAD, &[]);
+        assert_eq!(running(&p), 0x2000);
+        p.exit_thread();
+        assert_eq!(p.schedule(true), Some(Stop::Exited));
+    }
+
+    #[test]
+    fn threads_that_were_never_started_cannot_keep_the_process_alive() {
+        let mut p = process();
+        spawn(&mut p, 0x2000, 0x30, 1);
+        p.exit_thread();
+        match p.schedule(true) {
+            Some(Stop::Error(e)) => assert!(e.contains("never started"), "{e}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_switch_clears_the_outgoing_exclusive_monitor() {
+        let mut p = process();
+        p.cpu.exclusive_addr = Some(0x5000);
+        let h = spawn(&mut p, 0x2000, 0x20, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(running(&p), 0x2000);
+        assert_eq!(p.sched.threads[0].cpu.exclusive_addr, None);
+    }
 
     #[test]
     fn ticks_follow_the_19_2_mhz_counter() {

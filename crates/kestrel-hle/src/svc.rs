@@ -15,6 +15,9 @@ pub mod nr {
     pub const UNMAP_MEMORY: u16 = 0x05;
     pub const QUERY_MEMORY: u16 = 0x06;
     pub const EXIT_PROCESS: u16 = 0x07;
+    pub const CREATE_THREAD: u16 = 0x08;
+    pub const START_THREAD: u16 = 0x09;
+    pub const EXIT_THREAD: u16 = 0x0a;
     pub const SLEEP_THREAD: u16 = 0x0b;
     pub const SIGNAL_EVENT: u16 = 0x11;
     pub const CLEAR_EVENT: u16 = 0x12;
@@ -43,6 +46,8 @@ pub mod result {
     pub const INVALID_CURRENT_MEMORY: u64 = 0xd401;
     pub const INVALID_NEW_MEMORY_PERMISSION: u64 = 0xd801;
     pub const INVALID_MEMORY_REGION: u64 = 0xdc01;
+    pub const INVALID_PRIORITY: u64 = 0xe001;
+    pub const INVALID_CORE_ID: u64 = 0xe201;
     pub const LIMIT_REACHED: u64 = 0x10801;
     pub const INVALID_HANDLE: u64 = 0xe401;
     pub const INVALID_COMBINATION: u64 = 0xe801;
@@ -179,11 +184,38 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
             None
         }
         nr::EXIT_PROCESS => Some(Stop::Exited),
-        nr::SLEEP_THREAD => {
-            // Single thread: yielding or sleeping just returns.
-            p.cpu.x[0] = result::SUCCESS;
+        nr::CREATE_THREAD => {
+            // X1 = entry, X2 = argument, X3 = stack top, W4 = priority,
+            // W5 = processor ID; W1 = the handle.
+            let (entry, arg, sp) = (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3]);
+            let (prio, core) = (p.cpu.x[4] as i32, p.cpu.x[5] as i32);
+            match p.create_thread(entry, arg, sp, prio, core) {
+                Ok(h) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = h as u64;
+                }
+                Err(code) => p.cpu.x[0] = code,
+            }
             None
         }
+        nr::START_THREAD => {
+            p.cpu.x[0] = code(p.start_thread(p.cpu.x[0]));
+            None
+        }
+        nr::EXIT_THREAD => {
+            p.exit_thread();
+            None
+        }
+        nr::SLEEP_THREAD => match p.sleep_thread(p.cpu.x[0] as i64) {
+            Ok(()) => {
+                p.cpu.x[0] = result::SUCCESS;
+                None
+            }
+            Err(what) => Some(Stop::Error(format!(
+                "unsupported: {what}, at pc {:#x}",
+                p.cpu.pc.wrapping_sub(4)
+            ))),
+        },
         nr::CREATE_TRANSFER_MEMORY => {
             // X1 = address, X2 = size, W3 = permission; W1 = the handle.
             let (addr, size, perm) = (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3] as u32);
