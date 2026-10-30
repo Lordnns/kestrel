@@ -2,7 +2,8 @@
 //!
 //! Guest code names kernel objects by 32-bit handles (Switchbrew, "SVC": the
 //! `Handle<T>` argument types, svcCloseHandle). An object lives while a
-//! handle names it; svcCloseHandle on the last handle releases it.
+//! handle names it or the kernel holds a reference to it (a thread waiting
+//! on it); dropping the last reference releases it.
 //!
 //! How handle values are formed is not documented, so the format is
 //! kestrel's: bits 0-14 index a slot, bits 15-29 hold a counter that
@@ -68,7 +69,7 @@ struct Entry {
 pub struct HandleTable {
     slots: Vec<Option<Entry>>,
     counter: u32,
-    /// Each object with the number of handles naming it.
+    /// Each object with its references: handles naming it, and waits.
     objects: Vec<Option<(usize, Object)>>,
 }
 
@@ -134,18 +135,29 @@ impl HandleTable {
         &mut self.objects[id].as_mut().expect("live object").1
     }
 
-    /// Close `h`. Returns the object if that was its last handle.
+    /// Close `h`. Returns the object if that was its last reference.
     pub fn close(&mut self, h: u32) -> Result<Option<Object>, u64> {
         let e = self.entry(h).ok_or(result::INVALID_HANDLE)?;
         self.slots[(h & INDEX_MASK) as usize] = None;
-        let slot = &mut self.objects[e.object];
+        Ok(self.release(e.object))
+    }
+
+    /// Take a reference to object `id` besides its handles.
+    pub fn retain(&mut self, id: ObjectId) {
+        self.objects[id].as_mut().expect("live object").0 += 1;
+    }
+
+    /// Drop a reference to object `id`. Returns the object if that was its
+    /// last reference.
+    pub fn release(&mut self, id: ObjectId) -> Option<Object> {
+        let slot = &mut self.objects[id];
         let (refs, _) = slot.as_mut().expect("live object");
         *refs -= 1;
-        Ok(if *refs == 0 {
+        if *refs == 0 {
             slot.take().map(|(_, o)| o)
         } else {
             None
-        })
+        }
     }
 }
 
@@ -158,12 +170,24 @@ impl Process {
     /// svcCloseHandle (Switchbrew, "SVC"). Closing a pseudo-handle is
     /// refused with InvalidHandle (kestrel's choice; it names no slot).
     pub fn close_handle(&mut self, h: u64) -> Result<(), u64> {
-        match self.handles.close(handle_arg(h))? {
+        let released = self.handles.close(handle_arg(h))?;
+        self.object_released(released);
+        Ok(())
+    }
+
+    /// Drop a kernel reference to object `id`, as a finished wait does.
+    pub(crate) fn release_object(&mut self, id: ObjectId) {
+        let released = self.handles.release(id);
+        self.object_released(released);
+    }
+
+    /// Let an object's owner clean up after its last reference went.
+    fn object_released(&mut self, object: Option<Object>) {
+        match object {
             Some(Object::TransferMemory { restore }) => self.release_transfer_memory(&restore),
             Some(Object::Thread { id }) => self.thread_released(id),
             _ => {}
         }
-        Ok(())
     }
 
     /// svcGetProcessId: only the current-process pseudo-handle names a
@@ -178,8 +202,8 @@ impl Process {
 }
 
 /// Events (Switchbrew, "SVC": CreateEvent, SignalEvent, ClearEvent,
-/// ResetSignal). Nothing waits on them until the synchronisation calls
-/// exist, so signalling only sets the state.
+/// ResetSignal). Signalling wakes the threads waiting on the event; it stays
+/// signaled until cleared or reset.
 impl Process {
     /// The signaled state of the event `h` names, if `h` is one of `kinds`.
     fn event(&mut self, h: u64, kinds: &[Kind]) -> Result<&mut bool, u64> {
@@ -204,6 +228,7 @@ impl Process {
     /// svcSignalEvent: only the writable side signals.
     pub fn signal_event(&mut self, h: u64) -> Result<(), u64> {
         *self.event(h, &[Kind::WritableEvent])? = true;
+        self.wake_object_waiters();
         Ok(())
     }
 
@@ -362,6 +387,17 @@ mod tests {
         assert_eq!(t.close(hs[0]), Ok(None));
         assert_eq!(t.close(hs[0]), Err(result::INVALID_HANDLE));
         assert_eq!(t.close(hs[1]), Ok(Some(thread(7))));
+    }
+
+    #[test]
+    fn a_retained_object_outlives_its_handles() {
+        let mut t = HandleTable::default();
+        let h = t.insert(thread(3), &[Kind::Thread]).unwrap()[0];
+        let (_, id) = t.get(h).unwrap();
+        t.retain(id);
+        assert_eq!(t.close(h), Ok(None));
+        assert_eq!(t.object(id), &thread(3));
+        assert_eq!(t.release(id), Some(thread(3)));
     }
 
     #[test]

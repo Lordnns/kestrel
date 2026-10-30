@@ -30,6 +30,8 @@ pub mod nr {
     pub const CREATE_TRANSFER_MEMORY: u16 = 0x15;
     pub const CLOSE_HANDLE: u16 = 0x16;
     pub const RESET_SIGNAL: u16 = 0x17;
+    pub const WAIT_SYNCHRONIZATION: u16 = 0x18;
+    pub const CANCEL_SYNCHRONIZATION: u16 = 0x19;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
     pub const GET_PROCESS_ID: u16 = 0x24;
     pub const GET_THREAD_ID: u16 = 0x25;
@@ -56,7 +58,11 @@ pub mod result {
     pub const INVALID_CORE_ID: u64 = 0xe201;
     pub const LIMIT_REACHED: u64 = 0x10801;
     pub const INVALID_HANDLE: u64 = 0xe401;
+    pub const INVALID_POINTER: u64 = 0xe601;
     pub const INVALID_COMBINATION: u64 = 0xe801;
+    pub const TIMED_OUT: u64 = 0xea01;
+    pub const CANCELLED: u64 = 0xec01;
+    pub const OUT_OF_RANGE: u64 = 0xee01;
     pub const INVALID_STATE: u64 = 0xfa01;
 }
 
@@ -311,6 +317,24 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 )));
             }
             p.cpu.x[0] = code(p.reset_signal(p.cpu.x[0]));
+            None
+        }
+        nr::WAIT_SYNCHRONIZATION => {
+            // X1 = handle list, W2 = count, X3 = timeout; W1 = index. On a
+            // timeout or cancel, X1 is left as it was ("SVC").
+            let (list, count, timeout) = (p.cpu.x[1], p.cpu.x[2] as i32, p.cpu.x[3] as i64);
+            match p.wait_synchronization(list, count, timeout) {
+                Ok(Some(index)) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = index;
+                }
+                Ok(None) => {} // the wake-up writes the result
+                Err(code) => p.cpu.x[0] = code,
+            }
+            None
+        }
+        nr::CANCEL_SYNCHRONIZATION => {
+            p.cpu.x[0] = code(p.cancel_synchronization(p.cpu.x[0]));
             None
         }
         nr::CLOSE_HANDLE => {

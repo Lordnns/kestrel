@@ -12,6 +12,9 @@ pub mod homebrew;
 pub mod kernel;
 pub mod memory;
 pub mod svc;
+pub mod sync;
+#[cfg(test)]
+mod testutil;
 pub mod thread;
 
 use kestrel_core::{Memory, Perm};

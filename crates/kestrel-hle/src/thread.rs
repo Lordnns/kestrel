@@ -52,7 +52,19 @@ pub enum State {
     Sleeping {
         until: u64,
     },
+    /// Blocked on `Thread::wait` until woken, or until the clock reaches
+    /// `until`, when the wait times out.
+    Waiting {
+        until: Option<u64>,
+    },
     Exited,
+}
+
+/// What a waiting thread waits for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Wait {
+    /// svcWaitSynchronization: any of these objects, each retained.
+    Objects(Vec<ObjectId>),
 }
 
 pub struct Thread {
@@ -70,6 +82,10 @@ pub struct Thread {
     pub tlr: u64,
     /// The thread's kernel object, while a handle names it.
     pub object: Option<ObjectId>,
+    /// What the thread waits for, while `state` is `Waiting`.
+    pub wait: Option<Wait>,
+    /// svcCancelSynchronization came while the thread was not waiting.
+    pub cancelled: bool,
     /// Turn order among threads of equal priority on a core.
     turn: u64,
 }
@@ -99,6 +115,16 @@ impl Scheduler {
     fn take_turn(&mut self) -> u64 {
         self.next_turn += 1;
         self.next_turn
+    }
+}
+
+impl Wait {
+    /// For error messages.
+    fn describe(&self) -> String {
+        match self {
+            Wait::Objects(ids) if ids.is_empty() => "waits on no objects".into(),
+            Wait::Objects(ids) => format!("waits on {} object(s)", ids.len()),
+        }
     }
 }
 
@@ -200,6 +226,8 @@ impl Process {
             affinity: 1 << core,
             tlr,
             object,
+            wait: None,
+            cancelled: false,
             turn,
         });
         Ok(h)
@@ -244,12 +272,51 @@ impl Process {
         self.reap();
     }
 
-    /// Mark thread `i` exited and free its thread local region.
+    /// Mark thread `i` exited, which signals it, and free its thread local
+    /// region.
     fn end_thread(&mut self, i: usize) {
         let t = &mut self.sched.threads[i];
         t.state = State::Exited;
         let tlr = t.tlr;
         self.sched.tlrs.retain(|&a| a != tlr);
+        self.wake_object_waiters();
+    }
+
+    /// The registers of thread `i`, wherever they are kept.
+    fn regs_mut(&mut self, i: usize) -> &mut CpuState {
+        if i == self.sched.current {
+            &mut self.cpu
+        } else {
+            &mut self.sched.threads[i].cpu
+        }
+    }
+
+    /// The running thread waits for `wait` until woken, or until the clock
+    /// reaches `until`.
+    pub(crate) fn block(&mut self, wait: Wait, until: Option<u64>) {
+        let t = &mut self.sched.threads[self.sched.current];
+        t.state = State::Waiting { until };
+        t.wait = Some(wait);
+        self.sched.rotate = true;
+    }
+
+    /// End thread `i`'s wait with result `code` in W0 and, if given, `x1`
+    /// in X1. Drops the references the wait held.
+    pub(crate) fn wake(&mut self, i: usize, code: u64, x1: Option<u64>) {
+        let turn = self.sched.take_turn();
+        let t = &mut self.sched.threads[i];
+        let wait = t.wait.take();
+        (t.state, t.turn) = (State::Ready, turn);
+        let regs = self.regs_mut(i);
+        regs.x[0] = code;
+        if let Some(v) = x1 {
+            regs.x[1] = v;
+        }
+        if let Some(Wait::Objects(ids)) = wait {
+            for id in ids {
+                self.release_object(id);
+            }
+        }
     }
 
     /// svcCreateThread ("SVC"): a thread that starts at `entry` with X0 =
@@ -405,13 +472,17 @@ impl Process {
     pub(crate) fn schedule(&mut self, rotate: bool) -> Option<Stop> {
         loop {
             let now = self.cpu.retired;
-            for t in &mut self.sched.threads {
-                if let State::Sleeping { until } = t.state {
-                    if until <= now {
-                        self.sched.next_turn += 1;
-                        t.state = State::Ready;
-                        t.turn = self.sched.next_turn;
+            for i in 0..self.sched.threads.len() {
+                match self.sched.threads[i].state {
+                    State::Sleeping { until } if until <= now => {
+                        let turn = self.sched.take_turn();
+                        let t = &mut self.sched.threads[i];
+                        (t.state, t.turn) = (State::Ready, turn);
                     }
+                    State::Waiting { until: Some(until) } if until <= now => {
+                        self.wake(i, result::TIMED_OUT, None);
+                    }
+                    _ => {}
                 }
             }
             let first = self.current_thread().core + rotate as u32;
@@ -438,7 +509,9 @@ impl Process {
                 .threads
                 .iter()
                 .filter_map(|t| match t.state {
-                    State::Sleeping { until } => Some(until),
+                    State::Sleeping { until } | State::Waiting { until: Some(until) } => {
+                        Some(until)
+                    }
                     _ => None,
                 })
                 .min();
@@ -451,15 +524,32 @@ impl Process {
                     return Some(Stop::Exited)
                 }
                 None => {
+                    let mut why: Vec<String> = self
+                        .sched
+                        .threads
+                        .iter()
+                        .filter_map(|t| match (&t.state, &t.wait) {
+                            (State::Waiting { .. }, Some(w)) => {
+                                Some(format!("thread {:#x} {}", t.id, w.describe()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     let created = self
                         .sched
                         .threads
                         .iter()
                         .filter(|t| t.state == State::Created)
                         .count();
-                    return Some(Stop::Error(format!(
-                        "no thread can run: {created} thread(s) created but never started"
-                    )));
+                    if created > 0 {
+                        why.push(format!("{created} thread(s) created but never started"));
+                    }
+                    let what = if why.iter().any(|w| w.starts_with("thread")) {
+                        "deadlock, every thread waits with no timeout"
+                    } else {
+                        "no thread can run"
+                    };
+                    return Some(Stop::Error(format!("{what}: {}", why.join("; "))));
                 }
             }
         }
@@ -470,40 +560,7 @@ impl Process {
 mod tests {
     use super::*;
     use crate::svc::{dispatch, nr};
-    use kestrel_core::Memory;
-    use kestrel_loader::Loaded;
-
-    fn process() -> Process {
-        let image = Loaded {
-            entry: 0x1000,
-            image_start: 0,
-            image_end: 0,
-        };
-        Process::new(Memory::new(), &image).unwrap()
-    }
-
-    /// Make system call `n` with X0.. = `args` as the run loop does, then
-    /// schedule. Returns W0 and X1 as the call left them.
-    fn svc(p: &mut Process, n: u16, args: &[u64]) -> (u64, u64) {
-        p.cpu.x[..args.len()].copy_from_slice(args);
-        assert_eq!(dispatch(p, n), None);
-        let regs = (p.cpu.x[0], p.cpu.x[1]);
-        let rotate = std::mem::take(&mut p.sched.rotate);
-        assert_eq!(p.schedule(rotate), None);
-        regs
-    }
-
-    /// Create a thread with SP 0x9000 and X0 0x55; returns its handle.
-    fn spawn(p: &mut Process, entry: u64, prio: u64, core: u64) -> u64 {
-        let (rc, h) = svc(p, nr::CREATE_THREAD, &[0, entry, 0x55, 0x9000, prio, core]);
-        assert_eq!(rc, 0);
-        h
-    }
-
-    /// Where the running thread is.
-    fn running(p: &Process) -> u64 {
-        p.cpu.pc
-    }
+    use crate::testutil::{process, running, spawn, svc};
 
     #[test]
     fn create_thread_checks_priority_and_processor() {
