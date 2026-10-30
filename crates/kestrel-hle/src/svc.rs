@@ -9,6 +9,8 @@ use std::io::Write;
 /// Publicly documented SVC numbers implemented so far.
 pub mod nr {
     pub const SET_HEAP_SIZE: u16 = 0x01;
+    pub const SET_MEMORY_PERMISSION: u16 = 0x02;
+    pub const SET_MEMORY_ATTRIBUTE: u16 = 0x03;
     pub const QUERY_MEMORY: u16 = 0x06;
     pub const EXIT_PROCESS: u16 = 0x07;
     pub const SLEEP_THREAD: u16 = 0x0b;
@@ -101,6 +103,11 @@ fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> 
     }
 }
 
+/// The result code for W0.
+fn code(r: Result<(), u64>) -> u64 {
+    r.err().unwrap_or(result::SUCCESS)
+}
+
 /// Handle one SVC. Returns `Some(stop)` if the process should stop.
 pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
     match n {
@@ -112,6 +119,17 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 }
                 Err(code) => p.cpu.x[0] = code,
             }
+            None
+        }
+        nr::SET_MEMORY_PERMISSION => {
+            let (addr, size, perm) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2] as u32);
+            p.cpu.x[0] = code(p.set_memory_permission(addr, size, perm));
+            None
+        }
+        nr::SET_MEMORY_ATTRIBUTE => {
+            let (addr, size) = (p.cpu.x[0], p.cpu.x[1]);
+            let (mask, value) = (p.cpu.x[2] as u32, p.cpu.x[3] as u32);
+            p.cpu.x[0] = code(p.set_memory_attribute(addr, size, mask, value));
             None
         }
         nr::QUERY_MEMORY => {

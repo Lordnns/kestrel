@@ -4,7 +4,7 @@
 
 use crate::svc::result;
 use crate::{layout, Process};
-use kestrel_core::{Memory, Perm, Tag};
+use kestrel_core::{Memory, Perm, Tag, PAGE_SIZE};
 
 /// MemoryType values (Switchbrew, "SVC"; the 4.0.0+ values where they
 /// changed).
@@ -117,7 +117,80 @@ pub fn query(mem: &Memory, addr: u64) -> MemInfo {
     }
 }
 
+/// Check a page-aligned, non-empty range; returns its end, or `None` if it
+/// wraps around.
+fn checked_range(addr: u64, size: u64) -> Result<Option<u64>, u64> {
+    if addr % PAGE_SIZE != 0 {
+        return Err(result::INVALID_ADDRESS);
+    }
+    if size == 0 || size % PAGE_SIZE != 0 {
+        return Err(result::INVALID_SIZE);
+    }
+    Ok(addr.checked_add(size))
+}
+
+/// Whether `[addr, end)` lies inside `(base, size)`.
+fn within((base, size): layout::Region, addr: u64, end: u64) -> bool {
+    base <= addr && end <= base + size
+}
+
 impl Process {
+    /// Check that `[addr, addr + size)` is mapped heap-like memory (Normal,
+    /// not locked) inside the address space, as svcSetMemoryPermission and
+    /// svcSetMemoryAttribute require.
+    fn check_normal(&self, addr: u64, size: u64) -> Result<(), u64> {
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_STATE)?;
+        if !within(layout::ASLR_REGION, addr, end) {
+            return Err(result::INVALID_STATE);
+        }
+        let blocks = self
+            .mem
+            .range_regions(addr, size)
+            .map_err(|_| result::INVALID_STATE)?;
+        if blocks
+            .iter()
+            .any(|b| b.tag.state != state::NORMAL || b.tag.attr & attr::LOCKED != 0)
+        {
+            return Err(result::INVALID_STATE);
+        }
+        Ok(())
+    }
+
+    /// svcSetMemoryPermission (Switchbrew, "SVC"): move heap-like memory
+    /// between ---, r-- and rw-.
+    pub fn set_memory_permission(&mut self, addr: u64, size: u64, perm: u32) -> Result<(), u64> {
+        checked_range(addr, size)?;
+        let new = match perm {
+            0 => Perm::NONE,
+            1 => Perm::R,
+            3 => Perm::RW,
+            _ => return Err(result::INVALID_NEW_PERMISSION),
+        };
+        self.check_normal(addr, size)?;
+        self.mem
+            .update_range(addr, size, |p, _| *p = new)
+            .map_err(|_| result::INVALID_STATE)
+    }
+
+    /// svcSetMemoryAttribute (Switchbrew, "SVC"): only the Uncached bit
+    /// may be set or cleared.
+    pub fn set_memory_attribute(
+        &mut self,
+        addr: u64,
+        size: u64,
+        mask: u32,
+        value: u32,
+    ) -> Result<(), u64> {
+        checked_range(addr, size)?;
+        if mask & !attr::UNCACHED != 0 || value & !mask != 0 {
+            return Err(result::INVALID_COMBINATION);
+        }
+        self.check_normal(addr, size)?;
+        self.mem
+            .update_range(addr, size, |_, t| t.attr = (t.attr & !mask) | value)
+            .map_err(|_| result::INVALID_STATE)
+    }
+
     /// Memory counted against TotalMemorySize: the image, the main stack
     /// and the heap (Switchbrew, "SVC", svcGetInfo UsedMemorySize).
     pub fn used_memory(&self) -> u64 {
@@ -205,6 +278,69 @@ mod tests {
         assert_eq!(p.set_heap_size(0), Ok(base));
         assert!(!p.mem.is_mapped(base));
         assert_eq!(p.heap_size, 0);
+    }
+
+    #[test]
+    fn heap_permissions_move_between_none_read_and_read_write() {
+        let mut p = process();
+        let base = p.set_heap_size(MB2).unwrap();
+        p.mem.write8(base + 0x1000, 5).unwrap();
+        assert_eq!(p.set_memory_permission(base + 0x1000, 0x1000, 1), Ok(()));
+        assert!(p.mem.write8(base + 0x1000, 6).is_err());
+        assert_eq!(p.mem.read8(base + 0x1000).unwrap(), 5);
+        assert_eq!(query(&p.mem, base + 0x1000).perm, 1);
+        assert_eq!(p.set_memory_permission(base + 0x1000, 0x1000, 0), Ok(()));
+        assert!(p.mem.read8(base + 0x1000).is_err());
+        assert_eq!(p.set_memory_permission(base, MB2, 3), Ok(()));
+        assert_eq!(p.mem.read8(base + 0x1000).unwrap(), 5);
+        // Back to one block once every page agrees again.
+        let q = query(&p.mem, base);
+        assert_eq!((q.base, q.size, q.perm), (base, MB2, 3));
+    }
+
+    #[test]
+    fn permission_and_attribute_changes_are_checked_as_documented() {
+        let mut p = process();
+        let base = p.set_heap_size(MB2).unwrap();
+        assert_eq!(
+            p.set_memory_permission(base + 1, 0x1000, 1),
+            Err(result::INVALID_ADDRESS)
+        );
+        assert_eq!(
+            p.set_memory_permission(base, 0, 1),
+            Err(result::INVALID_SIZE)
+        );
+        assert_eq!(
+            p.set_memory_permission(base, 0x800, 1),
+            Err(result::INVALID_SIZE)
+        );
+        for bad in [2, 4, 5, 7] {
+            let r = p.set_memory_permission(base, 0x1000, bad);
+            assert_eq!(r, Err(result::INVALID_NEW_PERMISSION), "permission {bad}");
+        }
+        // Past the end of the heap, and memory that is not heap.
+        assert_eq!(
+            p.set_memory_permission(base, 2 * MB2, 1),
+            Err(result::INVALID_STATE)
+        );
+        let stack = layout::STACK_TOP - layout::STACK_SIZE;
+        assert_eq!(
+            p.set_memory_permission(stack, 0x1000, 1),
+            Err(result::INVALID_STATE)
+        );
+        // Only Uncached (bit 3) can change.
+        assert_eq!(p.set_memory_attribute(base, 0x1000, 8, 8), Ok(()));
+        assert_eq!(query(&p.mem, base).attr, attr::UNCACHED);
+        assert_eq!(p.set_memory_attribute(base, 0x1000, 8, 0), Ok(()));
+        assert_eq!(query(&p.mem, base).attr, 0);
+        assert_eq!(
+            p.set_memory_attribute(base, 0x1000, 1, 1),
+            Err(result::INVALID_COMBINATION)
+        );
+        assert_eq!(
+            p.set_memory_attribute(base, 0x1000, 0, 8),
+            Err(result::INVALID_COMBINATION)
+        );
     }
 
     #[test]
