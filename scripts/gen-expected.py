@@ -10,6 +10,7 @@ so a match in `kestrel selftest` is checked against an outside source
     python3 scripts/gen-expected.py --check  # fail if any file differs
 """
 
+import datetime
 import hashlib
 import math
 import re
@@ -783,6 +784,86 @@ def hbhid():
     return "".join(line + "\n" for line in out)
 
 
+def hbtime():
+    """guest/src/nro/hbtime.c: the time service as libnx's timeInitialize
+    and __libnx_init_time use it. Switchbrew's "Glue services": time:u's
+    commands 0 to 4 return the user, network, steady and local clocks and the
+    time zone service; ISystemClock GetCurrentTime returns POSIX time and
+    GetSystemClockContext the epoch and a SteadyClockTimePoint; ISteadyClock
+    GetCurrentTimePoint returns a time point and the clock source ID;
+    ITimeZoneService GetDeviceLocationName returns the LocationName and
+    ToCalendarTimeWithMyRule a CalendarTime and CalendarAdditionalInfo
+    (0-based day of the week and year, zone name, DST, offset). "SVC":
+    shared memory maps as MemoryType Shared (0x00402006). The owner's choices
+    (docs/ROADMAP.md, phase 2 notes): the clocks start at 2025-06-05
+    00:00:00 UTC and the zone is UTC. Kestrel's documented choices: the
+    shared memory is read-only for the process (else 0xd801); the steady
+    clock counts whole seconds from process start (base time 0) and every
+    system clock's context is that epoch at steady time 0; the clocks run
+    with the process clock, so a 2-second sleep moves them 2 seconds. The
+    calendar values come from Python's datetime; the TZ string is built as
+    __libnx_init_time builds it."""
+    ok = hex64(0)
+    boot = int(datetime.datetime(2025, 6, 5, tzinfo=datetime.timezone.utc).timestamp())
+    out = [
+        "homebrew time test",
+        f"sm: register: {ok}",
+        f"GetStandardUserSystemClock: {ok}",
+        f"GetStandardNetworkSystemClock: {ok}",
+        f"GetStandardSteadyClock: {ok}",
+        f"GetTimeZoneService: {ok}",
+        f"GetStandardLocalSystemClock: {ok}",
+        "each moved a session handle: yes",
+        f"GetSharedMemoryNativeHandle: {ok}",
+        "it copied a handle: yes",
+        f"map read-write: {hex64(0xD801)}",
+        f"map read-only: {ok}",
+        f"memory type: {hex64(0x402006)}",
+        f"permission: {hex64(1)}",
+        "steady clock base time: 0",
+        f"local clock epoch: {boot}",
+        "local clock time point: 0",
+        f"network clock epoch: {boot}",
+        "network clock time point: 0",
+        "the source IDs match: yes",
+        f"time from the shared memory: {boot}",
+        f"user clock GetCurrentTime: {boot}",
+        f"network clock GetCurrentTime: {boot}",
+        f"local clock GetCurrentTime: {boot}",
+        f"GetSystemClockContext: {ok}",
+        f"its epoch: {boot}",
+        "its time point: 0",
+        "its source ID is the steady clock's: yes",
+        f"GetCurrentTimePoint: {ok}",
+        "its time point: 0",
+        "its source ID is the steady clock's: yes",
+        f"GetDeviceLocationName: {ok}",
+        "location: UTC",
+    ]
+    epoch = datetime.datetime(1970, 1, 1)
+    for t in [0, -1, 951825845, 1749081600, 4102444799, 253402300799]:
+        d = epoch + datetime.timedelta(seconds=t)
+        wday = (d.weekday() + 1) % 7  # Sunday is day 0
+        yday = d.timetuple().tm_yday - 1
+        out.append(
+            f"ToCalendarTimeWithMyRule {t}: {d:%Y-%m-%d %H:%M:%S} day {wday} of the week, "
+            f"{yday} of the year, UTC, DST 0, offset 0"
+        )
+    out += [
+        # Offset 0 is not west of UTC, so the sign is '-'.
+        "TZ: <UTC>-00:00:00",
+        f"after sleeping 2 seconds, user clock: {boot + 2}",
+        f"time from the shared memory: {boot + 2}",
+        "steady clock time point: 2",
+        f"unmap: {ok}",
+        f"close the shared memory: {ok}",
+        f"close the clocks: {ok}",
+        f"close time:u: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -801,6 +882,7 @@ PROGRAMS = {
     "hbipc": hbipc,
     "hbapplet": hbapplet,
     "hbhid": hbhid,
+    "hbtime": hbtime,
 }
 
 

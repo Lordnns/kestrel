@@ -1,0 +1,48 @@
+homebrew time test
+sm: register: 0x0000000000000000
+GetStandardUserSystemClock: 0x0000000000000000
+GetStandardNetworkSystemClock: 0x0000000000000000
+GetStandardSteadyClock: 0x0000000000000000
+GetTimeZoneService: 0x0000000000000000
+GetStandardLocalSystemClock: 0x0000000000000000
+each moved a session handle: yes
+GetSharedMemoryNativeHandle: 0x0000000000000000
+it copied a handle: yes
+map read-write: 0x000000000000d801
+map read-only: 0x0000000000000000
+memory type: 0x0000000000402006
+permission: 0x0000000000000001
+steady clock base time: 0
+local clock epoch: 1749081600
+local clock time point: 0
+network clock epoch: 1749081600
+network clock time point: 0
+the source IDs match: yes
+time from the shared memory: 1749081600
+user clock GetCurrentTime: 1749081600
+network clock GetCurrentTime: 1749081600
+local clock GetCurrentTime: 1749081600
+GetSystemClockContext: 0x0000000000000000
+its epoch: 1749081600
+its time point: 0
+its source ID is the steady clock's: yes
+GetCurrentTimePoint: 0x0000000000000000
+its time point: 0
+its source ID is the steady clock's: yes
+GetDeviceLocationName: 0x0000000000000000
+location: UTC
+ToCalendarTimeWithMyRule 0: 1970-01-01 00:00:00 day 4 of the week, 0 of the year, UTC, DST 0, offset 0
+ToCalendarTimeWithMyRule -1: 1969-12-31 23:59:59 day 3 of the week, 364 of the year, UTC, DST 0, offset 0
+ToCalendarTimeWithMyRule 951825845: 2000-02-29 12:04:05 day 2 of the week, 59 of the year, UTC, DST 0, offset 0
+ToCalendarTimeWithMyRule 1749081600: 2025-06-05 00:00:00 day 4 of the week, 155 of the year, UTC, DST 0, offset 0
+ToCalendarTimeWithMyRule 4102444799: 2099-12-31 23:59:59 day 4 of the week, 364 of the year, UTC, DST 0, offset 0
+ToCalendarTimeWithMyRule 253402300799: 9999-12-31 23:59:59 day 5 of the week, 364 of the year, UTC, DST 0, offset 0
+TZ: <UTC>-00:00:00
+after sleeping 2 seconds, user clock: 1749081602
+time from the shared memory: 1749081602
+steady clock time point: 2
+unmap: 0x0000000000000000
+close the shared memory: 0x0000000000000000
+close the clocks: 0x0000000000000000
+close time:u: 0x0000000000000000
+close sm: 0x0000000000000000
