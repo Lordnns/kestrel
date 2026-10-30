@@ -16,6 +16,7 @@
 //! with its name and number, never with a made-up answer.
 
 pub mod am;
+pub mod hid;
 pub mod set;
 pub mod sm;
 
@@ -50,6 +51,9 @@ pub enum Interface {
     LibraryAppletCreator,
     ApplicationFunctions,
     DebugFunctions,
+    /// "hid" and its IAppletResource.
+    Hid,
+    AppletResource,
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234, command 2 hands out another test object. For unit
     /// tests of the session path.
@@ -62,6 +66,7 @@ const SERVICES: &[(&str, Interface)] = &[
     ("set:sys", Interface::SetSys),
     ("apm", Interface::Apm),
     ("appletOE", Interface::AppletOE),
+    ("hid", Interface::Hid),
     #[cfg(test)]
     ("test", Interface::Test),
 ];
@@ -86,6 +91,8 @@ impl Interface {
             LibraryAppletCreator => "ILibraryAppletCreator",
             ApplicationFunctions => "IApplicationFunctions",
             DebugFunctions => "IDebugFunctions",
+            Hid => "hid",
+            AppletResource => "IAppletResource",
             #[cfg(test)]
             Test => "test",
         }
@@ -277,6 +284,7 @@ pub struct State {
     pub applet_message_event: Option<ObjectId>,
     /// am: the event signalled when the suspended tick count changes.
     pub suspended_tick_event: Option<ObjectId>,
+    pub hid: hid::State,
 }
 
 impl Process {
@@ -490,6 +498,7 @@ impl Process {
             AppletOE | ApplicationProxy | CommonStateGetter | SelfController | WindowController
             | AudioController | DisplayController | LibraryAppletCreator | ApplicationFunctions
             | DebugFunctions => self.am(call),
+            Hid | AppletResource => self.hid(call),
             #[cfg(test)]
             Test => match call.n {
                 0 => Ok(Out::ok(call.args.to_vec())),
@@ -498,6 +507,22 @@ impl Process {
                 _ => Err(call.unimplemented()),
             },
         }
+    }
+
+    /// The bytes the client sends through pointer descriptor `index` (an
+    /// X buffer), as the kernel copies them to the server.
+    fn read_pointer(&self, req: &Request, index: u8) -> Result<Vec<u8>, IpcError> {
+        let Some(x) = req.pointers.iter().find(|x| x.index == index) else {
+            return Err(IpcError::Stop(format!(
+                "a request without pointer buffer {index} for its input"
+            )));
+        };
+        self.mem.read_vec(x.addr, x.size as usize).map_err(|e| {
+            IpcError::Stop(format!(
+                "cannot read pointer buffer {index} at {:#x}: {e}",
+                x.addr
+            ))
+        })
     }
 
     /// Write `data` through the client's receive list entry `i` (a C
@@ -1005,6 +1030,113 @@ mod tests {
         let e = send(&mut p, am, &request(false, &[], Some(audio), 0, &[])).unwrap_err();
         assert!(
             e.starts_with("unimplemented: IAudioController command 0"),
+            "{e}"
+        );
+    }
+
+    /// Add pointer descriptor (X buffer) 0 to `msg`, built by request()
+    /// with a process ID and no handles, as cmifRequestInPointer does.
+    fn with_pointer(mut msg: Vec<u8>, addr: u64, size: u16) -> Vec<u8> {
+        let w0 = u32::from_le_bytes(msg[0..4].try_into().unwrap());
+        msg[0..4].copy_from_slice(&(w0 | 1 << 16).to_le_bytes());
+        // The descriptor goes after the special header and process ID; the
+        // CMIF data then moves to the next 16-byte boundary.
+        let head = 8 + 4 + 8;
+        let mut out = msg[..head].to_vec();
+        out.extend(words(&[
+            ((addr >> 36) as u32) << 6 | ((addr >> 32) as u32 & 0xf) << 12 | (size as u32) << 16,
+            addr as u32,
+        ]));
+        let data = msg[head.next_multiple_of(16)..].to_vec();
+        out.resize(out.len().next_multiple_of(16), 0);
+        out.extend(data);
+        out
+    }
+
+    #[test]
+    fn hid_hands_out_its_shared_memory_and_takes_the_npad_setup() {
+        let mut p = setup();
+        let hid = open(&mut p, b"hid");
+        let aruid = PROCESS_ID.to_le_bytes();
+        let e = send(&mut p, hid, &request(true, &[], None, 0, &[1; 8])).unwrap_err();
+        assert!(
+            e.contains("applet resource user ID 0x80 (got 0x101010101010101)"),
+            "{e}"
+        );
+        let e = send(&mut p, hid, &request(false, &[], None, 0, &aruid)).unwrap_err();
+        assert!(e.contains("without the process ID"), "{e}");
+        assert_eq!(
+            send(&mut p, hid, &request(true, &[], None, 0, &aruid)),
+            Ok(0)
+        );
+        let resource = answer(&p, false, 0).2[0] as u64;
+        assert_eq!(send(&mut p, resource, &cmif(4, false, 0, &[])), Ok(0));
+        let (rc, copied, _, _, _) = answer(&p, false, 0);
+        assert_eq!((rc, copied.len()), (0, 1));
+        let (kind, id) = p.handles.get(copied[0]).unwrap();
+        assert_eq!(kind, Kind::SharedMemory);
+        match p.handles.object(id) {
+            Object::SharedMemory {
+                perm,
+                contents,
+                mapped,
+            } => {
+                assert_eq!((*perm, contents.len(), *mapped), (Perm::R, 0x40000, None));
+                assert!(contents.iter().all(|&b| b == 0));
+            }
+            o => panic!("{o:?}"),
+        }
+        // Asking again gives another handle to the same memory.
+        assert_eq!(send(&mut p, resource, &cmif(4, false, 0, &[])), Ok(0));
+        let again = answer(&p, false, 0).1[0];
+        assert_eq!(p.handles.get(again).unwrap().1, id);
+        // padConfigureInput: ActivateNpadWithRevision 5, the IDs, the styles.
+        let mut rev = 5u32.to_le_bytes().to_vec();
+        rev.extend([0; 4]);
+        rev.extend(aruid);
+        assert_eq!(
+            send(&mut p, hid, &request(true, &[], None, 109, &rev)),
+            Ok(0)
+        );
+        assert_eq!(answer(&p, false, 0).0, 0);
+        assert_eq!(p.services.hid.npad_revision, Some(5));
+        let ids = words(&[0, 1, 2, 3, 4, 5, 6, 7, 0x20]);
+        p.mem.write_bytes(STRINGS + 0x200, &ids).unwrap();
+        let set_ids = with_pointer(request(true, &[], None, 102, &aruid), STRINGS + 0x200, 36);
+        assert_eq!(send(&mut p, hid, &set_ids), Ok(0));
+        assert_eq!(answer(&p, false, 0).0, 0);
+        assert_eq!(p.services.hid.npad_ids, [0, 1, 2, 3, 4, 5, 6, 7, 0x20]);
+        let mut styles = 0x1fu32.to_le_bytes().to_vec();
+        styles.extend([0; 4]);
+        styles.extend(aruid);
+        assert_eq!(
+            send(&mut p, hid, &request(true, &[], None, 100, &styles)),
+            Ok(0)
+        );
+        assert_eq!(
+            send(&mut p, hid, &request(true, &[], None, 101, &aruid)),
+            Ok(0)
+        );
+        assert_eq!(answer(&p, false, 4).3, 0x1fu32.to_le_bytes());
+        for n in [11, 21, 31, 103] {
+            assert_eq!(
+                send(&mut p, hid, &request(true, &[], None, n, &aruid)),
+                Ok(0)
+            );
+            assert_eq!(answer(&p, false, 0).0, 0);
+        }
+        assert_eq!(p.services.hid.npad_revision, Some(0));
+        // Out-of-range input stops with the reason.
+        p.mem.write_bytes(STRINGS + 0x200, &words(&[8])).unwrap();
+        let bad = with_pointer(request(true, &[], None, 102, &aruid), STRINGS + 0x200, 4);
+        let e = send(&mut p, hid, &bad).unwrap_err();
+        assert!(e.contains("SetSupportedNpadIdType with 0x4 bytes"), "{e}");
+        let e = send(&mut p, hid, &request(true, &[], None, 102, &aruid)).unwrap_err();
+        assert!(e.contains("without pointer buffer 0"), "{e}");
+        rev[0] = 4;
+        let e = send(&mut p, hid, &request(true, &[], None, 109, &rev)).unwrap_err();
+        assert!(
+            e.contains("revision 4, which Switchbrew does not list"),
             "{e}"
         );
     }

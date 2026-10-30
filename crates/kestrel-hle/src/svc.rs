@@ -29,6 +29,8 @@ pub mod nr {
     pub const GET_CURRENT_PROCESSOR_NUMBER: u16 = 0x10;
     pub const SIGNAL_EVENT: u16 = 0x11;
     pub const CLEAR_EVENT: u16 = 0x12;
+    pub const MAP_SHARED_MEMORY: u16 = 0x13;
+    pub const UNMAP_SHARED_MEMORY: u16 = 0x14;
     pub const CREATE_TRANSFER_MEMORY: u16 = 0x15;
     pub const CLOSE_HANDLE: u16 = 0x16;
     pub const RESET_SIGNAL: u16 = 0x17;
@@ -251,6 +253,26 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 }
                 Err(code) => p.cpu.x[0] = code,
             }
+            None
+        }
+        nr::MAP_SHARED_MEMORY => {
+            // W0 = handle, X1 = address, X2 = size, W3 = permission.
+            let (h, addr, size, perm) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2], p.cpu.x[3] as u32);
+            match p.map_shared_memory(h, addr, size, perm) {
+                Ok(()) => p.cpu.x[0] = result::SUCCESS,
+                Err(memory::MapError::Result(code)) => p.cpu.x[0] = code,
+                Err(memory::MapError::Unsupported(what)) => {
+                    return Some(Stop::Error(format!(
+                        "unsupported: {what}, at pc {:#x}",
+                        p.cpu.pc.wrapping_sub(4)
+                    )))
+                }
+            }
+            None
+        }
+        nr::UNMAP_SHARED_MEMORY => {
+            let (h, addr, size) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2]);
+            p.cpu.x[0] = code(p.unmap_shared_memory(h, addr, size));
             None
         }
         nr::GET_THREAD_PRIORITY => {

@@ -37,6 +37,7 @@ pub enum Kind {
     WritableEvent,
     TransferMemory,
     ClientSession,
+    SharedMemory,
 }
 
 /// A kernel object.
@@ -56,6 +57,14 @@ pub enum Object {
     },
     /// A session to a service kestrel implements.
     Session(Session),
+    /// Memory a service shares with the process: its bytes while
+    /// unmapped, the permission the process may map it with, and where it
+    /// is mapped.
+    SharedMemory {
+        perm: Perm,
+        contents: Vec<u8>,
+        mapped: Option<u64>,
+    },
 }
 
 /// Index of an object in the table's object store.

@@ -2,7 +2,7 @@
 //! mapping (Switchbrew, "SVC": MemoryType, MemoryAttribute) and the block
 //! svcQueryMemory reports for any address.
 
-use crate::kernel::{Kind, Object};
+use crate::kernel::{Kind, Object, ObjectId};
 use crate::svc::result;
 use crate::{layout, Process};
 use kestrel_core::{Memory, Perm, Tag, PAGE_SIZE};
@@ -17,6 +17,7 @@ pub mod state {
     pub const STACK: u32 = 0x005c_3c0b;
     pub const THREAD_LOCAL: u32 = 0x0040_200c;
     pub const INACCESSIBLE: u32 = 0x0000_0010;
+    pub const SHARED: u32 = 0x0040_2006;
     /// MemoryState bit 17, FlagCanTransfer: svcCreateTransferMemory may
     /// lend the memory.
     pub const CAN_TRANSFER: u32 = 1 << 17;
@@ -139,6 +140,24 @@ type Part = (u64, u64);
 /// Whether `[addr, end)` lies inside `(base, size)`.
 fn within((base, size): layout::Region, addr: u64, end: u64) -> bool {
     base <= addr && end <= base + size
+}
+
+/// Whether `[addr, end)` and `(base, size)` share a byte.
+fn overlaps((base, size): layout::Region, addr: u64, end: u64) -> bool {
+    addr < base + size && base < end
+}
+
+/// Why svcMapSharedMemory mapped nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MapError {
+    Result(u64),
+    Unsupported(&'static str),
+}
+
+impl From<u64> for MapError {
+    fn from(code: u64) -> Self {
+        MapError::Result(code)
+    }
 }
 
 impl Process {
@@ -425,6 +444,120 @@ impl Process {
             })
             .expect("range checked above");
         Ok(h)
+    }
+
+    /// A new shared memory object of `size` zeroed bytes that the process
+    /// may map with permission `perm`, held by the kernel for the service
+    /// that made it.
+    pub(crate) fn create_shared_memory(&mut self, size: u64, perm: Perm) -> ObjectId {
+        self.handles.insert_unnamed(Object::SharedMemory {
+            perm,
+            contents: vec![0; size as usize],
+            mapped: None,
+        })
+    }
+
+    /// The shared memory object `h` names.
+    fn shared_memory(&mut self, h: u64) -> Result<ObjectId, u64> {
+        match self.handles.get(h as u32) {
+            Some((Kind::SharedMemory, id)) => Ok(id),
+            _ => Err(result::INVALID_HANDLE),
+        }
+    }
+
+    /// svcMapSharedMemory (Switchbrew, "SVC"): map the whole object at
+    /// `addr` as Shared memory. The mapping holds a reference to the
+    /// object.
+    ///
+    /// Switchbrew gives the arguments and the reference count only, so
+    /// kestrel chose the checks, with the result codes of the other memory
+    /// calls: the range page-aligned (InvalidAddress, InvalidSize), the
+    /// size the object's (InvalidSize), inside the address space and
+    /// outside the heap and alias regions, which hold their own kinds of
+    /// memory (InvalidMemoryRegion), free (InvalidCurrentMemory), and the
+    /// permission the one the object allows the process
+    /// (InvalidNewMemoryPermission). A second mapping of one object stops
+    /// as unsupported.
+    pub fn map_shared_memory(
+        &mut self,
+        h: u64,
+        addr: u64,
+        size: u64,
+        perm: u32,
+    ) -> Result<(), MapError> {
+        let id = self.shared_memory(h)?;
+        let end = checked_range(addr, size)?.ok_or(result::INVALID_MEMORY_REGION)?;
+        let Object::SharedMemory {
+            perm: allowed,
+            contents,
+            mapped,
+        } = self.handles.object(id)
+        else {
+            unreachable!("a shared memory handle names another object")
+        };
+        if size != contents.len() as u64 {
+            return Err(result::INVALID_SIZE.into());
+        }
+        if !within(layout::ASLR_REGION, addr, end)
+            || overlaps(layout::HEAP_REGION, addr, end)
+            || overlaps(layout::ALIAS_REGION, addr, end)
+        {
+            return Err(result::INVALID_MEMORY_REGION.into());
+        }
+        if !self.mem.is_free(addr, size) {
+            return Err(result::INVALID_CURRENT_MEMORY.into());
+        }
+        if perm != perm_bits(*allowed) {
+            return Err(result::INVALID_NEW_MEMORY_PERMISSION.into());
+        }
+        if mapped.is_some() {
+            return Err(MapError::Unsupported(
+                "svcMapSharedMemory of a shared memory object that is already mapped",
+            ));
+        }
+        let (allowed, bytes) = (*allowed, contents.clone());
+        self.mem
+            .map_tagged(addr, size, allowed, tag(state::SHARED), "shared-memory")
+            .and_then(|_| self.mem.poke_bytes(addr, &bytes))
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+        self.handles.retain(id);
+        if let Object::SharedMemory { mapped, .. } = self.handles.object_mut(id) {
+            *mapped = Some(addr);
+        }
+        Ok(())
+    }
+
+    /// svcUnmapSharedMemory: undo an svcMapSharedMemory of the same object,
+    /// address and size; anything else is InvalidCurrentMemory (kestrel's
+    /// choice). The bytes go back to the object.
+    pub fn unmap_shared_memory(&mut self, h: u64, addr: u64, size: u64) -> Result<(), u64> {
+        let id = self.shared_memory(h)?;
+        checked_range(addr, size)?;
+        let Object::SharedMemory {
+            contents, mapped, ..
+        } = self.handles.object(id)
+        else {
+            unreachable!("a shared memory handle names another object")
+        };
+        if *mapped != Some(addr) || size != contents.len() as u64 {
+            return Err(result::INVALID_CURRENT_MEMORY);
+        }
+        let bytes = self
+            .mem
+            .read_vec(addr, size as usize)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+        self.mem
+            .unmap_range(addr, size)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+        if let Object::SharedMemory {
+            contents, mapped, ..
+        } = self.handles.object_mut(id)
+        {
+            *contents = bytes;
+            *mapped = None;
+        }
+        self.release_object(id);
+        Ok(())
     }
 
     /// Give back memory lent by svcCreateTransferMemory once its last
@@ -835,5 +968,88 @@ mod tests {
         assert_eq!(b[0x14], 4);
         assert_eq!(b[0x18], 5);
         assert!(b[0x1c..].iter().all(|&x| x == 0));
+    }
+
+    /// svcMapSharedMemory or svcUnmapSharedMemory; the result code.
+    fn shared(p: &mut Process, n: u16, args: &[u64]) -> u64 {
+        p.cpu.x[..args.len()].copy_from_slice(args);
+        assert_eq!(crate::svc::dispatch(p, n), None);
+        p.cpu.x[0]
+    }
+
+    #[test]
+    fn shared_memory_maps_whole_with_its_permission_outside_heap_and_alias() {
+        use crate::svc::nr::{MAP_SHARED_MEMORY as MAP, UNMAP_SHARED_MEMORY as UNMAP};
+        let mut p = process();
+        let id = p.create_shared_memory(0x2000, Perm::R);
+        if let Object::SharedMemory { contents, .. } = p.handles.object_mut(id) {
+            contents[0x1ff8..].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        }
+        let h = p.handles.add_handle(id, Kind::SharedMemory).unwrap() as u64;
+        let at = 0x4000_0000;
+        let bad = |p: &mut Process, h, addr, size, perm| shared(p, MAP, &[h, addr, size, perm]);
+        let main = p.main_thread as u64;
+        assert_eq!(bad(&mut p, main, at, 0x2000, 1), result::INVALID_HANDLE);
+        assert_eq!(bad(&mut p, h, at + 8, 0x2000, 1), result::INVALID_ADDRESS);
+        assert_eq!(bad(&mut p, h, at, 0x1000, 1), result::INVALID_SIZE);
+        assert_eq!(
+            bad(&mut p, h, at, 0x2000, 3),
+            result::INVALID_NEW_MEMORY_PERMISSION
+        );
+        let heap = layout::HEAP_REGION.0 + 0x10_0000;
+        let alias = layout::ALIAS_REGION.0;
+        assert_eq!(
+            bad(&mut p, h, heap, 0x2000, 1),
+            result::INVALID_MEMORY_REGION
+        );
+        assert_eq!(
+            bad(&mut p, h, alias, 0x2000, 1),
+            result::INVALID_MEMORY_REGION
+        );
+        assert_eq!(
+            bad(&mut p, h, HI - 0x1000, 0x2000, 1),
+            result::INVALID_MEMORY_REGION
+        );
+        p.mem
+            .map(at + 0x1000, 0x1000, Perm::RW, "in the way")
+            .unwrap();
+        assert_eq!(
+            bad(&mut p, h, at, 0x2000, 1),
+            result::INVALID_CURRENT_MEMORY
+        );
+        p.mem.unmap_range(at + 0x1000, 0x1000).unwrap();
+        assert_eq!(shared(&mut p, MAP, &[h, at, 0x2000, 1]), 0);
+        let info = query(&p.mem, at);
+        assert_eq!(
+            (info.base, info.size, info.state, info.perm),
+            (at, 0x2000, state::SHARED, 1)
+        );
+        assert_eq!(p.mem.read64(at + 0x1ff8), Ok(0x1122_3344_5566_7788));
+        // One mapping at a time.
+        p.cpu.x[..4].copy_from_slice(&[h, at + 0x10_0000, 0x2000, 1]);
+        match crate::svc::dispatch(&mut p, MAP) {
+            Some(crate::Stop::Error(e)) => assert!(e.contains("already mapped"), "{e}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
+        // The mapping keeps the object alive after its handles close.
+        let h2 = p.handles.add_handle(id, Kind::SharedMemory).unwrap() as u64;
+        assert_eq!(shared(&mut p, crate::svc::nr::CLOSE_HANDLE, &[h]), 0);
+        assert_eq!(
+            shared(&mut p, UNMAP, &[h2, at + 0x1000, 0x1000]),
+            result::INVALID_CURRENT_MEMORY
+        );
+        assert_eq!(shared(&mut p, UNMAP, &[h2, at, 0x2000]), 0);
+        assert_eq!(query(&p.mem, at).state, state::FREE);
+        assert_eq!(
+            shared(&mut p, UNMAP, &[h2, at, 0x2000]),
+            result::INVALID_CURRENT_MEMORY
+        );
+        // Mapped again, the bytes are still there.
+        assert_eq!(shared(&mut p, MAP, &[h2, at, 0x2000, 1]), 0);
+        assert_eq!(p.mem.read64(at + 0x1ff8), Ok(0x1122_3344_5566_7788));
+        assert_eq!(shared(&mut p, UNMAP, &[h2, at, 0x2000]), 0);
+        // The service's reference remains after the last handle closes.
+        assert_eq!(shared(&mut p, crate::svc::nr::CLOSE_HANDLE, &[h2]), 0);
+        assert!(matches!(p.handles.object(id), Object::SharedMemory { .. }));
     }
 }
