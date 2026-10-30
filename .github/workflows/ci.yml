@@ -9,8 +9,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Phase 2 acceptance: the standard homebrew examples, built from source
+  # in the public devkitPro container (scripts/build-examples.sh), then run
+  # by every native job.
+  examples:
+    name: Homebrew examples build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash scripts/build-examples.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-examples
+          path: target/examples/bin/*.nro
+          if-no-files-found: error
+
   native:
     name: ${{ matrix.name }}
+    needs: examples
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,6 +58,13 @@ jobs:
         run: |
           cargo run -q --release -p kestrel-cli -- info
           cargo run -q --release -p kestrel-cli -- selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: homebrew-examples
+          path: target/examples/bin
+      - name: The homebrew examples show what their sources print
+        shell: bash
+        run: bash scripts/run-examples.sh target/release/kestrel
 
   # Fallback for Linux ARM in case the native ARM runner is unavailable.
   linux-aarch64-qemu:
