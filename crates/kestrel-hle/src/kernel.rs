@@ -30,12 +30,20 @@ const COUNTER_MASK: u32 = (1 << 15) - 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Thread,
+    ReadableEvent,
+    WritableEvent,
 }
 
 /// A kernel object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Object {
-    Thread { id: u64 },
+    Thread {
+        id: u64,
+    },
+    /// One event, named by a readable and a writable handle.
+    Event {
+        signaled: bool,
+    },
 }
 
 /// Index of an object in the table's object store.
@@ -157,6 +165,7 @@ impl Process {
         match self.handles.get(h) {
             Some((Kind::Thread, id)) => match self.handles.object(id) {
                 Object::Thread { id } => Ok(*id),
+                o => unreachable!("a thread handle names {o:?}"),
             },
             _ => Err(result::INVALID_HANDLE),
         }
@@ -170,6 +179,54 @@ impl Process {
         } else {
             Err(result::INVALID_HANDLE)
         }
+    }
+}
+
+/// Events (Switchbrew, "SVC": CreateEvent, SignalEvent, ClearEvent,
+/// ResetSignal). Nothing waits on them until the synchronisation calls
+/// exist, so signalling only sets the state.
+impl Process {
+    /// The signaled state of the event `h` names, if `h` is one of `kinds`.
+    fn event(&mut self, h: u64, kinds: &[Kind]) -> Result<&mut bool, u64> {
+        match self.handles.get(handle_arg(h)) {
+            Some((kind, id)) if kinds.contains(&kind) => match self.handles.object_mut(id) {
+                Object::Event { signaled } => Ok(signaled),
+                o => unreachable!("an event handle names {o:?}"),
+            },
+            _ => Err(result::INVALID_HANDLE),
+        }
+    }
+
+    /// svcCreateEvent: a new, unsignaled event as (writable, readable).
+    pub fn create_event(&mut self) -> Result<(u32, u32), u64> {
+        let hs = self.handles.insert(
+            Object::Event { signaled: false },
+            &[Kind::WritableEvent, Kind::ReadableEvent],
+        )?;
+        Ok((hs[0], hs[1]))
+    }
+
+    /// svcSignalEvent: only the writable side signals.
+    pub fn signal_event(&mut self, h: u64) -> Result<(), u64> {
+        *self.event(h, &[Kind::WritableEvent])? = true;
+        Ok(())
+    }
+
+    /// svcClearEvent: either side clears.
+    pub fn clear_event(&mut self, h: u64) -> Result<(), u64> {
+        *self.event(h, &[Kind::WritableEvent, Kind::ReadableEvent])? = false;
+        Ok(())
+    }
+
+    /// svcResetSignal on an event: the readable side, and only when
+    /// signaled; otherwise InvalidState (0xfa01).
+    pub fn reset_signal(&mut self, h: u64) -> Result<(), u64> {
+        let signaled = self.event(h, &[Kind::ReadableEvent])?;
+        if !*signaled {
+            return Err(result::INVALID_STATE);
+        }
+        *signaled = false;
+        Ok(())
     }
 }
 
@@ -234,6 +291,50 @@ mod tests {
 
     fn thread(id: u64) -> Object {
         Object::Thread { id }
+    }
+
+    #[test]
+    fn an_event_is_signaled_by_its_writable_side_and_reset_by_its_readable_side() {
+        let mut p = process();
+        p.cpu.x[1] = 0;
+        assert_eq!(dispatch(&mut p, nr::CREATE_EVENT), None);
+        let (w, r) = (p.cpu.x[1], p.cpu.x[2]);
+        assert_eq!(p.cpu.x[0], 0);
+        assert_ne!(w, r);
+        let (bad, unsignaled) = (result::INVALID_HANDLE, result::INVALID_STATE);
+        assert_eq!(call(&mut p, nr::RESET_SIGNAL, r, 0).0, unsignaled);
+        assert_eq!(call(&mut p, nr::SIGNAL_EVENT, r, 0).0, bad);
+        assert_eq!(call(&mut p, nr::RESET_SIGNAL, w, 0).0, bad);
+        assert_eq!(call(&mut p, nr::SIGNAL_EVENT, w, 0).0, 0);
+        assert_eq!(call(&mut p, nr::SIGNAL_EVENT, w, 0).0, 0);
+        assert_eq!(call(&mut p, nr::RESET_SIGNAL, r, 0).0, 0);
+        assert_eq!(call(&mut p, nr::RESET_SIGNAL, r, 0).0, unsignaled);
+        // Clearing works from either side and needs no signal.
+        for h in [w, r, w] {
+            assert_eq!(call(&mut p, nr::SIGNAL_EVENT, w, 0).0, 0);
+            assert_eq!(call(&mut p, nr::CLEAR_EVENT, h, 0).0, 0);
+            assert_eq!(call(&mut p, nr::RESET_SIGNAL, r, 0).0, unsignaled);
+        }
+        assert_eq!(call(&mut p, nr::CLEAR_EVENT, r, 0).0, 0);
+        // Thread handles are not events.
+        let main = p.main_thread as u64;
+        assert_eq!(call(&mut p, nr::CLEAR_EVENT, main, 0).0, bad);
+        // Each side outlives the other.
+        assert_eq!(call(&mut p, nr::CLOSE_HANDLE, w, 0).0, 0);
+        assert_eq!(call(&mut p, nr::SIGNAL_EVENT, w, 0).0, bad);
+        assert_eq!(call(&mut p, nr::CLEAR_EVENT, r, 0).0, 0);
+        assert_eq!(call(&mut p, nr::CLOSE_HANDLE, r, 0).0, 0);
+        assert_eq!(call(&mut p, nr::CLEAR_EVENT, r, 0).0, bad);
+    }
+
+    #[test]
+    fn resetting_the_process_signal_stops_as_unsupported() {
+        let mut p = process();
+        p.cpu.x[0] = handle::CURRENT_PROCESS;
+        match dispatch(&mut p, nr::RESET_SIGNAL) {
+            Some(crate::Stop::Error(e)) => assert!(e.contains("svcResetSignal"), "{e}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
     }
 
     #[test]

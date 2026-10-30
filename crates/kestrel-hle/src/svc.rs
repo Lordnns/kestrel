@@ -16,7 +16,10 @@ pub mod nr {
     pub const QUERY_MEMORY: u16 = 0x06;
     pub const EXIT_PROCESS: u16 = 0x07;
     pub const SLEEP_THREAD: u16 = 0x0b;
+    pub const SIGNAL_EVENT: u16 = 0x11;
+    pub const CLEAR_EVENT: u16 = 0x12;
     pub const CLOSE_HANDLE: u16 = 0x16;
+    pub const RESET_SIGNAL: u16 = 0x17;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
     pub const GET_PROCESS_ID: u16 = 0x24;
     pub const GET_THREAD_ID: u16 = 0x25;
@@ -25,6 +28,7 @@ pub mod nr {
     pub const GET_INFO: u16 = 0x29;
     pub const MAP_PHYSICAL_MEMORY: u16 = 0x2c;
     pub const UNMAP_PHYSICAL_MEMORY: u16 = 0x2d;
+    pub const CREATE_EVENT: u16 = 0x45;
 }
 
 /// Result codes (module 1 = kernel), named and numbered as on Switchbrew's
@@ -41,6 +45,7 @@ pub mod result {
     pub const LIMIT_REACHED: u64 = 0x10801;
     pub const INVALID_HANDLE: u64 = 0xe401;
     pub const INVALID_COMBINATION: u64 = 0xe801;
+    pub const INVALID_STATE: u64 = 0xfa01;
 }
 
 /// Pseudo-handles that always name the caller.
@@ -176,6 +181,38 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
         nr::SLEEP_THREAD => {
             // Single thread: yielding or sleeping just returns.
             p.cpu.x[0] = result::SUCCESS;
+            None
+        }
+        nr::CREATE_EVENT => {
+            // W1 = writable side, W2 = readable side.
+            match p.create_event() {
+                Ok((w, r)) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = w as u64;
+                    p.cpu.x[2] = r as u64;
+                }
+                Err(code) => p.cpu.x[0] = code,
+            }
+            None
+        }
+        nr::SIGNAL_EVENT => {
+            p.cpu.x[0] = code(p.signal_event(p.cpu.x[0]));
+            None
+        }
+        nr::CLEAR_EVENT => {
+            p.cpu.x[0] = code(p.clear_event(p.cpu.x[0]));
+            None
+        }
+        nr::RESET_SIGNAL => {
+            // A process is signaled when its state changes; kestrel does not
+            // model process states yet.
+            if p.cpu.x[0] as u32 as u64 == handle::CURRENT_PROCESS {
+                return Some(Stop::Error(format!(
+                    "unsupported: svcResetSignal on a process handle, at pc {:#x}",
+                    p.cpu.pc.wrapping_sub(4)
+                )));
+            }
+            p.cpu.x[0] = code(p.reset_signal(p.cpu.x[0]));
             None
         }
         nr::CLOSE_HANDLE => {
