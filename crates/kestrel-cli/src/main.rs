@@ -1,6 +1,5 @@
 //! `kestrel` command-line front end.
 
-use kestrel_core::Memory;
 use kestrel_cpu::{create_backend, interp::Interpreter, BackendKind, CpuBackend};
 use kestrel_hle::{Process, Stop};
 use std::process::ExitCode;
@@ -19,7 +18,7 @@ kestrel - experimental ARM64 console emulator
 USAGE:
     kestrel selftest [-v]            Run the built-in ARM64 test programs
     kestrel extract <dir>            Write the built-in test programs to <dir>
-    kestrel run <program.elf> [options]
+    kestrel run <program.elf|program.nro> [options] [-- args...]
     kestrel info                     Show host and backend information
 
 RUN OPTIONS:
@@ -28,6 +27,8 @@ RUN OPTIONS:
     --trace                              Print every executed instruction
     --regs                               Dump registers when the program stops
     --stats                              Print instruction count and speed
+    -- args...                           Arguments for a homebrew NRO (argv[0]
+                                         is its file name)
 ";
 
 struct Opts {
@@ -37,6 +38,7 @@ struct Opts {
     trace: bool,
     regs: bool,
     stats: bool,
+    args: Vec<String>,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
@@ -49,6 +51,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         trace: false,
         regs: false,
         stats: false,
+        args: Vec::new(),
     };
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -64,6 +67,9 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--trace" => o.trace = true,
             "--regs" => o.regs = true,
             "--stats" => o.stats = true,
+            "--" => {
+                o.args = it.by_ref().cloned().collect();
+            }
             other => return Err(format!("unknown option '{other}'")),
         }
     }
@@ -141,8 +147,13 @@ fn extract(args: &[String]) -> Result<ExitCode, String> {
     let dir = args.first().ok_or("extract needs a target directory")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
     for case in kestrel_testsuite::CASES {
-        let path = std::path::Path::new(dir).join(format!("{}.elf", case.name));
-        std::fs::write(&path, case.elf)
+        let ext = if kestrel_loader::is_nro(case.file) {
+            "nro"
+        } else {
+            "elf"
+        };
+        let path = std::path::Path::new(dir).join(format!("{}.{ext}", case.name));
+        std::fs::write(&path, case.file)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         println!("wrote {}", path.display());
     }
@@ -151,10 +162,10 @@ fn extract(args: &[String]) -> Result<ExitCode, String> {
 
 fn run(o: Opts) -> Result<ExitCode, String> {
     let file = std::fs::read(&o.path).map_err(|e| format!("cannot read {}: {e}", o.path))?;
-    let mut mem = Memory::new();
-    let image =
-        kestrel_loader::load_elf(&file, &mut mem).map_err(|e| format!("{}: {e}", o.path))?;
-    let mut proc = Process::new(mem, &image)?;
+    let name = std::path::Path::new(&o.path)
+        .file_name()
+        .map_or(o.path.clone(), |n| n.to_string_lossy().into_owned());
+    let mut proc = Process::load(&file, &name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
     proc.echo = true;
 
     let mut backend: Box<dyn CpuBackend> = if o.trace {

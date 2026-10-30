@@ -78,6 +78,29 @@ impl Process {
         })
     }
 
+    /// Load `file`, an ELF test program or a homebrew NRO, into a new
+    /// process. An NRO is loaded at `layout::NRO_BASE` and started with
+    /// argv[0] = `name` followed by `args`; an ELF takes no arguments.
+    pub fn load(file: &[u8], name: &str, args: &[String]) -> Result<Self, String> {
+        let mut mem = Memory::new();
+        if kestrel_loader::is_nro(file) {
+            let nro = kestrel_loader::load_nro(file, layout::NRO_BASE, &mut mem)
+                .map_err(|e| e.to_string())?;
+            let mut p = Process::new(mem, &nro.image)?;
+            let argv: Vec<String> = std::iter::once(name.to_string())
+                .chain(args.iter().cloned())
+                .collect();
+            p.start_homebrew(&argv)?;
+            Ok(p)
+        } else {
+            if !args.is_empty() {
+                return Err("arguments are only passed to homebrew NROs".into());
+            }
+            let image = kestrel_loader::load_elf(file, &mut mem).map_err(|e| e.to_string())?;
+            Process::new(mem, &image)
+        }
+    }
+
     /// Run until the process stops or `max_steps` instructions retire.
     pub fn run(&mut self, backend: &mut dyn CpuBackend, max_steps: u64) -> Stop {
         let start = self.cpu.retired;
