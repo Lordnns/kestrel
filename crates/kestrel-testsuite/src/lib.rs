@@ -116,6 +116,7 @@ pub const CASES: &[Case] = &[
     ),
     homebrew!("hbipc", "homebrew NRO: named ports, sessions, sm:"),
     homebrew!("hbapplet", "homebrew NRO: set:sys, apm, appletOE startup"),
+    homebrew!("hbhid", "homebrew NRO: hid startup, shared memory"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.

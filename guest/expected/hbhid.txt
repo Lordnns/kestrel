@@ -1,0 +1,37 @@
+homebrew hid test
+sm: register: 0x0000000000000000
+CreateAppletResource: 0x0000000000000000
+it moved a session handle: yes
+GetSharedMemoryHandle: 0x0000000000000000
+it copied a handle: yes
+map read-write: 0x000000000000d801
+map 0x1000 bytes: 0x000000000000ca01
+map unaligned: 0x000000000000cc01
+map in the heap region: 0x000000000000dc01
+map in the alias region: 0x000000000000dc01
+map with the session handle: 0x000000000000e401
+map read-only: 0x0000000000000000
+one block of 0x40000 bytes: yes
+memory type: 0x0000000000402006
+permission: 0x0000000000000001
+every byte is zero (no input yet): yes
+unmap the wrong size: 0x000000000000d401
+unmap elsewhere: 0x000000000000d401
+unmap: 0x0000000000000000
+free again: yes
+unmap again: 0x000000000000d401
+map again: 0x0000000000000000
+close the handle while mapped: 0x0000000000000000
+still mapped: yes
+unmap through the closed handle: 0x000000000000e401
+ActivateNpadWithRevision 5: 0x0000000000000000
+SetSupportedNpadIdType: 0x0000000000000000
+SetSupportedNpadStyleSet: 0x0000000000000000
+GetSupportedNpadStyleSet: 0x0000000000000000
+style set: 0x000000000000001f
+ActivateTouchScreen: 0x0000000000000000
+ActivateMouse: 0x0000000000000000
+ActivateKeyboard: 0x0000000000000000
+close IAppletResource: 0x0000000000000000
+close hid: 0x0000000000000000
+close sm: 0x0000000000000000

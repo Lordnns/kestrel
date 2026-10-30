@@ -724,6 +724,65 @@ def hbapplet():
     return "".join(line + "\n" for line in out)
 
 
+def hbhid():
+    """guest/src/nro/hbhid.c: input setup as libnx's hidInitialize and
+    padConfigureInput do it. Switchbrew's "HID services": CreateAppletResource
+    returns an IAppletResource, whose GetSharedMemoryHandle returns the
+    0x40000-byte shared memory; ActivateNpadWithRevision takes revision 5
+    from 18.0.0; SetSupportedNpadIdType takes up to 10 NpadIdTypes in a
+    type-0x9 buffer; GetSupportedNpadStyleSet returns what
+    SetSupportedNpadStyleSet set. "SVC": MapSharedMemory maps the block as
+    MemoryType Shared (0x00402006), and a mapping holds a reference to the
+    object, so it outlives its handle. Kestrel's documented choices
+    (docs/ROADMAP.md, phase 2 notes): the shared memory is read-only for the
+    process and zeroed, as there is no host input yet; mapping needs the
+    object's permission (else 0xd801), its size (0xca01), page alignment
+    (0xcc01), a block outside the heap and alias regions (0xdc01) and a
+    shared memory handle (0xe401); unmapping anything but the mapping is
+    0xd401."""
+    ok = hex64(0)
+    out = [
+        "homebrew hid test",
+        f"sm: register: {ok}",
+        f"CreateAppletResource: {ok}",
+        "it moved a session handle: yes",
+        f"GetSharedMemoryHandle: {ok}",
+        "it copied a handle: yes",
+        f"map read-write: {hex64(0xD801)}",
+        f"map 0x1000 bytes: {hex64(0xCA01)}",
+        f"map unaligned: {hex64(0xCC01)}",
+        f"map in the heap region: {hex64(0xDC01)}",
+        f"map in the alias region: {hex64(0xDC01)}",
+        f"map with the session handle: {hex64(0xE401)}",
+        f"map read-only: {ok}",
+        "one block of 0x40000 bytes: yes",
+        f"memory type: {hex64(0x402006)}",
+        f"permission: {hex64(1)}",
+        "every byte is zero (no input yet): yes",
+        f"unmap the wrong size: {hex64(0xD401)}",
+        f"unmap elsewhere: {hex64(0xD401)}",
+        f"unmap: {ok}",
+        "free again: yes",
+        f"unmap again: {hex64(0xD401)}",
+        f"map again: {ok}",
+        f"close the handle while mapped: {ok}",
+        "still mapped: yes",
+        f"unmap through the closed handle: {hex64(0xE401)}",
+        f"ActivateNpadWithRevision 5: {ok}",
+        f"SetSupportedNpadIdType: {ok}",
+        f"SetSupportedNpadStyleSet: {ok}",
+        f"GetSupportedNpadStyleSet: {ok}",
+        f"style set: {hex64(0x1F)}",
+        f"ActivateTouchScreen: {ok}",
+        f"ActivateMouse: {ok}",
+        f"ActivateKeyboard: {ok}",
+        f"close IAppletResource: {ok}",
+        f"close hid: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -741,6 +800,7 @@ PROGRAMS = {
     "hbsync": hbsync,
     "hbipc": hbipc,
     "hbapplet": hbapplet,
+    "hbhid": hbhid,
 }
 
 
