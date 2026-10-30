@@ -114,6 +114,7 @@ pub const CASES: &[Case] = &[
         "hbsync",
         "homebrew NRO: waits, mutexes, condition variables"
     ),
+    homebrew!("hbipc", "homebrew NRO: named ports, sessions, sm:"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.

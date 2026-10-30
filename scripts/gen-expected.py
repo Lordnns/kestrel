@@ -604,6 +604,57 @@ def hbsync():
     return "".join(line + "\n" for line in out)
 
 
+def hbipc():
+    """guest/src/nro/hbipc.c: IPC with the service manager. Switchbrew's
+    "Services API" page: sm: RegisterClient (command 0) takes the process ID
+    descriptor, GetServiceHandle (1) a zero-padded 8-byte name; from 12.0.0
+    the same commands also come over TIPC as command types 16 and 17. Result
+    names from the "Error codes" page: InvalidClient 0x415, InvalidServiceName
+    0xc15 (module 21), SessionClosed 0xf601, InvalidHandle 0xe401,
+    InvalidPointer 0xe601, OutOfRange 0xee01 (module 1). A reply goes to the
+    thread that sent the request ("IPC Marshalling": the message lives in the
+    sender's thread local region), and registering is per session. Kestrel's
+    documented choices (docs/ROADMAP.md, phase 2 notes): InvalidClient for
+    GetServiceHandle before RegisterClient; InvalidServiceName for an empty
+    name or characters after the padding; an unreadable port name is
+    InvalidPointer and one with no NUL in 12 bytes OutOfRange; a close
+    request succeeds and later requests on the session give SessionClosed."""
+    ok = hex64(0)
+
+    def svc(code):
+        return f"{ok}, service result {hex64(code)}"
+
+    out = [
+        "homebrew IPC test",
+        f"connect with an unreadable name: {hex64(0xE601)}",
+        f"connect with a 12-character name: {hex64(0xEE01)}",
+        f"connect to sm: {ok}",
+        "the session handle is a real handle: yes",
+        f"get a service before registering: {svc(0x415)}",
+        f"register: {svc(0)}",
+        "the reply moved no handles: yes",
+        f"get a service with an empty name: {svc(0xC15)}",
+        f"get a service with a gap in its name: {svc(0xC15)}",
+        f"connect to sm: again: {ok}",
+        "a different handle: yes",
+        f"TIPC get a service before registering: {svc(0x415)}",
+        f"create a thread: {ok}",
+        f"wait for it: {ok}",
+        f"TIPC register from that thread: {ok}",
+        f"its service result: {ok}",
+        "this thread's region is untouched: yes",
+        f"TIPC get a service with an empty name: {svc(0xC15)}",
+        f"close request: {ok}",
+        f"register after the close request: {hex64(0xF601)}",
+        f"close the handle: {ok}",
+        f"register on the closed handle: {hex64(0xE401)}",
+        f"request on the current thread pseudo-handle: {hex64(0xE401)}",
+        f"the first session still works: {svc(0xC15)}",
+        f"close it: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -619,6 +670,7 @@ PROGRAMS = {
     "hbhandles": hbhandles,
     "hbthreads": hbthreads,
     "hbsync": hbsync,
+    "hbipc": hbipc,
 }
 
 

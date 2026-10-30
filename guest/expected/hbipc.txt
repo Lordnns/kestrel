@@ -1,0 +1,26 @@
+homebrew IPC test
+connect with an unreadable name: 0x000000000000e601
+connect with a 12-character name: 0x000000000000ee01
+connect to sm: 0x0000000000000000
+the session handle is a real handle: yes
+get a service before registering: 0x0000000000000000, service result 0x0000000000000415
+register: 0x0000000000000000, service result 0x0000000000000000
+the reply moved no handles: yes
+get a service with an empty name: 0x0000000000000000, service result 0x0000000000000c15
+get a service with a gap in its name: 0x0000000000000000, service result 0x0000000000000c15
+connect to sm: again: 0x0000000000000000
+a different handle: yes
+TIPC get a service before registering: 0x0000000000000000, service result 0x0000000000000415
+create a thread: 0x0000000000000000
+wait for it: 0x0000000000000000
+TIPC register from that thread: 0x0000000000000000
+its service result: 0x0000000000000000
+this thread's region is untouched: yes
+TIPC get a service with an empty name: 0x0000000000000000, service result 0x0000000000000c15
+close request: 0x0000000000000000
+register after the close request: 0x000000000000f601
+close the handle: 0x0000000000000000
+register on the closed handle: 0x000000000000e401
+request on the current thread pseudo-handle: 0x000000000000e401
+the first session still works: 0x0000000000000000, service result 0x0000000000000c15
+close it: 0x0000000000000000
