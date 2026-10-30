@@ -55,7 +55,7 @@ qemu for Linux ARM64.
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
-| First services | not started | none |
+| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; self-test program `hbapplet`. Not yet: hid, time, fsp-srv, power state, logging |
 | SD folder option, unimplemented-call log | not started | unknown SVCs, ports, services and commands stop with their name and number |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
@@ -189,12 +189,13 @@ loader config list and X1 = all ones. The list holds:
 | 7 | AppletType | Application (0), no flags |
 | 5 | Argv | argv[0] is the file name, then the arguments; empty arguments and arguments with spaces are double-quoted |
 | 14 | RandomSeed | a fixed value, so runs are reproducible |
+| 16 | HosVersion | 20.0.0 in libnx's MAKEHOSVERSION encoding; 0 as the implementation magic, so libnx does not turn on its Atmosphere extensions |
 | 0 | EndOfList | the loader string `kestrel <version>` |
 
 Gaps:
 
-- Not provided yet: HosVersion (homebrew falls back to asking the settings
-  service), SyscallAvailableHint, OverrideHeap and the other optional keys.
+- Not provided yet: SyscallAvailableHint, OverrideHeap and the other
+  optional keys.
 - argv[0] becomes an `sdmc:/` path once the SD folder option exists.
 - An argument containing a double quote is refused, because the argument
   string cannot carry it.
@@ -404,7 +405,7 @@ descriptors, command types, the CMIF and TIPC formats), its "SVC" page
 (sm:), with field widths and the order of a message's parts as libnx's
 open-source `hipc.h`, `cmif.h` and `tipc.h` build them. Parsing and
 encoding are in `hle/ipc.rs`; sessions and services in
-`hle/service.rs`. Services are written in Rust and answer at once, so a
+`hle/service/`. Services are written in Rust and answer at once, so a
 request never blocks and other threads do not run meanwhile.
 
 | Call or command | Behaviour |
@@ -427,31 +428,83 @@ Gaps:
   padding InvalidServiceName 0xc15; registering is per session; a close
   request succeeds; replies carry command type 0 and CMIF replies version
   0 and token 0 (libnx reads none of these).
-- No services exist yet besides sm:; asking sm: for any other service
-  stops with its name ("unimplemented service ...").
+- Asking sm: for a service kestrel does not implement stops with its
+  name ("unimplemented service ...").
 - Stop as unsupported: other named ports; sm: RegisterService,
   UnregisterService and DetachClient (guest servers need server sessions
-  and svcReplyAndReceive); CMIF control requests (domains, cloning,
-  QueryPointerBufferSize); legacy command types 1 and 3; handles in
-  requests; receive list modes 1 and 2 and explicit receive list offsets.
-- Buffer descriptors are parsed but no service reads or writes through
-  them yet.
+  and svcReplyAndReceive); CMIF control requests other than
+  ConvertCurrentObjectToDomain (cloning, QueryPointerBufferSize, and any
+  on a domain); domain objects as arguments; legacy command types 1 and 3;
+  moved handles in requests; receive list modes 1 and 2 and explicit
+  receive list offsets.
+- Services write output through receive list (C) buffers; none reads or
+  writes through the A, B, W or X descriptors yet.
 - Switchbrew notes that on Switch 2 every error from the SendSyncRequest
   calls closes the session (`docs/SWITCH2_NOTES.md`); not modelled.
+
+First services. The system version kestrel reports is 20.0.0, the
+owner's choice (the first major version of the Switch 2 era), held in
+`hle::firmware`; every service answers as Switchbrew documents that
+version. Homebrew gets it in the HosVersion loader entry, so libnx does
+not ask set:sys. Each service follows its Switchbrew page and the
+requests libnx's startup sends (`__appInit` in `runtime/init.c`,
+`applet.c`, `apm.c`, `set.c`). The code is in `hle/service/` (`set.rs`,
+`am.rs`); domains are in `service/mod.rs`.
+
+Domains ("IPC Marshalling"): ConvertCurrentObjectToDomain makes the
+session's object domain object 1 (kestrel's choice of ID); a command's
+new interfaces become new objects with the lowest free IDs, listed after
+the reply's data; a domain Close request frees an ID. Outside a domain,
+each new interface is a new session, moved to the client.
+
+| Service | Commands |
+|---------|----------|
+| set:sys | GetFirmwareVersion2 (4): the 0x100-byte FirmwareVersion through the client's receive buffer: 20.0.0, ReleaseNumber and Revision 0, kestrel's own Platform, DisplayVersion "20.0.0" and DisplayName |
+| apm | OpenSession (0), GetPerformanceMode (1) |
+| appletOE | OpenApplicationProxy (0): needs the process ID and a copy of the current-process pseudo-handle |
+| IApplicationProxy | the getters 0-4, 11, 20 and 1000 |
+| ICommonStateGetter | GetEventHandle (0), ReceiveMessage (1), GetOperationMode (5), GetPerformanceMode (6), GetCurrentFocusState (9) |
+| ISelfController | SetOperationModeChangedNotification (11), SetPerformanceModeChangedNotification (12), SetFocusHandlingMode (13), SetOutOfFocusSuspendingEnabled (16), GetAccumulatedSuspendedTickChangedEvent (91) |
+| IWindowController | GetAppletResourceUserId (1), AcquireForegroundRights (10) |
+| IApplicationFunctions | NotifyRunning (40) |
+
+Gaps:
+
+- Where the sources leave it to the console's state, kestrel chose: the
+  application is always in focus (FocusState 1) and never suspended, so
+  no applet message arrives (ReceiveMessage 0x680) and neither event is
+  ever signaled; docked (OperationMode 1, Console) with PerformanceMode 1
+  (Boost); the applet resource user ID is the process ID; NotifyRunning
+  answers 0; the notification and focus-handling flags are accepted and
+  have no effect.
+- set:sys GetFirmwareVersion (3) stops: Switchbrew says Switch 2 removed
+  it (`docs/SWITCH2_NOTES.md`). Switch 2 software no longer uses apm;
+  kestrel answers it for libnx.
+- Every other command of these interfaces stops with its interface and
+  number, as do IAudioController, IDisplayController,
+  ILibraryAppletCreator, IDebugFunctions and IApmSession, which libnx
+  opens but does not call at startup. Only one appletOE session should
+  exist at a time ("Applet Manager services"); kestrel does not enforce
+  it.
 
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
 
-Phase 2, first services (on any machine), each from its Switchbrew
-page and checked by a homebrew test program. libnx's default startup
-(`__appInit` in `nx/source/runtime/init.c`) opens sm:, then `set:sys`
-for the firmware version when the loader gives none, then the applet
-services, `hid`, time and `fsp-srv`, so those come first; then the
-SD folder option for the filesystem, power state and logging. Each brings what
-it needs from IPC: reading and writing through buffer descriptors,
-handles in requests and replies, and domains (CMIF control requests)
-for the services libnx converts to domains.
+Phase 2, the rest of the first services (on any machine), each from
+its Switchbrew page, in the order libnx's startup opens them, and each
+checked by a homebrew test program:
+
+1. `hid` (input): CreateAppletResource and the shared memory it hands
+   out, which needs shared memory objects and svcMapSharedMemory, then
+   the npad setup libnx's hidInitialize sends.
+2. Time (`time:u` or the service libnx picks for 20.0.0): the system
+   clocks and the time zone service libnx's startup reads, with a
+   documented choice of what time it is (a fixed time keeps runs
+   reproducible).
+3. `fsp-srv` with the SD folder option: OpenSdCardFileSystem, files and
+   directories over a host folder, through A and B buffers.
+4. Power state and logging, then the unimplemented-call log.
 
 Phase 3 on macOS (needs a session on the owner's Mac, since
 Hypervisor.framework is macOS-only): the memory arena refactor, the
@@ -459,8 +512,7 @@ native backend, and the differential tester.
 
 ### Order after that
 
-1. Phase 2: the unimplemented-call log.
-2. Phase 2 acceptance (homebrew console examples on all five platforms),
+1. Phase 2 acceptance (homebrew console examples on all five platforms),
    then phase 3 on Linux KVM and Windows.
 
 Owner decisions pending in `PLAN.md` section 7 (strategy, API-level

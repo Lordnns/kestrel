@@ -43,9 +43,12 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   priorities, cores, sleep and yield on a deterministic scheduler), and
   synchronisation: waiting on events and threads, mutexes, condition
   variables and address arbitration, with deadlock reports.
-- **IPC**: the message format (CMIF and TIPC), named ports, client
-  sessions, svcSendSyncRequest and the service manager sm:, with unknown
-  services and commands reported by name.
+- **IPC**: the message format (CMIF, CMIF domains and TIPC), named
+  ports, client sessions, svcSendSyncRequest and the service manager sm:,
+  with unknown services and commands reported by name.
+- **First services**, answering as system version 20.0.0: set:sys
+  firmware version, apm, and the applet manager commands an application
+  sends at startup.
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -90,6 +93,11 @@ built integer-only, and built with floating point and NEON allowed
 | `hbtest`     | a homebrew NRO with its own startup code: loader config entries, arguments, `.bss`, `.data`, self-relocation |
 | `hblayout`   | a homebrew NRO checking the svcGetInfo layout: regions in the 39-bit space without overlap, documented sizes, heap placement, error results |
 | `hbmemory`   | a homebrew NRO driving the memory calls: memory types from svcQueryMemory, heap resizing, permissions and attributes, svcMapMemory, physical memory, error results |
+| `hbhandles`  | a homebrew NRO checking handles, events and transfer memory, and filling the handle table |
+| `hbthreads`  | a homebrew NRO running threads on four cores: priorities, core masks, sleep and yield, time slices, exclusive monitors |
+| `hbsync`     | a homebrew NRO checking waits, timeouts, cancelling, mutexes, condition variables and address arbitration |
+| `hbipc`      | a homebrew NRO talking to sm: over CMIF and TIPC, from two threads, with bad names, close requests and closed handles |
+| `hbapplet`   | a homebrew NRO sending libnx's startup requests: set:sys firmware version, apm, appletOE as a domain with its interfaces and events |
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 
@@ -168,7 +176,8 @@ The plan of record, with its rules and acceptance criteria, is
 [docs/ROADMAP.md](docs/ROADMAP.md). In short:
 
 1. Homebrew (in progress: the NRO loader, process layout, memory calls,
-   handle table, threads, synchronisation and IPC with sm: are done): the
+   handle table, threads, synchronisation, IPC with sm:, and the settings
+   and applet services are done): input, time, filesystem and the other
    first OS services, from public documentation.
 2. `native` backend on aarch64 hosts, starting on macOS, developed alongside
    the OS services; then a `jit` backend on x86_64.
