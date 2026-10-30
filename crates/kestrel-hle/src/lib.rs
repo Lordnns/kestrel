@@ -8,6 +8,7 @@
 //! Switchbrew's "SVC" page). Behaviour is implemented from that public
 //! documentation and from observing homebrew, never from console firmware.
 
+pub mod homebrew;
 pub mod svc;
 
 use kestrel_core::{Memory, Perm};
@@ -22,6 +23,10 @@ pub mod layout {
     pub const HEAP_BASE: u64 = 0x60_0000_0000;
     pub const TLS_BASE: u64 = 0x7e_0000_0000;
     pub const TLS_SIZE: u64 = 0x1000;
+    /// Where homebrew NROs are loaded.
+    pub const NRO_BASE: u64 = 0x800_0000;
+    /// The homebrew loader config entries and their strings.
+    pub const HOMEBREW_CONFIG: u64 = 0x7d_0000_0000;
 }
 
 /// Why a process stopped.
