@@ -46,6 +46,12 @@ what changed and which tasks it affects.
   where it is not (phase 5).
 - Ship self-testing packages so any tester can verify their machine with a
   single command.
+- Behave like a real Switch 2 in real time (owner, 2026-10-30): guest time
+  runs 1:1 with wall-clock time, and games run at their full frame rate,
+  up to 120 fps, on the native (phase 3) and recompiler (phase 4)
+  backends. Weigh every design choice against this goal; the interpreter
+  remains the reference for correctness, not for speed. Section 3, "Time
+  and cores", holds the decisions that follow from it.
 
 ---
 
@@ -133,6 +139,42 @@ what changed and which tasks it affects.
 - Hosted runners have no usable GPU and never see game files, so gameplay
   testing is manual on the owner's machines. Gameplay hardware is bought only
   when phase 5 starts.
+
+### Time and cores (owner decisions, 2026-10-30)
+
+These follow from the real-time goal in section 1.
+
+- **The clock.** The guest's 19.2 MHz system counter (GetSystemTick,
+  CNTPCT_EL0) has two sources:
+  - Interactive `kestrel run` (a window) reads the host's monotonic clock,
+    so guest time is 1:1 with real time. A game that waits for vsync or
+    sleeps 16 ms waits that long, and a game measuring its frame time sees
+    the real one. Runs are not repeatable, and need not be.
+  - The self-test, unattended (headless) runs and the differential tester
+    count time: one tick every 52 guest instructions, the Switch 2's CPU
+    rate of about 1 GHz (52 x 19.2 MHz = 998.4 MHz), and when every thread
+    sleeps the clock jumps to the next wake-up. Results repeat exactly on
+    every host and backend, so expected output can be checked, and timing
+    inside a test resembles a console's.
+  - Reason: tests need reproducible time and players need real time; one
+    clock cannot give both. Counting one tick per instruction (the
+    phase 2 clock) made programs see a CPU about 50 times slower than a
+    Switch 2 in guest time.
+  - On the native backend, guest reads of the counter would read the
+    host's, whose rate differs per host. kestrel owns the VM's EL1, so it
+    can trap EL0 counter reads (CNTKCTL_EL1) and answer from its own clock;
+    phase 3 measures whether that is fast enough.
+- **Cores.** Switch 2 games get six CPU cores. Plan for six guest cores,
+  each run on its own host thread by the native and recompiler backends,
+  so a game's threads run in parallel as on the console. That needs guest
+  memory and the exclusive monitor shared between host threads (the
+  phase 3 arena), host atomics for guest atomics, and an OS layer that is
+  safe to call from several host threads. The interpreter keeps its
+  deterministic scheduler, all cores taking turns on one host thread, for
+  the self-test and the differential tester. The guest-visible core count
+  moves from the current four (Switchbrew's ProcessorId 0 to 3) to six
+  once the Switch 2's numbering is documented or observed (recorded in
+  `docs/SWITCH2_NOTES.md`).
 
 ---
 
@@ -268,7 +310,10 @@ Provisions (decided):
   write-xor-execute on code memory. A VM avoids all three. In-process
   execution with load-time patching stays a documented fallback.
 - Guest memory becomes one host-allocated arena shared by every backend,
-  mappable into the VM.
+  mappable into the VM, and by every host thread running a guest core.
+- Real time (section 3, "Time and cores"): one host thread per guest core,
+  six for Switch 2 games; guest counter reads answered from kestrel's
+  clock.
 - Order: macOS first (owner's development Mac), then Linux KVM, then Windows.
 - Priority (2026-10-29): native execution on ARM is the approach the first
   public Switch 2 demos use (section 6), so it is not deferred until phase 2
@@ -293,7 +338,8 @@ caches them by guest address and invalidates them on code writes; an
 intermediate representation between decoding and code generation so it can be
 reused; lazy flags; memory through the phase 3 arena with guard pages; atomics
 via host compare-and-swap; floating point through the host vector unit with
-the phase 1 NaN rules applied. Static whole-program recompilation is a later
+the phase 1 NaN rules applied; one host thread per guest core, as in phase 3
+(section 3, "Time and cores"). Static whole-program recompilation is a later
 option.
 
 Acceptance: the self-test passes on the recompiler on Linux, Windows and

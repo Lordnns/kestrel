@@ -72,10 +72,14 @@ Starts on macOS once phase 2's threads and synchronisation are done
 | Differential tester | not started | none |
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
 | Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
+| Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
+| One host thread per guest core (six) | not started | `PLAN.md` section 3, "Time and cores"; the interpreter's scheduler runs every core on one host thread |
 
 ### Phases 4 to 7: **not started**
 
-- Phase 4 x86_64 recompiler: `create_backend(Jit)` returns "not implemented yet".
+- Phase 4 x86_64 recompiler: `create_backend(Jit)` returns "not implemented
+  yet"; it runs each guest core on its own host thread, as phase 3 does
+  (`PLAN.md` section 3, "Time and cores").
 - Phase 5 graphics (5A display, 5B Maxwell GPU level, 5C Ampere GPU level,
   5D NVN API level), phase 6 commercial software, phase 7 polish: no code.
 
@@ -111,6 +115,26 @@ Prompted by the first public Switch 2 demos on Apple hardware
 | Phase 5 split into 5A display, 5B Maxwell GPU level (homebrew, deko3d), 5C Ampere GPU level, 5D NVN API level for commercial games | graphics; resolves the old Maxwell question: both are needed |
 | Phase 6 uses 5C or 5D, whichever gets a title further first | commercial software |
 | New sections 6 (external landscape) and 7 (open decisions for the owner) | owner decisions: strategy, 5D approval, code reuse |
+
+### Plan changes (2026-10-30)
+
+The owner's answer to the clock-rate question (phase 2's last open
+point). What changed in `PLAN.md` and what it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Section 1 adds the product goal: behave like a real Switch 2 in real time, 1:1 with wall-clock time, up to 120 fps, on the native and recompiler backends; every design choice is weighed against it | all phases, above all 3, 4 and 5 |
+| Section 3 "Time and cores", the clock: interactive `kestrel run` reads the host's clock for the 19.2 MHz counter (guest time is real time); the self-test, unattended runs and the differential tester count one tick every 52 instructions (998.4 MHz, the Switch 2's rate of about 1 GHz), so their results repeat | the clock (implemented in the next commit), hid and vsync timing, scripted presses; phase 3 must answer guest counter reads from kestrel's clock (EL0 counter traps through CNTKCTL_EL1) |
+| Section 3 "Time and cores", the cores: plan for six guest cores, each on its own host thread on the native and recompiler backends; the interpreter keeps its deterministic scheduler for tests | phase 3 and 4 design (shared arena and exclusive monitor, host atomics, a thread-safe OS layer); the guest-visible core count moves from four to six once the Switch 2's numbering is documented or observed |
+| Phase 3 and 4 provisions point at those decisions | the native backend and the recompiler |
+
+Why: tests need time that repeats and players need real time, which
+one clock cannot give. The phase 2 clock (one tick per instruction) made
+programs see a CPU about 50 times slower than a Switch 2 in guest time,
+so their frame timing and timeouts were far from a console's. Six cores
+on host threads is what lets the fast backends keep up with games that
+spread their work over the console's cores; a single host thread taking
+turns would cap them at one core's speed.
 
 ### Phase 1A notes
 
