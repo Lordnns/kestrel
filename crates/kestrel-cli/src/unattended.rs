@@ -10,9 +10,13 @@ use std::rc::Rc;
 
 /// hid samples the controller every 5 ms of guest time, 200 a second.
 const SAMPLES_PER_SECOND: f64 = 200.0;
-/// How long a scripted press holds its button: 20 samples, 100 ms
-/// (kestrel's choice, long enough for a program reading once a frame).
-const HOLD: u64 = 20;
+/// How long a scripted press holds its button: 200 samples, 1 s (kestrel's
+/// choice). kestrel's clock counts a tick per instruction, so a program
+/// drawing its screen in software runs slowly in guest time: libnx's
+/// console takes about 90 ms a frame, and 0.6 s for a frame that clears
+/// and redraws the screen. A press must outlast a frame to be seen by a
+/// program reading the controller once a frame.
+const HOLD: u64 = 200;
 
 /// A press: `button` (a Switchbrew name) at `seconds` of the controller's
 /// samples, written `Plus@2.5`.
@@ -149,14 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn a_press_holds_for_100_ms() {
-        let mut s = Scripted(vec!["B@1".parse().unwrap(), "A@1.05".parse().unwrap()]);
+    fn a_press_holds_for_a_second() {
+        let mut s = Scripted(vec!["B@1".parse().unwrap(), "A@1.5".parse().unwrap()]);
         let at = |s: &mut Scripted, n| s.sample(n).buttons;
         assert_eq!(at(&mut s, 199), 0);
         assert_eq!(at(&mut s, 200), button::B);
-        assert_eq!(at(&mut s, 210), button::A | button::B);
-        assert_eq!(at(&mut s, 220), button::A);
-        assert_eq!(at(&mut s, 230), 0);
+        assert_eq!(at(&mut s, 300), button::A | button::B);
+        assert_eq!(at(&mut s, 400), button::A);
+        assert_eq!(at(&mut s, 500), 0);
     }
 
     #[test]

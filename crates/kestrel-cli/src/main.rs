@@ -45,7 +45,7 @@ RUN OPTIONS:
                                          window maps keys and gamepads as
                                          user/config/input.cfg says
     --press <button>@<seconds>           Press a button (Switchbrew's name:
-                                         A, Plus, Up...) for 100 ms, at that
+                                         A, Plus, Up...) for 1 s, at that
                                          time of the controller's samples;
                                          repeatable; replaces the window's
                                          controls
