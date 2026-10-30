@@ -10,3 +10,4 @@ title.keys
 *.nso
 /firmware/
 /dist
+__pycache__/
