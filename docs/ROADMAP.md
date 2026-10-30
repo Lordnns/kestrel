@@ -752,6 +752,14 @@ How it works:
   slice (`Stop::Interrupted`). The window paints a dark grey background:
   graphics come in phase 5. Without a display, kestrel runs without a
   window and says so.
+- With a window the program runs in real time and without an
+  instruction budget (`--max-steps` still sets one). When every thread
+  sleeps, the clock still jumps, and the run loop then waits that time
+  out on the host (`Process::realtime`), so a program sleeping 16 ms per
+  frame takes 16 ms, not none. Found by the owner trying padview: it ran
+  its loop flat out and hit the 1e10 budget in about a minute. The
+  self-test and headless runs still skip idle time, so they repeat
+  exactly and finish fast.
 - `user/config/input.cfg` is written with the defaults when missing:
   `controller = pro` or `handheld`, each button's keys (`key:` and winit
   KeyCode names) and gamepad buttons (`pad:` and gilrs names, which go by
@@ -770,6 +778,7 @@ How it works:
 | Ring count | stops at 16, so the next entry written is never one a reader counts |
 | Gamepad dead zone | 10% of the stick's range |
 | Keys and gamepad | keys win over a gamepad stick; with several gamepads, the stick pushed furthest |
+| Realtime waits | at most 10 ms at a time, so closing the window stops the program soon; up to 20 ms of host oversleeping made up from later waits |
 
 Gaps:
 
@@ -781,6 +790,11 @@ Gaps:
   platform on the next release.
 - Keyboard keys are matched by winit's KeyCode names, so a misspelt name
   in the settings file is not reported; it never matches.
+- Only sleeping is paced. The clock counts one tick per instruction, so
+  while a program computes, its clock runs faster than real time (about
+  seven times at the interpreter's speed). Pacing busy time too means
+  choosing how the clock relates to host time; that belongs with the
+  JIT and graphics, when real games set the pace.
 
 ## Next task
 

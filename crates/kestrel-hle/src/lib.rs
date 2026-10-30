@@ -150,6 +150,10 @@ pub struct Process {
     pub input: Option<Box<dyn input::Source>>,
     /// Set by the frontend to stop the program (its window closed).
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Set by the frontend when someone is using the program (its window
+    /// is open): the time every thread sleeps through also passes on the
+    /// host, instead of being skipped.
+    pub realtime: bool,
     pub svc_count: u64,
 }
 
@@ -193,6 +197,7 @@ impl Process {
             log: Vec::new(),
             input: None,
             interrupt: None,
+            realtime: false,
             svc_count: 0,
         };
         p.main_thread = p
@@ -236,6 +241,14 @@ impl Process {
 
     /// Run until the process stops or `max_steps` instructions retire.
     pub fn run(&mut self, backend: &mut dyn CpuBackend, max_steps: u64) -> Stop {
+        // A realtime run's host wait: skipped idle time not yet waited out,
+        // in nanoseconds, less what the host overslept. Kestrel's choices:
+        // waits of at most 10 ms, so a closed window stops the program
+        // soon, and at most 20 ms of oversleeping made up.
+        const MAX_WAIT_NS: i128 = 10_000_000;
+        const MAX_CREDIT_NS: i128 = 20_000_000;
+        let mut waited_idle = self.sched.idle;
+        let mut owed: i128 = 0;
         let start = self.instructions();
         loop {
             let used = self.instructions() - start;
@@ -247,6 +260,19 @@ impl Process {
                     return Stop::Interrupted;
                 }
             }
+            if self.realtime {
+                owed += thread::nanoseconds(self.sched.idle - waited_idle) as i128;
+                waited_idle = self.sched.idle;
+                if owed > 0 {
+                    let wait = std::time::Duration::from_nanos(owed.min(MAX_WAIT_NS) as u64);
+                    let t = std::time::Instant::now();
+                    std::thread::sleep(wait);
+                    owed = (owed - t.elapsed().as_nanos() as i128).max(-MAX_CREDIT_NS);
+                    continue;
+                }
+            }
+            // After any wait, so the controller is read when the program
+            // wakes.
             self.hid_tick();
             let budget = (max_steps - used).min(self.sched.slice_left);
             let before = self.cpu.retired;

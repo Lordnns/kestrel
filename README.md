@@ -48,9 +48,9 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   with unknown services and commands reported by name.
 - **First services**, answering as system version 20.0.0: set:sys
   firmware version, apm, the applet manager commands an application
-  sends at startup, hid's setup with its shared memory (no host input
-  yet), the time service (clocks that start at 2025-06-05 00:00 UTC and
-  run with the guest's clock, in the UTC time zone), the file system
+  sends at startup, hid with its shared memory and one controller,
+  the time service (clocks that start at 2025-06-05 00:00 UTC and run
+  with the guest's clock, in the UTC time zone), the file system
   with the SD card as a folder on your computer, and the battery state of
   a docked console.
 - **Error reports**: when a program aborts or throws a fatal error, kestrel
@@ -103,8 +103,15 @@ the executable, written with defaults on first run:
 
 Set `controller = handheld` in that file for the Joy-Con attached to the
 console instead. To see what kestrel makes of your keys and pads, run
-`kestrel run guest/bin/padview.nro` and press away; close the window to
-stop. On Linux, gamepads need libudev (`libudev.so.1`, on every desktop
+padview from the repository and press away; each change prints a line
+in the terminal. Close the window to stop.
+
+```
+cargo run --release -p kestrel-cli -- run guest/bin/padview.nro
+```
+
+With a window, programs run in real time: a program that sleeps waits
+for real, and there is no instruction budget. On Linux, gamepads need libudev (`libudev.so.1`, on every desktop
 distribution).
 
 ### What kestrel does not do yet

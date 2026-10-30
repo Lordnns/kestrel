@@ -32,7 +32,8 @@ USAGE:
 
 RUN OPTIONS:
     --backend <auto|interp|native|jit>   CPU backend (default: auto)
-    --max-steps <n>                      Instruction budget (default: 1e10)
+    --max-steps <n>                      Instruction budget (default: 1e10,
+                                         or none with a window)
     --trace                              Print every executed instruction
     --regs                               Dump registers when the program stops
     --stats                              Print instruction count and speed
@@ -48,7 +49,7 @@ RUN OPTIONS:
 struct Opts {
     path: String,
     backend: BackendKind,
-    max_steps: u64,
+    max_steps: Option<u64>,
     trace: bool,
     regs: bool,
     stats: bool,
@@ -63,7 +64,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts {
         path,
         backend: BackendKind::Auto,
-        max_steps: 10_000_000_000,
+        max_steps: None,
         trace: false,
         regs: false,
         stats: false,
@@ -75,12 +76,13 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         match a.as_str() {
             "--backend" => o.backend = it.next().ok_or("--backend needs a value")?.parse()?,
             "--max-steps" => {
-                o.max_steps = it
-                    .next()
-                    .ok_or("--max-steps needs a value")?
-                    .replace('_', "")
-                    .parse()
-                    .map_err(|e| format!("bad --max-steps: {e}"))?
+                o.max_steps = Some(
+                    it.next()
+                        .ok_or("--max-steps needs a value")?
+                        .replace('_', "")
+                        .parse()
+                        .map_err(|e| format!("bad --max-steps: {e}"))?,
+                )
             }
             "--trace" => o.trace = true,
             "--regs" => o.regs = true,
@@ -298,8 +300,15 @@ fn emulate(
     let mut proc = Process::load(file, name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
     proc.echo = true;
     proc.services.fs.sd = sd_folder(o.sd.clone());
+    // With a window someone is using the program: it runs in real time,
+    // for as long as they like.
+    let windowed = interrupt.is_some();
+    proc.realtime = windowed;
     proc.input = input;
     proc.interrupt = interrupt;
+    let max_steps = o
+        .max_steps
+        .unwrap_or(if windowed { u64::MAX } else { 10_000_000_000 });
 
     let mut backend: Box<dyn CpuBackend> = if o.trace {
         if !matches!(o.backend, BackendKind::Auto | BackendKind::Interp) {
@@ -315,7 +324,7 @@ fn emulate(
     };
 
     let t0 = Instant::now();
-    let stop = proc.run(backend.as_mut(), o.max_steps);
+    let stop = proc.run(backend.as_mut(), max_steps);
     let elapsed = t0.elapsed();
 
     if o.regs {

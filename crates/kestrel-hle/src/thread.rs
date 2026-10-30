@@ -15,7 +15,9 @@
 //!   spinning on one core cannot starve the others.
 //! - One process-wide clock counts guest instructions as ticks of the
 //!   documented 19.2 MHz counter ("SVC", GetSystemTick). When every live
-//!   thread sleeps, the clock jumps to the earliest wake-up.
+//!   thread sleeps, the clock jumps to the earliest wake-up. With
+//!   `Process::realtime` (a window is open) the run loop then waits that
+//!   time out on the host, so a sleeping program sleeps for real.
 
 use crate::kernel::{Kind, Object, ObjectId};
 use crate::memory::{state, tag};
@@ -156,6 +158,11 @@ pub enum CoreMaskError {
 pub fn ticks(ns: u64) -> u64 {
     // 19.2 MHz is 12 ticks every 625 ns; the result always fits.
     (ns as u128 * 12).div_ceil(625) as u64
+}
+
+/// The nanoseconds in `ticks` of the 19.2 MHz clock, rounded down.
+pub fn nanoseconds(ticks: u64) -> u64 {
+    (ticks as u128 * 625 / 12) as u64
 }
 
 impl Process {
@@ -688,6 +695,40 @@ mod tests {
         assert_eq!(running(&p), 0x1000, "woken and preempting");
         assert_eq!(p.cpu.retired, 100 + 2 * 19_200);
         assert_eq!(p.instructions(), 100 + 19_200);
+    }
+
+    /// mov x0, #50000000 (50 ms); svc #0xb (SleepThread); svc #0x7
+    /// (ExitProcess), from clang.
+    const SLEEP_50MS: [u32; 4] = [0xd29e1000, 0xf2a05f40, 0xd4000161, 0xd40000e1];
+
+    fn sleeper() -> Process {
+        let mut p = process();
+        p.mem.map(0x1000, 0x1000, Perm::RWX, "code").unwrap();
+        let code: Vec<u8> = SLEEP_50MS.iter().flat_map(|i| i.to_le_bytes()).collect();
+        p.mem.write_bytes(0x1000, &code).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_realtime_run_waits_out_the_sleep_on_the_host() {
+        let mut interp = kestrel_cpu::interp::Interpreter { trace: false };
+        let mut p = sleeper();
+        let t = std::time::Instant::now();
+        assert_eq!(p.run(&mut interp, 100), Stop::Exited);
+        assert!(t.elapsed().as_millis() < 50, "skipped: {:?}", t.elapsed());
+        let mut p = sleeper();
+        p.realtime = true;
+        let t = std::time::Instant::now();
+        assert_eq!(p.run(&mut interp, 100), Stop::Exited);
+        assert!(t.elapsed().as_millis() >= 50, "waited: {:?}", t.elapsed());
+        assert_eq!(p.cpu.retired - p.instructions(), ticks(50_000_000));
+    }
+
+    #[test]
+    fn nanoseconds_undo_ticks() {
+        assert_eq!(nanoseconds(19_200), 1_000_000);
+        assert_eq!(nanoseconds(ticks(50_000_000)), 50_000_000);
+        assert_eq!(nanoseconds(1), 52);
     }
 
     #[test]
