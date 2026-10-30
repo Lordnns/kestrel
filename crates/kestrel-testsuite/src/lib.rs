@@ -1,11 +1,11 @@
 //! The guest test programs, compiled into the binary.
 //!
-//! Each case is an ARM64 ELF from `guest/bin` plus the exact output it must
-//! print (`guest/expected`, computed independently of kestrel). Embedding
+//! Each case is an ARM64 program from `guest/bin` (an ELF, or a homebrew NRO
+//! with its arguments) plus the exact output it must print
+//! (`guest/expected`, computed independently of kestrel). Embedding
 //! them means a tester only needs the `kestrel` executable to run
 //! `kestrel selftest` on their machine.
 
-use kestrel_core::Memory;
 use kestrel_cpu::{create_backend, BackendKind};
 use kestrel_hle::{Process, Stop};
 use std::time::{Duration, Instant};
@@ -13,8 +13,18 @@ use std::time::{Duration, Instant};
 pub struct Case {
     pub name: &'static str,
     pub description: &'static str,
-    pub elf: &'static [u8],
+    /// The program: an ELF or an NRO.
+    pub file: &'static [u8],
+    /// NRO arguments after argv[0], one per line (`guest/src/nro/*.args`).
+    pub args: &'static str,
     pub expected: &'static str,
+}
+
+impl Case {
+    /// The arguments after argv[0].
+    pub fn args(&self) -> Vec<String> {
+        self.args.lines().map(str::to_string).collect()
+    }
 }
 
 macro_rules! case {
@@ -26,16 +36,45 @@ macro_rules! case {
         Case {
             name: $name,
             description: $desc,
-            elf: include_bytes!(concat!(
+            file: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../guest/bin/",
                 $name,
                 ".elf"
             )),
+            args: "",
             expected: include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../guest/expected/",
                 $program,
+                ".txt"
+            )),
+        }
+    };
+}
+
+/// A homebrew NRO, run with the arguments in `guest/src/nro/<name>.args`.
+macro_rules! homebrew {
+    ($name:literal, $desc:literal) => {
+        Case {
+            name: $name,
+            description: $desc,
+            file: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../guest/bin/",
+                $name,
+                ".nro"
+            )),
+            args: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../guest/src/nro/",
+                $name,
+                ".args"
+            )),
+            expected: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../guest/expected/",
+                $name,
                 ".txt"
             )),
         }
@@ -62,6 +101,8 @@ pub const CASES: &[Case] = &[
         "sha256",
         "sha256, NEON build (LD4, widening)"
     ),
+    // Homebrew format: NRO loader, launch environment, self-relocation.
+    homebrew!("hbtest", "homebrew NRO: arguments, bss, relocations"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
@@ -103,9 +144,12 @@ impl Outcome {
 
 /// Load and run one case on the requested backend.
 pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
-    let mut mem = Memory::new();
-    let image = kestrel_loader::load_elf(case.elf, &mut mem).map_err(|e| e.to_string())?;
-    let mut proc = Process::new(mem, &image)?;
+    let file_name = if kestrel_loader::is_nro(case.file) {
+        format!("{}.nro", case.name)
+    } else {
+        format!("{}.elf", case.name)
+    };
+    let mut proc = Process::load(case.file, &file_name, &case.args())?;
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
     let stop = proc.run(cpu.as_mut(), MAX_STEPS);

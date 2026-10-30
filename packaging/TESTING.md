@@ -48,7 +48,7 @@ click **Open Anyway**, then double-click it again.
   PASS  hello  ...
   PASS  asm_checks  ...
   ...
-13/13 passed  (... MIPS on the interp backend)
+14/14 passed  (... MIPS on the interp backend)
 ```
 
 Any `FAIL` line, crash or error message is useful: please send it as is.
@@ -60,6 +60,7 @@ The `examples` folder holds the same ARM64 programs as files:
 ```
 ./kestrel run examples/sha256.elf --stats
 ./kestrel run examples/asm_checks.elf --regs
+./kestrel run examples/hbtest.nro -- first "two words"
 ```
 
 ## Building from source instead

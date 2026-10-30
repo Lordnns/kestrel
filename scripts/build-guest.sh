@@ -8,6 +8,9 @@
 # NEON themselves say so with a "// build: simd-only" line and are built
 # once, as name.elf, with floating point allowed.
 #
+# Homebrew-format programs in guest/src/nro bring their own startup code
+# and are converted to NRO (name.nro) by scripts/make-nro.py.
+#
 # GUEST_OPT (default -O2) and GUEST_OUT (default guest/bin) let
 # scripts/check-optimised.sh build other variants elsewhere.
 set -eu
@@ -48,5 +51,19 @@ for f in "$src"/*.S; do
     $CC --target=aarch64-none-elf -march=armv8.2-a+lse -c "$f" -o "$out/$name.o"
     $LD -static -e _start "$out/$name.o" -o "$out/$name.elf"
     echo "built $out/$name.elf"
+done
+# Homebrew-format programs: own startup code, linked position-independent
+# and converted to NRO by scripts/make-nro.py (needs python3).
+PIE="--target=aarch64-none-elf -ffreestanding -nostdlib -fno-stack-protector \
+     -fPIE -fvisibility=hidden ${GUEST_OPT:--O2} -Wall -Werror -mgeneral-regs-only"
+$CC --target=aarch64-none-elf -c "$src/nro/crt0.S" -o "$out/crt0.o"
+for f in "$src"/nro/*.c; do
+    name=$(basename "$f" .c)
+    $CC $PIE -c "$f" -o "$out/$name.o"
+    $LD -pie --no-dynamic-linker -z text -T "$src/nro/nro.ld" \
+        "$out/crt0.o" "$out/$name.o" -o "$out/$name.nro.elf"
+    python3 "$root/scripts/make-nro.py" "$out/$name.nro.elf" "$out/$name.nro"
+    rm -f "$out/$name.nro.elf"
+    echo "built $out/$name.nro"
 done
 rm -f "$out"/*.o

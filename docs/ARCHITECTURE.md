@@ -10,7 +10,7 @@ kestrel-cli ──► kestrel-hle ──► kestrel-cpu ──► kestrel-core
 |------------------|-------------------------------------------------------------------|
 | `kestrel-core`   | Guest address space (`Memory`), permissions, faults               |
 | `kestrel-cpu`    | `CpuState`, the `CpuBackend` trait, the portable interpreter      |
-| `kestrel-loader` | Executable loaders (ELF now, homebrew format next)                |
+| `kestrel-loader` | Executable loaders: ELF test programs, homebrew NRO               |
 | `kestrel-hle`    | Process model and supervisor-call (SVC) handling                  |
 | `kestrel-cli`    | Command-line front end                                            |
 

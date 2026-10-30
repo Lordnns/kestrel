@@ -3,4 +3,7 @@ guest/expected/*.txt text eol=lf
 *.sh text eol=lf
 *.command text eol=lf
 *.S text eol=lf
+# Program arguments, one per line, read by the suite and gen-expected.py.
+*.args text eol=lf
+*.nro binary
 *.elf binary

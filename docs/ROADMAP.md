@@ -44,11 +44,11 @@ qemu for Linux ARM64.
 | 1D Real-hardware oracle | done | `rt.h` host mode (`KESTREL_HOST`) sends the three console calls to the C library; `scripts/check-host.sh` builds every C program natively (integer-only and NEON, 12 builds) and compares its output with `guest/expected`; CI job `hardware-oracle` runs it on `ubuntu-24.04-arm` and `macos-14`, both passing on release `v0.1.8` (12/12 on each). Not covered: `asm_checks.S`, which is console-only assembly |
 | Phase 1 acceptance | done, awaiting first CI run | every C program with and without NEON passes the self-test on all five targets (CI, `v0.1.8`); the hardware oracle passes on both ARM runners; `scripts/check-optimised.sh` rebuilds every program at `-O3 -march=armv8.2-a` and runs it in kestrel: 13/13 reach the expected output with no unsupported instruction (locally; CI step added to the guest-programs job) |
 
-### Phase 2: Homebrew: **not started**
+### Phase 2: Homebrew: **in progress**
 
 | Task | Status | Evidence |
 |------|--------|----------|
-| Homebrew executable loader | not started | only ELF |
+| Homebrew executable loader | done, with the gaps below | `kestrel-loader/src/nro.rs` (segments, zeroed BSS, ASET icon/NACP/RomFS ranges) and `kestrel-hle/src/homebrew.rs` (loader config entries, argument string, X0/X1); `kestrel run x.nro -- args`; self-test program `hbtest` (own startup code, self-relocation) |
 | Process layout reporting | not started | fixed constants in `hle::layout`; no svcGetInfo |
 | Memory SVCs | not started | only SetHeapSize |
 | Handle table and kernel objects | not started | none |
@@ -154,7 +154,37 @@ Remaining gaps:
   reported as unsupported, and FPSR exception flags other than QC are not
   set.
 
+### Phase 2 notes
+
+Homebrew executable loader, from Switchbrew's public "NRO" and "Homebrew
+ABI" pages. An NRO is mapped at the fixed address `layout::NRO_BASE`
+(0x800_0000): `.text` read-execute, `.rodata` read-only, `.data` and `.bss`
+read-write, `.bss` zeroed. The asset section is parsed into file ranges; the
+filesystem service will serve the RomFS later. The entry point gets X0 = the
+loader config list and X1 = all ones. The list holds:
+
+| Key | Entry | Value |
+|-----|-------|-------|
+| 1 | MainThreadHandle | the current-thread pseudo-handle 0xffff8000, until a handle table exists |
+| 7 | AppletType | Application (0), no flags |
+| 5 | Argv | argv[0] is the file name, then the arguments; empty arguments and arguments with spaces are double-quoted |
+| 14 | RandomSeed | a fixed value, so runs are reproducible |
+| 0 | EndOfList | the loader string `kestrel <version>` |
+
+Gaps:
+
+- Not provided yet: HosVersion (homebrew falls back to asking the settings
+  service), SyscallAvailableHint, OverrideHeap and the other optional keys.
+- argv[0] becomes an `sdmc:/` path once the SD folder option exists.
+- An argument containing a double quote is refused, because the argument
+  string cannot carry it.
+- Compressed NROs (a newer system feature) stop as unsupported.
+- `hbtest` is kestrel's own program built by `scripts/make-nro.py`; real
+  homebrew built with the public toolchain also needs the process layout,
+  memory, thread and service work that follows.
+
 ## Next task
 
-Phase 2, homebrew: the homebrew executable loader with segment, BSS and
-asset handling, plus the argument and environment setup homebrew expects.
+Phase 2, process layout reporting: svcGetInfo for the address space, heap,
+alias and stack regions, the random entropy and the program identity, with
+the fixed regions in `hle::layout` turned into one documented layout.

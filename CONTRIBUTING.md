@@ -20,7 +20,10 @@ models each program in Python without running kestrel; add a model there for
 every new program. C programs talk to the console only through `rt.h`, so
 they also build natively: on an ARM64 Linux or macOS machine,
 `scripts/check-host.sh` runs them on the real CPU and compares with
-`guest/expected` (CI does this on both ARM runners).
+`guest/expected` (CI does this on both ARM runners). Homebrew-format test
+programs go in `guest/src/nro` with their arguments in `name.args`, one per
+line; `scripts/build-guest.sh` links them position-independent and
+`scripts/make-nro.py` turns them into NROs.
 
 ## Workflow
 

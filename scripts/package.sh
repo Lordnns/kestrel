@@ -16,7 +16,7 @@ stage="$root/dist/$name"
 rm -rf "$stage"
 mkdir -p "$stage/examples"
 cp "$bin" "$stage/"
-cp "$root"/guest/bin/*.elf "$stage/examples/"
+cp "$root"/guest/bin/*.elf "$root"/guest/bin/*.nro "$stage/examples/"
 cp "$root/packaging/TESTING.md" "$root/README.md" "$root/LICENSE" "$stage/"
 
 case "$name" in

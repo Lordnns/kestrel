@@ -276,6 +276,37 @@ def intrinsics():
     return "".join(lines)
 
 
+def args(name):
+    """The arguments a homebrew test program runs with: guest/src/nro/<name>.args,
+    one per line (an empty line is an empty argument)."""
+    lines = (SRC / "nro" / f"{name}.args").read_text().split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def hbtest():
+    """guest/src/nro/hbtest.c, started as an NRO the way Switchbrew's
+    "Homebrew ABI" page describes, with argv[0] = the file name. The config
+    keys are the ones kestrel provides (docs/ROADMAP.md, Phase 2 notes):
+    MainThreadHandle 1, AppletType 7 (Application = 0), Argv 5, RandomSeed 14,
+    then EndOfList 0. .bss starts zeroed, .data holds its initial value, and
+    the five pointers in the tables are relocated."""
+    argv = ["hbtest.nro"] + args("hbtest")
+    out = ["homebrew test program", "config keys: 1 7(applet type 0) 5 14 0"]
+    out += [f"argv[{i}] = [{a}]" for i, a in enumerate(argv)]
+    out += [
+        f"argc = {len(argv)}",
+        "bss nonzero words: 0",
+        "bss after write: 7",
+        "data counter: 1234",
+        "data counter after increment: 1235",
+    ]
+    out += [f"relocated string: {s}" for s in ("alpha", "beta", "gamma")]
+    out += ["relocated call add(3, 4) = 7", "relocated call mul(3, 4) = 12"]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -285,6 +316,7 @@ PROGRAMS = {
     "sha256": sha256,
     "fp": fp,
     "intrinsics": intrinsics,
+    "hbtest": hbtest,
 }
 
 
@@ -292,6 +324,7 @@ def main():
     check = "--check" in sys.argv[1:]
     sources = {p.stem for p in SRC.glob("*.c") if p.stem != "start"}
     sources |= {p.stem for p in SRC.glob("*.S")}
+    sources |= {p.stem for p in SRC.glob("nro/*.c")}
     if sources != set(PROGRAMS):
         missing = sorted(sources - set(PROGRAMS))
         extra = sorted(set(PROGRAMS) - sources)
