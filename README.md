@@ -43,6 +43,9 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   priorities, cores, sleep and yield on a deterministic scheduler), and
   synchronisation: waiting on events and threads, mutexes, condition
   variables and address arbitration, with deadlock reports.
+- **IPC**: the message format (CMIF and TIPC), named ports, client
+  sessions, svcSendSyncRequest and the service manager sm:, with unknown
+  services and commands reported by name.
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -165,8 +168,8 @@ The plan of record, with its rules and acceptance criteria, is
 [docs/ROADMAP.md](docs/ROADMAP.md). In short:
 
 1. Homebrew (in progress: the NRO loader, process layout, memory calls,
-   handle table, threads and synchronisation are done): IPC and the first
-   OS services, from public documentation.
+   handle table, threads, synchronisation and IPC with sm: are done): the
+   first OS services, from public documentation.
 2. `native` backend on aarch64 hosts, starting on macOS, developed alongside
    the OS services; then a `jit` backend on x86_64.
 3. Graphics at two levels: GPU emulation with shader translation to Vulkan

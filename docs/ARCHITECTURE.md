@@ -112,6 +112,18 @@ method; the methods live next to the state they change:
   waits for (`thread::Wait`) and an optional deadline; whatever ends the
   wait (a signal, a hand-over, the deadline, a cancel) writes the result
   into that thread's saved registers.
+- `kestrel_hle::ipc`: the IPC message format. A request is parsed from
+  the start of the caller's thread local region; replies are encoded
+  for CMIF ("SFCO" header) or TIPC (result word first) and written back
+  in its place.
+- `kestrel_hle::service`: named ports, client sessions and the services
+  behind them. A client session is a kernel object naming one service;
+  svcSendSyncRequest parses the message, hands the command to that
+  service's Rust code and writes the reply, without blocking. The
+  service manager, sm:, is reached through the "sm:" named port and
+  hands out sessions to the other services by name. A port, service or
+  command kestrel does not implement stops the process with its name and
+  number.
 
 ### Scheduling
 
@@ -137,8 +149,8 @@ thread and clears the outgoing thread's exclusive monitor. Idle jumps are
 counted separately, so `Process::instructions` reports only executed
 instructions.
 
-Planned: IPC (sessions become kernel objects that threads can wait on)
-and the system services, which will also create shared memory.
+Planned: the system services behind sm:, which will also bring
+buffer transfers, handles in messages, domains and shared memory.
 
 ## Graphics (planned)
 

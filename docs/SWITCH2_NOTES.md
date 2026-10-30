@@ -49,6 +49,16 @@ the owner legally has) but never includes its code or data.
   meaning is not described there.
 - Used by: not implemented; kestrel never sets them.
 
+### Errors from the SendSyncRequest calls close the session
+
+- Kind: public source
+- Source: Switchbrew, "SVC", svcSendSyncRequest (note marked [S2]).
+- Behaviour: on Switch 2, every error the SendSyncRequest calls return
+  closes the session. The page does not know whether the kernel or the
+  system module does it.
+- Used by: not implemented; kestrel's errors keep the session open, and
+  requests it cannot answer stop the process.
+
 ## Observations
 
 None yet.

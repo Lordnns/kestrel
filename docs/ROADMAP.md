@@ -54,9 +54,9 @@ qemu for Linux ARM64.
 | Handle table and kernel objects | done, with the gaps below | `hle/kernel.rs`: per-process handle table, objects alive while a handle names them; svcCloseHandle, svcGetThreadId, svcGetProcessId, svcCreateEvent, svcSignalEvent, svcClearEvent, svcResetSignal; svcCreateTransferMemory in `hle/memory.rs`; the main thread has a real handle; self-test program `hbhandles` |
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
-| IPC | not started | none |
+| IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
 | First services | not started | none |
-| SD folder option, unimplemented-call log | not started | unknown SVCs stop with their number; no service layer yet |
+| SD folder option, unimplemented-call log | not started | unknown SVCs, ports, services and commands stop with their name and number |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
 ### Phase 3: Native execution on ARM hosts: **not started**
@@ -398,18 +398,60 @@ Gaps:
 - A thread that exits holding a mutex leaves its waiters waiting; the
   deadlock report names them.
 
+IPC, from Switchbrew's "IPC Marshalling" page (header, special header,
+descriptors, command types, the CMIF and TIPC formats), its "SVC" page
+(svcConnectToNamedPort, svcSendSyncRequest) and "Services API" page
+(sm:), with field widths and the order of a message's parts as libnx's
+open-source `hipc.h`, `cmif.h` and `tipc.h` build them. Parsing and
+encoding are in `hle/ipc.rs`; sessions and services in
+`hle/service.rs`. Services are written in Rust and answer at once, so a
+request never blocks and other threads do not run meanwhile.
+
+| Call or command | Behaviour |
+|-----------------|-----------|
+| svcConnectToNamedPort | "sm:" is the only port; a new client session handle |
+| svcSendSyncRequest | reads the message from the caller's thread local region and writes the reply there; CMIF Request and RequestWithContext, TIPC (command type 16 + n) for services that take it, and Close; SessionClosed 0xf601 after a close request |
+| sm: RegisterClient (0) | needs the process ID descriptor; registers the session |
+| sm: GetServiceHandle (1) | moves a session handle to the named service back |
+
+The process ID the kernel inserts is the one svcGetProcessId reports.
+sm: takes CMIF and TIPC: Switchbrew says it became a TIPC interface in
+12.0.0, and libnx still sends it CMIF on every version.
+
+Gaps:
+
+- Where the sources are silent, kestrel chose: an unreadable port name
+  is InvalidPointer 0xe601 and one with no NUL in its first 12 bytes
+  OutOfRange 0xee01; sm:'s GetServiceHandle before RegisterClient is
+  InvalidClient 0x415 and an empty name or characters after the zero
+  padding InvalidServiceName 0xc15; registering is per session; a close
+  request succeeds; replies carry command type 0 and CMIF replies version
+  0 and token 0 (libnx reads none of these).
+- No services exist yet besides sm:; asking sm: for any other service
+  stops with its name ("unimplemented service ...").
+- Stop as unsupported: other named ports; sm: RegisterService,
+  UnregisterService and DetachClient (guest servers need server sessions
+  and svcReplyAndReceive); CMIF control requests (domains, cloning,
+  QueryPointerBufferSize); legacy command types 1 and 3; handles in
+  requests; receive list modes 1 and 2 and explicit receive list offsets.
+- Buffer descriptors are parsed but no service reads or writes through
+  them yet.
+- Switchbrew notes that on Switch 2 every error from the SendSyncRequest
+  calls closes the session (`docs/SWITCH2_NOTES.md`); not modelled.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
 
-Phase 2, IPC (on any machine): the standard message format in the
-thread local region (header, special header, copied and moved handles,
-the buffer descriptors, the raw data with its "SFCI"/"SFCO" magic), named
-ports through svcConnectToNamedPort, client sessions as kernel objects,
-svcSendSyncRequest dispatching to services written in Rust, and the
-service manager ("sm:") as the first service, with every unknown service
-and command reported by name and number. Domains come with the first
-service that needs them.
+Phase 2, first services (on any machine), each from its Switchbrew
+page and checked by a homebrew test program. libnx's default startup
+(`__appInit` in `nx/source/runtime/init.c`) opens sm:, then `set:sys`
+for the firmware version when the loader gives none, then the applet
+services, `hid`, time and `fsp-srv`, so those come first; then the
+SD folder option for the filesystem, power state and logging. Each brings what
+it needs from IPC: reading and writing through buffer descriptors,
+handles in requests and replies, and domains (CMIF control requests)
+for the services libnx converts to domains.
 
 Phase 3 on macOS (needs a session on the owner's Mac, since
 Hypervisor.framework is macOS-only): the memory arena refactor, the
@@ -417,9 +459,7 @@ native backend, and the differential tester.
 
 ### Order after that
 
-1. Phase 2: first services (settings, filesystem with the SD folder
-   option, input, minimal applet, time, power state, logging), then the
-   unimplemented-call log.
+1. Phase 2: the unimplemented-call log.
 2. Phase 2 acceptance (homebrew console examples on all five platforms),
    then phase 3 on Linux KVM and Windows.
 
