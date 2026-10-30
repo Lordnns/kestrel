@@ -1,0 +1,187 @@
+//! Kernel view of the address space: memory types and attributes per
+//! mapping (Switchbrew, "SVC": MemoryType, MemoryAttribute) and the block
+//! svcQueryMemory reports for any address.
+
+use crate::layout;
+use kestrel_core::{Memory, Perm, Tag};
+
+/// MemoryType values (Switchbrew, "SVC"; the 4.0.0+ values where they
+/// changed).
+pub mod state {
+    pub const FREE: u32 = 0x0000_0000;
+    pub const CODE: u32 = 0x00dc_7e03;
+    pub const CODE_DATA: u32 = 0x03fe_bd04;
+    pub const NORMAL: u32 = 0x037e_bd05;
+    pub const STACK: u32 = 0x005c_3c0b;
+    pub const THREAD_LOCAL: u32 = 0x0040_200c;
+    pub const INACCESSIBLE: u32 = 0x0000_0010;
+}
+
+/// MemoryAttribute bits.
+pub mod attr {
+    pub const LOCKED: u32 = 1 << 0;
+    pub const UNCACHED: u32 = 1 << 3;
+}
+
+pub const fn tag(state: u32) -> Tag {
+    Tag { state, attr: 0 }
+}
+
+/// MemoryPermission bits (read 1, write 2, execute 4).
+pub fn perm_bits(p: Perm) -> u32 {
+    [(Perm::R, 1), (Perm::W, 2), (Perm::X, 4)]
+        .iter()
+        .filter(|(bit, _)| p.contains(*bit))
+        .map(|(_, v)| v)
+        .sum()
+}
+
+/// One block as svcQueryMemory reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemInfo {
+    pub base: u64,
+    pub size: u64,
+    pub state: u32,
+    pub attr: u32,
+    pub perm: u32,
+}
+
+impl MemInfo {
+    /// The 0x28-byte MemoryInfo layout; the IPC and device reference
+    /// counts are zero, as nothing shares memory yet.
+    pub fn to_bytes(self) -> [u8; 0x28] {
+        let mut b = [0; 0x28];
+        b[0..8].copy_from_slice(&self.base.to_le_bytes());
+        b[8..16].copy_from_slice(&self.size.to_le_bytes());
+        b[16..20].copy_from_slice(&self.state.to_le_bytes());
+        b[20..24].copy_from_slice(&self.attr.to_le_bytes());
+        b[24..28].copy_from_slice(&self.perm.to_le_bytes());
+        b
+    }
+}
+
+/// The block containing `addr`: the mapping with neighbours of the same
+/// type, attribute and permission merged, or the unmapped gap around it.
+/// A gap inside the address space is Free; outside it, Inaccessible.
+pub fn query(mem: &Memory, addr: u64) -> MemInfo {
+    if let Some(mut b) = mem.region(addr) {
+        let same = |o: kestrel_core::Block| o.perm == b.perm && o.tag == b.tag;
+        while let Some(prev) = b.base.checked_sub(1).and_then(|a| mem.region(a)) {
+            if !same(prev) {
+                break;
+            }
+            b.size += b.base - prev.base;
+            b.base = prev.base;
+        }
+        while let Some(next) = mem.region(b.base.wrapping_add(b.size)) {
+            if !same(next) || next.base == 0 {
+                break;
+            }
+            b.size += next.size;
+        }
+        return MemInfo {
+            base: b.base,
+            size: b.size,
+            state: b.tag.state,
+            attr: b.tag.attr,
+            perm: perm_bits(b.perm),
+        };
+    }
+    let (start, end) = mem.gap(addr).expect("unmapped address has a gap");
+    // The zone holding addr: below, inside or above the address space.
+    // An end of 0 stands for 2^64.
+    let (zone_start, zone_end, kind) = if addr < layout::ADDRESS_SPACE_BASE {
+        (0, layout::ADDRESS_SPACE_BASE, state::INACCESSIBLE)
+    } else if addr < layout::ADDRESS_SPACE_END {
+        (
+            layout::ADDRESS_SPACE_BASE,
+            layout::ADDRESS_SPACE_END,
+            state::FREE,
+        )
+    } else {
+        (layout::ADDRESS_SPACE_END, 0, state::INACCESSIBLE)
+    };
+    let base = start.max(zone_start);
+    let top = match (end, zone_end) {
+        (Some(e), 0) => e,
+        (Some(e), z) => e.min(z),
+        (None, z) => z,
+    };
+    MemInfo {
+        base,
+        size: top.wrapping_sub(base),
+        state: kind,
+        attr: 0,
+        perm: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use layout::{ADDRESS_SPACE_BASE as LO, ADDRESS_SPACE_END as HI};
+
+    #[test]
+    fn neighbours_of_the_same_kind_merge() {
+        let mut m = Memory::new();
+        m.map_tagged(LO, 0x2000, Perm::RX, tag(state::CODE), "a")
+            .unwrap();
+        m.map_tagged(LO + 0x2000, 0x1000, Perm::RX, tag(state::CODE), "b")
+            .unwrap();
+        m.map_tagged(LO + 0x3000, 0x1000, Perm::R, tag(state::CODE), "c")
+            .unwrap();
+        let q = query(&m, LO + 0x2800);
+        assert_eq!(
+            (q.base, q.size, q.state, q.perm),
+            (LO, 0x3000, state::CODE, 5)
+        );
+        let q = query(&m, LO + 0x3000);
+        assert_eq!((q.base, q.size, q.perm), (LO + 0x3000, 0x1000, 1));
+    }
+
+    #[test]
+    fn gaps_are_free_inside_the_address_space_and_inaccessible_outside() {
+        let mut m = Memory::new();
+        m.map_tagged(0x20_0000, 0x1000, Perm::RW, tag(state::CODE_DATA), "elf")
+            .unwrap();
+        m.map_tagged(LO + 0x10000, 0x1000, Perm::RW, tag(state::NORMAL), "x")
+            .unwrap();
+        let q = query(&m, LO);
+        assert_eq!((q.base, q.size, q.state), (LO, 0x10000, state::FREE));
+        let q = query(&m, LO + 0x20000);
+        assert_eq!(
+            (q.base, q.size, q.state),
+            (LO + 0x11000, HI - LO - 0x11000, state::FREE)
+        );
+        let q = query(&m, 0x1000);
+        assert_eq!(
+            (q.base, q.size, q.state),
+            (0, 0x20_0000, state::INACCESSIBLE)
+        );
+        let q = query(&m, 0x30_0000);
+        assert_eq!((q.base, q.size), (0x20_1000, LO - 0x20_1000));
+        let q = query(&m, u64::MAX);
+        assert_eq!(
+            (q.base, q.size, q.state),
+            (HI, 0u64.wrapping_sub(HI), state::INACCESSIBLE)
+        );
+    }
+
+    #[test]
+    fn memory_info_layout() {
+        let i = MemInfo {
+            base: 1,
+            size: 2,
+            state: 3,
+            attr: 4,
+            perm: 5,
+        };
+        let b = i.to_bytes();
+        assert_eq!(b[0], 1);
+        assert_eq!(b[8], 2);
+        assert_eq!(b[0x10], 3);
+        assert_eq!(b[0x14], 4);
+        assert_eq!(b[0x18], 5);
+        assert!(b[0x1c..].iter().all(|&x| x == 0));
+    }
+}

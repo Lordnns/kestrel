@@ -79,7 +79,13 @@ impl Process {
         bytes.extend(&args);
         let size = (end - base).div_ceil(PAGE_SIZE) * PAGE_SIZE;
         self.mem
-            .map(base, size, Perm::RW, "homebrew-config")
+            .map_tagged(
+                base,
+                size,
+                Perm::RW,
+                crate::memory::tag(crate::memory::state::NORMAL),
+                "homebrew-config",
+            )
             .map_err(|e| e.to_string())?;
         self.mem
             .write_bytes(base, &bytes)

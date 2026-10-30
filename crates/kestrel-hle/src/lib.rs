@@ -9,6 +9,7 @@
 //! documentation and from observing homebrew, never from console firmware.
 
 pub mod homebrew;
+pub mod memory;
 pub mod svc;
 
 use kestrel_core::{Memory, Perm};
@@ -91,10 +92,34 @@ impl Process {
     /// Create a process around an already-loaded image.
     pub fn new(mut mem: Memory, image: &Loaded) -> Result<Self, String> {
         use layout::*;
-        mem.map(STACK_TOP - STACK_SIZE, STACK_SIZE, Perm::RW, "stack")
+        use memory::{state, tag};
+        // The image the loader mapped: code read-only, data writable.
+        let image_regions: Vec<_> = mem
+            .regions()
+            .filter(|&(b, _, _, _)| b >= image.image_start && b < image.image_end)
+            .map(|(b, s, _, _)| (b, s))
+            .collect();
+        for (base, size) in image_regions {
+            mem.update_range(base, size, |p, t| {
+                t.state = if p.contains(Perm::W) {
+                    state::CODE_DATA
+                } else {
+                    state::CODE
+                };
+            })
             .map_err(|e| e.to_string())?;
-        mem.map(TLS_BASE, TLS_SIZE, Perm::RW, "tls")
+        }
+        let stack = tag(state::STACK);
+        mem.map_tagged(STACK_TOP - STACK_SIZE, STACK_SIZE, Perm::RW, stack, "stack")
             .map_err(|e| e.to_string())?;
+        mem.map_tagged(
+            TLS_BASE,
+            TLS_SIZE,
+            Perm::RW,
+            tag(state::THREAD_LOCAL),
+            "tls",
+        )
+        .map_err(|e| e.to_string())?;
         let cpu = CpuState {
             pc: image.entry,
             sp: STACK_TOP,

@@ -3,13 +3,14 @@
 //! Arguments arrive in X0..X7, results go back in W0 (result code) plus any
 //! output registers. A result code of 0 means success.
 
-use crate::{layout, Process, Stop};
+use crate::{layout, memory, Process, Stop};
 use kestrel_core::Perm;
 use std::io::Write;
 
 /// Publicly documented SVC numbers implemented so far.
 pub mod nr {
     pub const SET_HEAP_SIZE: u16 = 0x01;
+    pub const QUERY_MEMORY: u16 = 0x06;
     pub const EXIT_PROCESS: u16 = 0x07;
     pub const SLEEP_THREAD: u16 = 0x0b;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
@@ -109,13 +110,30 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 p.mem.unmap(layout::HEAP_BASE);
             }
             if size != 0 {
-                if let Err(e) = p.mem.map(layout::HEAP_BASE, size, Perm::RW, "heap") {
+                let normal = memory::tag(memory::state::NORMAL);
+                if let Err(e) = p
+                    .mem
+                    .map_tagged(layout::HEAP_BASE, size, Perm::RW, normal, "heap")
+                {
                     return Some(Stop::Error(format!("SetHeapSize({size:#x}) failed: {e}")));
                 }
             }
             p.heap_size = size;
             p.cpu.x[0] = result::SUCCESS;
             p.cpu.x[1] = layout::HEAP_BASE;
+            None
+        }
+        nr::QUERY_MEMORY => {
+            // X0 = MemoryInfo out pointer, X2 = address; W1 = page info (0).
+            let (out, addr) = (p.cpu.x[0], p.cpu.x[2]);
+            let info = memory::query(&p.mem, addr);
+            if let Err(e) = p.mem.write_bytes(out, &info.to_bytes()) {
+                return Some(Stop::Error(format!(
+                    "svcQueryMemory cannot write its MemoryInfo at {out:#x}: {e}"
+                )));
+            }
+            p.cpu.x[0] = result::SUCCESS;
+            p.cpu.x[1] = 0;
             None
         }
         nr::EXIT_PROCESS => Some(Stop::Exited),
@@ -199,6 +217,60 @@ mod tests {
             image_end: 0,
         };
         Process::new(Memory::new(), &image).unwrap()
+    }
+
+    /// svcQueryMemory at `addr`, through a MemoryInfo buffer in TLS.
+    fn query(p: &mut Process, addr: u64) -> (u64, u64, u32, u32, u32) {
+        let out = layout::TLS_BASE + 0x100;
+        (p.cpu.x[0], p.cpu.x[2]) = (out, addr);
+        assert_eq!(dispatch(p, nr::QUERY_MEMORY), None);
+        assert_eq!(p.cpu.x[0], result::SUCCESS);
+        let m = &p.mem;
+        (
+            m.read64(out).unwrap(),
+            m.read64(out + 8).unwrap(),
+            m.read32(out + 0x10).unwrap(),
+            m.read32(out + 0x14).unwrap(),
+            m.read32(out + 0x18).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_new_process_reports_the_type_of_each_mapping() {
+        use memory::state;
+        let base = layout::NRO_BASE;
+        let mut mem = Memory::new();
+        mem.map(base, 0x2000, Perm::RX, "text").unwrap();
+        mem.map(base + 0x2000, 0x1000, Perm::R, "rodata").unwrap();
+        mem.map(base + 0x3000, 0x2000, Perm::RW, "data").unwrap();
+        let image = Loaded {
+            entry: base,
+            image_start: base,
+            image_end: base + 0x5000,
+        };
+        let mut p = Process::new(mem, &image).unwrap();
+        assert_eq!(
+            query(&mut p, base + 0x1000),
+            (base, 0x2000, state::CODE, 0, 5)
+        );
+        assert_eq!(
+            query(&mut p, base + 0x2000),
+            (base + 0x2000, 0x1000, state::CODE, 0, 1)
+        );
+        assert_eq!(
+            query(&mut p, base + 0x4fff),
+            (base + 0x3000, 0x2000, state::CODE_DATA, 0, 3)
+        );
+        let stack = layout::STACK_TOP - layout::STACK_SIZE;
+        assert_eq!(
+            query(&mut p, stack),
+            (stack, layout::STACK_SIZE, state::STACK, 0, 3)
+        );
+        let tls = query(&mut p, layout::TLS_BASE);
+        assert_eq!((tls.2, tls.4), (state::THREAD_LOCAL, 3));
+        // The gap after the image is free up to the next mapping.
+        let free = query(&mut p, base + 0x5000);
+        assert_eq!((free.0, free.2, free.4), (base + 0x5000, state::FREE, 0));
     }
 
     #[test]
