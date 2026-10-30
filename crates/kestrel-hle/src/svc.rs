@@ -3,6 +3,7 @@
 //! Arguments arrive in X0..X7, results go back in W0 (result code) plus any
 //! output registers. A result code of 0 means success.
 
+use crate::service::IpcError;
 use crate::sync::ArbitrationError;
 use crate::thread::{CoreMaskError, CORES, LOWEST_PRIORITY};
 use crate::{layout, memory, Process, Stop};
@@ -38,6 +39,8 @@ pub mod nr {
     pub const WAIT_PROCESS_WIDE_KEY_ATOMIC: u16 = 0x1c;
     pub const SIGNAL_PROCESS_WIDE_KEY: u16 = 0x1d;
     pub const GET_SYSTEM_TICK: u16 = 0x1e;
+    pub const CONNECT_TO_NAMED_PORT: u16 = 0x1f;
+    pub const SEND_SYNC_REQUEST: u16 = 0x21;
     pub const GET_PROCESS_ID: u16 = 0x24;
     pub const GET_THREAD_ID: u16 = 0x25;
     pub const BREAK: u16 = 0x26;
@@ -71,6 +74,7 @@ pub mod result {
     pub const CANCELLED: u64 = 0xec01;
     pub const OUT_OF_RANGE: u64 = 0xee01;
     pub const INVALID_ENUM_VALUE: u64 = 0xf001;
+    pub const SESSION_CLOSED: u64 = 0xf601;
     pub const INVALID_STATE: u64 = 0xfa01;
 }
 
@@ -397,6 +401,24 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
             }
             None
         }
+        nr::CONNECT_TO_NAMED_PORT => {
+            // X1 = the port's name; W1 = the session handle.
+            match p.connect_to_named_port(p.cpu.x[1]) {
+                Ok(h) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = h as u64;
+                }
+                Err(e) => return ipc_error(p, e),
+            }
+            None
+        }
+        nr::SEND_SYNC_REQUEST => {
+            match p.send_sync_request(p.cpu.x[0]) {
+                Ok(()) => p.cpu.x[0] = result::SUCCESS,
+                Err(e) => return ipc_error(p, e),
+            }
+            None
+        }
         nr::CLOSE_HANDLE => {
             p.cpu.x[0] = code(p.close_handle(p.cpu.x[0]));
             None
@@ -461,6 +483,20 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
         other => Some(Stop::Error(format!(
             "unimplemented SVC {other:#04x} at pc {:#x}",
             p.cpu.pc - 4
+        ))),
+    }
+}
+
+/// Return an IPC call's result code, or stop.
+fn ipc_error(p: &mut Process, e: IpcError) -> Option<Stop> {
+    match e {
+        IpcError::Result(code) => {
+            p.cpu.x[0] = code;
+            None
+        }
+        IpcError::Stop(what) => Some(Stop::Error(format!(
+            "{what}, at pc {:#x}",
+            p.cpu.pc.wrapping_sub(4)
         ))),
     }
 }

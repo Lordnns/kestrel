@@ -12,6 +12,7 @@ pub mod homebrew;
 pub mod ipc;
 pub mod kernel;
 pub mod memory;
+pub mod service;
 pub mod svc;
 pub mod sync;
 #[cfg(test)]

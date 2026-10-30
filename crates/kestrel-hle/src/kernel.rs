@@ -11,6 +11,7 @@
 //! object in the same slot. A handle is never 0 and never one of the
 //! pseudo-handles (`svc::handle`), which have the top bits set.
 
+use crate::service::Session;
 use crate::svc::{handle, result};
 use crate::Process;
 use kestrel_core::Perm;
@@ -35,6 +36,7 @@ pub enum Kind {
     ReadableEvent,
     WritableEvent,
     TransferMemory,
+    ClientSession,
 }
 
 /// A kernel object.
@@ -52,6 +54,8 @@ pub enum Object {
     TransferMemory {
         restore: Vec<(u64, u64, Perm)>,
     },
+    /// A session to a service kestrel implements.
+    Session(Session),
 }
 
 /// Index of an object in the table's object store.
