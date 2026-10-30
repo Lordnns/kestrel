@@ -79,6 +79,14 @@ pub mod firmware {
     /// The version as libnx's MAKEHOSVERSION encodes it, for the homebrew
     /// HosVersion loader config entry.
     pub const HOS_VERSION: u64 = (MAJOR as u64) << 16 | (MINOR as u64) << 8 | MICRO as u64;
+    /// The time the system clocks show when a process starts: 2025-06-05
+    /// 00:00:00 UTC, the Switch 2's launch day, the owner's choice. The
+    /// clocks then run with the process clock (guest instructions as
+    /// 19.2 MHz ticks), so every run sees the same times.
+    pub const BOOT_TIME: i64 = 1_749_081_600;
+    /// The device's time zone, also the owner's choice: UTC, offset 0,
+    /// no daylight saving time.
+    pub const LOCATION_NAME: &str = "UTC";
 }
 
 /// Why a process stopped.

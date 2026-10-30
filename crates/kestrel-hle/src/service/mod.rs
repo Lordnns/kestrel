@@ -19,6 +19,7 @@ pub mod am;
 pub mod hid;
 pub mod set;
 pub mod sm;
+pub mod time;
 
 use crate::ipc::{self, command_type, domain_kind, Reply, Request};
 use crate::kernel::{Kind, Object, ObjectId};
@@ -54,6 +55,11 @@ pub enum Interface {
     /// "hid" and its IAppletResource.
     Hid,
     AppletResource,
+    /// "time:u" and the clocks and time zone service it hands out.
+    TimeU,
+    SystemClock,
+    SteadyClock,
+    TimeZoneService,
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234, command 2 hands out another test object. For unit
     /// tests of the session path.
@@ -67,6 +73,7 @@ const SERVICES: &[(&str, Interface)] = &[
     ("apm", Interface::Apm),
     ("appletOE", Interface::AppletOE),
     ("hid", Interface::Hid),
+    ("time:u", Interface::TimeU),
     #[cfg(test)]
     ("test", Interface::Test),
 ];
@@ -93,6 +100,10 @@ impl Interface {
             DebugFunctions => "IDebugFunctions",
             Hid => "hid",
             AppletResource => "IAppletResource",
+            TimeU => "time:u",
+            SystemClock => "ISystemClock",
+            SteadyClock => "ISteadyClock",
+            TimeZoneService => "ITimeZoneService",
             #[cfg(test)]
             Test => "test",
         }
@@ -285,6 +296,8 @@ pub struct State {
     /// am: the event signalled when the suspended tick count changes.
     pub suspended_tick_event: Option<ObjectId>,
     pub hid: hid::State,
+    /// time: the shared memory the clocks are read from.
+    pub time_shared_memory: Option<ObjectId>,
 }
 
 impl Process {
@@ -499,6 +512,7 @@ impl Process {
             | AudioController | DisplayController | LibraryAppletCreator | ApplicationFunctions
             | DebugFunctions => self.am(call),
             Hid | AppletResource => self.hid(call),
+            TimeU | SystemClock | SteadyClock | TimeZoneService => self.time(call),
             #[cfg(test)]
             Test => match call.n {
                 0 => Ok(Out::ok(call.args.to_vec())),
@@ -1139,6 +1153,92 @@ mod tests {
             e.contains("revision 4, which Switchbrew does not list"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn time_hands_out_the_clocks_and_their_shared_memory() {
+        let mut p = setup();
+        let t = open(&mut p, b"time:u");
+        let get = |p: &mut Process, n: u32| {
+            assert_eq!(send(p, t, &cmif(4, false, n, &[])), Ok(0));
+            let (rc, _, moved, _, _) = answer(p, false, 0);
+            assert_eq!((rc, moved.len()), (0, 1));
+            moved[0] as u64
+        };
+        let user = get(&mut p, 0);
+        let network = get(&mut p, 1);
+        let steady = get(&mut p, 2);
+        let zone = get(&mut p, 3);
+        let local = get(&mut p, 4);
+        assert_eq!(send(&mut p, t, &cmif(4, false, 20, &[])), Ok(0));
+        let (rc, copied, _, _, _) = answer(&p, false, 0);
+        assert_eq!((rc, copied.len()), (0, 1));
+        let (kind, id) = p.handles.get(copied[0]).unwrap();
+        assert_eq!(kind, Kind::SharedMemory);
+        match p.handles.object(id) {
+            Object::SharedMemory { perm, contents, .. } => {
+                assert_eq!((*perm, contents.len()), (Perm::R, 0x1000));
+                let boot = crate::firmware::BOOT_TIME.to_le_bytes();
+                // Steady clock: counter, base time 0, source ID.
+                assert!(contents[..0x10].iter().all(|&b| b == 0));
+                assert_eq!(contents[0x10..0x20], time::SOURCE_ID);
+                // Local (and user) and network clock contexts.
+                for at in [0x40, 0x88] {
+                    assert_eq!(contents[at - 8..at], [0; 8]);
+                    assert_eq!(contents[at..at + 8], boot);
+                    assert_eq!(contents[at + 8..at + 0x10], [0; 8]);
+                    assert_eq!(contents[at + 0x10..at + 0x20], time::SOURCE_ID);
+                }
+            }
+            o => panic!("{o:?}"),
+        }
+        // Three seconds and a bit of the process clock later.
+        p.cpu.retired = 3 * 19_200_000 + 5;
+        let now = (crate::firmware::BOOT_TIME + 3).to_le_bytes();
+        for clock in [user, network, local] {
+            assert_eq!(send(&mut p, clock, &cmif(4, false, 0, &[])), Ok(0));
+            assert_eq!(answer(&p, false, 8).3, now);
+        }
+        assert_eq!(send(&mut p, user, &cmif(4, false, 2, &[])), Ok(0));
+        let context = answer(&p, false, 0x20).3;
+        assert_eq!(context[..8], crate::firmware::BOOT_TIME.to_le_bytes());
+        assert_eq!(context[8..0x10], [0; 8]);
+        assert_eq!(send(&mut p, steady, &cmif(4, false, 0, &[])), Ok(0));
+        let point = answer(&p, false, 0x18).3;
+        assert_eq!(point[..8], 3i64.to_le_bytes());
+        assert_eq!(point[8..], time::SOURCE_ID);
+        assert_eq!(send(&mut p, zone, &cmif(4, false, 0, &[])), Ok(0));
+        let name = answer(&p, false, 0x24).3;
+        assert_eq!(
+            (&name[..4], name[4..].iter().all(|&b| b == 0)),
+            (&b"UTC\0"[..], true)
+        );
+        // ToCalendarTimeWithMyRule: (time, y, m, d, h, min, s, wday, yday).
+        let cases: [(i64, u16, [u8; 5], u32, u32); 4] = [
+            (crate::firmware::BOOT_TIME, 2025, [6, 5, 0, 0, 0], 4, 155),
+            (-1, 1969, [12, 31, 23, 59, 59], 3, 364),
+            (951_825_845, 2000, [2, 29, 12, 4, 5], 2, 59),
+            (253_402_300_799, 9999, [12, 31, 23, 59, 59], 5, 364),
+        ];
+        for (t, year, date, wday, yday) in cases {
+            assert_eq!(
+                send(&mut p, zone, &cmif(4, false, 101, &t.to_le_bytes())),
+                Ok(0)
+            );
+            let (rc, _, _, out, _) = answer(&p, false, 0x20);
+            assert_eq!(rc, 0);
+            assert_eq!(out[..2], year.to_le_bytes(), "{t}");
+            assert_eq!(out[2..8], [date[0], date[1], date[2], date[3], date[4], 0]);
+            assert_eq!(out[8..0xc], wday.to_le_bytes(), "{t}");
+            assert_eq!(out[0xc..0x10], yday.to_le_bytes(), "{t}");
+            assert_eq!(out[0x10..0x18], *b"UTC\0\0\0\0\0");
+            assert_eq!(out[0x18..], [0; 8]);
+        }
+        let far = cmif(4, false, 101, &i64::MAX.to_le_bytes());
+        let e = send(&mut p, zone, &far).unwrap_err();
+        assert!(e.contains("does not fit CalendarTime's u16"), "{e}");
+        let e = send(&mut p, t, &cmif(4, false, 5, &[])).unwrap_err();
+        assert!(e.starts_with("unimplemented: time:u command 5"), "{e}");
     }
 
     #[test]
