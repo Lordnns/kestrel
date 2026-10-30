@@ -1,5 +1,5 @@
 homebrew test program
-config keys: 1 7(applet type 0) 5 14 0
+config keys: 1 7(applet type 0) 5 14 16(version 0x0000000000140000) 0
 argv[0] = [hbtest.nro]
 argv[1] = [first]
 argv[2] = [two words]

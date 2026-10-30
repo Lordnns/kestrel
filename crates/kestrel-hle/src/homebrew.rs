@@ -16,6 +16,7 @@ pub mod key {
     pub const ARGV: u32 = 5;
     pub const APPLET_TYPE: u32 = 7;
     pub const RANDOM_SEED: u32 = 14;
+    pub const HOS_VERSION: u32 = 16;
 }
 
 /// AppletType "Application".
@@ -24,7 +25,7 @@ pub const APPLET_TYPE_APPLICATION: u64 = 0;
 pub const RANDOM_SEED: [u64; 2] = [0x6b65_7374_7265_6c00, 0x9e37_79b9_7f4a_7c15];
 
 const ENTRY_SIZE: usize = 24;
-const ENTRIES: usize = 5;
+const ENTRIES: usize = 6;
 
 /// Join `argv` into the loader's argument string, quoting words that are
 /// empty or contain spaces. A double quote cannot be carried.
@@ -63,6 +64,9 @@ impl Process {
             (key::APPLET_TYPE, APPLET_TYPE_APPLICATION, 0),
             (key::ARGV, 0, args_at),
             (key::RANDOM_SEED, RANDOM_SEED[0], RANDOM_SEED[1]),
+            // Value[1] names the Horizon implementation; 0 claims none
+            // (libnx turns on Atmosphere extensions for "ATMOSPHR").
+            (key::HOS_VERSION, crate::firmware::HOS_VERSION, 0),
             (key::END_OF_LIST, info_at, info.len() as u64),
         ];
         let mut bytes = Vec::with_capacity((end - base) as usize);
@@ -144,6 +148,7 @@ mod tests {
                     assert_eq!(s, b"hb.nro \"x y\"\0");
                 }
                 14 => {}
+                16 => assert_eq!(v, [20 << 16, 0]),
                 0 => {
                     let s = p.mem.read_vec(v[0], v[1] as usize).unwrap();
                     assert!(s.starts_with(b"kestrel "));
@@ -153,6 +158,6 @@ mod tests {
             }
             at += 24;
         }
-        assert_eq!(seen, [1, 7, 5, 14, 0]);
+        assert_eq!(seen, [1, 7, 5, 14, 16, 0]);
     }
 }

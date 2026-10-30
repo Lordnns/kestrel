@@ -290,10 +290,15 @@ def hbtest():
     "Homebrew ABI" page describes, with argv[0] = the file name. The config
     keys are the ones kestrel provides (docs/ROADMAP.md, Phase 2 notes):
     MainThreadHandle 1, AppletType 7 (Application = 0), Argv 5, RandomSeed 14,
-    then EndOfList 0. .bss starts zeroed, .data holds its initial value, and
+    HosVersion 16 (20.0.0, the owner's choice, as libnx's MAKEHOSVERSION
+    encodes it: major << 16 | minor << 8 | micro), then EndOfList 0. .bss starts zeroed, .data holds its initial value, and
     the five pointers in the tables are relocated."""
     argv = ["hbtest.nro"] + args("hbtest")
-    out = ["homebrew test program", "config keys: 1 7(applet type 0) 5 14 0"]
+    version = hex64(20 << 16)
+    out = [
+        "homebrew test program",
+        f"config keys: 1 7(applet type 0) 5 14 16(version {version}) 0",
+    ]
     out += [f"argv[{i}] = [{a}]" for i, a in enumerate(argv)]
     out += [
         f"argc = {len(argv)}",

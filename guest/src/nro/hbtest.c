@@ -64,6 +64,11 @@ void hb_main(const config_entry *config, u64 x1) {
             put_u64(e->value[0]);
             puts_(")");
         }
+        if (e->key == 16) {
+            puts_("(version ");
+            put_hex(e->value[0]);
+            puts_(")");
+        }
         if (e->key == 0) break;
     }
     puts_("\n");

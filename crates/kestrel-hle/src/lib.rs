@@ -69,6 +69,18 @@ pub mod layout {
     ];
 }
 
+/// The system version kestrel reports: 20.0.0, the owner's choice (the
+/// first major version of the Switch 2 era). Every service answers as
+/// that version documents it on Switchbrew.
+pub mod firmware {
+    pub const MAJOR: u8 = 20;
+    pub const MINOR: u8 = 0;
+    pub const MICRO: u8 = 0;
+    /// The version as libnx's MAKEHOSVERSION encodes it, for the homebrew
+    /// HosVersion loader config entry.
+    pub const HOS_VERSION: u64 = (MAJOR as u64) << 16 | (MINOR as u64) << 8 | MICRO as u64;
+}
+
 /// Why a process stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
