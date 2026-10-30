@@ -20,7 +20,7 @@ GetEntryType /switch/nothing: 0x0000000000000202
 GetEntryType /switch/../switch: 0x00000000002eee02
 GetEntryType /a:b: 0x00000000002ee802
 GetEntryType switch: 0x00000000002eea02
-GetEntryType //: 0x00000000002eee02
+GetEntryType //: directory
 OpenFile for writing and appending: 0x0000000000000000
 Write 18 bytes: 0x0000000000000000
 OpenFile for writing: 0x0000000000000000

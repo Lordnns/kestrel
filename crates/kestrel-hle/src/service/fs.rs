@@ -141,12 +141,16 @@ fn host(what: &str, path: &Path, e: std::io::Error) -> Fail {
 /// - no NUL in the buffer: TooLongPath;
 /// - not UTF-8: InvalidCharacter;
 /// - not starting with '/': InvalidPathFormat;
-/// - an empty, "." or ".." component (one trailing '/' is allowed):
-///   NotNormalized;
+/// - a "." or ".." component: NotNormalized;
 /// - a character or name a host could read differently: InvalidCharacter.
 ///   That is a control character, one of `\ : * ? " < > |`, a name ending
 ///   in '.' or ' ', or a Windows device name (CON, PRN, AUX, NUL, COM1-9,
 ///   LPT1-9). Rejecting them everywhere keeps every host the same.
+///
+/// Repeated slashes count as one, and a trailing one is ignored: libnx
+/// keeps its working directory with a trailing '/' and joins relative
+/// paths with another ("/switch/" and "a" make "/switch//a"), and such
+/// programs work on consoles.
 pub fn parse_path(bytes: &[u8]) -> Result<Vec<String>, u32> {
     let len = bytes
         .iter()
@@ -154,15 +158,10 @@ pub fn parse_path(bytes: &[u8]) -> Result<Vec<String>, u32> {
         .ok_or(result::TOO_LONG_PATH)?;
     let s = std::str::from_utf8(&bytes[..len]).map_err(|_| result::INVALID_CHARACTER)?;
     let rest = s.strip_prefix('/').ok_or(result::INVALID_PATH_FORMAT)?;
-    // One trailing '/' after a name; "//" alone is an empty component.
-    let rest = match rest.strip_suffix('/') {
-        Some(name) if !name.is_empty() => name,
-        _ => rest,
-    };
-    if rest.is_empty() {
-        return Ok(Vec::new());
-    }
-    rest.split('/').map(component).collect()
+    rest.split('/')
+        .filter(|c| !c.is_empty())
+        .map(component)
+        .collect()
 }
 
 fn component(c: &str) -> Result<String, u32> {
@@ -810,7 +809,11 @@ mod tests {
         assert_eq!(path("/a/"), Ok(vec!["a".into()]));
         assert_eq!(path("a"), Err(INVALID_PATH_FORMAT));
         assert_eq!(path(""), Err(INVALID_PATH_FORMAT));
-        for bad in ["//", "/a//b", "/./a", "/a/..", "/a//"] {
+        // Repeated slashes, as libnx's relative paths have them.
+        assert_eq!(path("//"), Ok(vec![]));
+        assert_eq!(path("/switch//"), Ok(vec!["switch".into()]));
+        assert_eq!(path("/a//b/"), Ok(vec!["a".into(), "b".into()]));
+        for bad in ["/./a", "/a/..", "/a//./b"] {
             assert_eq!(path(bad), Err(NOT_NORMALIZED), "{bad}");
         }
         for bad in [

@@ -879,7 +879,8 @@ def hbfs():
     0x202, PathAlreadyExists 0x402, TargetLocked 0xe02, InvalidCharacter
     0x2ee802, InvalidPathFormat 0x2eea02, NotNormalized 0x2eee02,
     InvalidOffset 0x2f5a02. Kestrel's documented choices (docs/ROADMAP.md,
-    phase 2 notes): which path gets which of those results; an open file
+    phase 2 notes): which path gets which of those results; repeated
+    slashes count as one, as libnx's relative paths need; an open file
     is TargetLocked for delete and rename; reading at the end reads
     nothing; entries come in name order; no timestamps (all zero); the
     file contents follow from the writes, modelled here as a bytearray."""
@@ -907,7 +908,7 @@ def hbfs():
         f"GetEntryType /switch/../switch: {hex64(0x2EEE02)}",
         f"GetEntryType /a:b: {hex64(0x2EE802)}",
         f"GetEntryType switch: {hex64(0x2EEA02)}",
-        f"GetEntryType //: {hex64(0x2EEE02)}",
+        "GetEntryType //: directory",
     ]
     save = bytearray(4)  # CreateFile with size 4: zeroed
     text = b"kestrel saves this"
