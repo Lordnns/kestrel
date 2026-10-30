@@ -219,6 +219,7 @@ impl Process {
         match object {
             Some(Object::TransferMemory { restore }) => self.release_transfer_memory(&restore),
             Some(Object::Thread { id }) => self.thread_released(id),
+            Some(Object::Session(s)) => self.session_released(s),
             _ => {}
         }
     }

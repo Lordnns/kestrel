@@ -16,6 +16,7 @@
 //! with its name and number, never with a made-up answer.
 
 pub mod am;
+pub mod fs;
 pub mod hid;
 pub mod set;
 pub mod sm;
@@ -25,6 +26,8 @@ use crate::ipc::{self, command_type, domain_kind, Reply, Request};
 use crate::kernel::{Kind, Object, ObjectId};
 use crate::svc::result;
 use crate::Process;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Longest port name read, with its NUL: kestrel's choice, as long as the
 /// longest name a service can have (8 bytes) with room to spare.
@@ -60,6 +63,12 @@ pub enum Interface {
     SystemClock,
     SteadyClock,
     TimeZoneService,
+    /// "fsp-srv", the SD card's IFileSystem, and the files and directories
+    /// opened on it, numbered by fs.
+    FileSystemProxy,
+    SdCard,
+    File(u32),
+    Directory(u32),
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234, command 2 hands out another test object. For unit
     /// tests of the session path.
@@ -74,6 +83,7 @@ const SERVICES: &[(&str, Interface)] = &[
     ("appletOE", Interface::AppletOE),
     ("hid", Interface::Hid),
     ("time:u", Interface::TimeU),
+    ("fsp-srv", Interface::FileSystemProxy),
     #[cfg(test)]
     ("test", Interface::Test),
 ];
@@ -104,6 +114,10 @@ impl Interface {
             SystemClock => "ISystemClock",
             SteadyClock => "ISteadyClock",
             TimeZoneService => "ITimeZoneService",
+            FileSystemProxy => "fsp-srv",
+            SdCard => "IFileSystem",
+            File(_) => "IFile",
+            Directory(_) => "IDirectory",
             #[cfg(test)]
             Test => "test",
         }
@@ -128,13 +142,17 @@ impl Interface {
     }
 }
 
+/// A domain's objects, object ID n at n - 1. Sessions cloned from a
+/// domain session share its domain.
+pub type Domain = Rc<RefCell<Vec<Option<Interface>>>>;
+
 /// A client session: the kernel object a session handle names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
     /// The object requests go to; in a domain, object 1.
     pub object: Interface,
-    /// Once the session is a domain: its objects, object ID n at n - 1.
-    pub domain: Option<Vec<Option<Interface>>>,
+    /// Once the session is a domain: its domain.
+    pub domain: Option<Domain>,
     /// The client sent a close request; later requests fail.
     pub closed: bool,
     /// sm: only: RegisterClient came over this session.
@@ -298,6 +316,7 @@ pub struct State {
     pub hid: hid::State,
     /// time: the shared memory the clocks are read from.
     pub time_shared_memory: Option<ObjectId>,
+    pub fs: fs::State,
 }
 
 impl Process {
@@ -394,7 +413,27 @@ impl Process {
             }
             command_type::CONTROL | command_type::CONTROL_WITH_CONTEXT => {
                 let n = ipc::cmif_request(&req).map_err(stop)?.command;
-                if n != 0 || session.domain.is_some() {
+                if n == 2 {
+                    // CloneCurrentObject: a new session to the same object,
+                    // moved to the client. libnx's session manager
+                    // (`sf/sessionmgr.c`) clones a domain session and sends
+                    // requests for the domain's objects over the clones, so
+                    // a clone shares the domain.
+                    let clone = Session {
+                        object: session.object,
+                        domain: session.domain.clone(),
+                        closed: false,
+                        registered: false,
+                    };
+                    let h = self
+                        .handles
+                        .insert(Object::Session(clone), &[Kind::ClientSession])?[0];
+                    let reply = Reply {
+                        move_handles: vec![h],
+                        ..Reply::ok(Vec::new())
+                    };
+                    ipc::cmif_reply(&reply, None).map_err(stop)?
+                } else if n != 0 || session.domain.is_some() {
                     return Err(stop(format!(
                         "unsupported: CMIF control command {n} ({}){}",
                         control_name(n),
@@ -404,11 +443,13 @@ impl Process {
                             ""
                         }
                     )));
+                } else {
+                    // ConvertCurrentObjectToDomain: the session's object
+                    // becomes object 1, kestrel's choice of ID.
+                    let domain = Rc::new(RefCell::new(vec![Some(session.object)]));
+                    self.session(id).domain = Some(domain);
+                    ipc::cmif_reply(&Reply::ok(1u32.to_le_bytes().to_vec()), None).map_err(stop)?
                 }
-                // ConvertCurrentObjectToDomain: the session's object becomes
-                // object 1, kestrel's choice of ID.
-                self.session(id).domain = Some(vec![Some(session.object)]);
-                ipc::cmif_reply(&Reply::ok(1u32.to_le_bytes().to_vec()), None).map_err(stop)?
             }
             t if t >= command_type::TIPC && session.object.speaks_tipc() => {
                 let call = Call {
@@ -440,7 +481,8 @@ impl Process {
     fn domain_request(&mut self, id: ObjectId, req: &Request) -> Result<Vec<u8>, IpcError> {
         let d = ipc::domain_request(req).map_err(IpcError::Stop)?;
         let slot = d.object_id.checked_sub(1).map(|i| i as usize);
-        let domain = self.session(id).domain.as_mut().expect("a domain");
+        let domain = self.session(id).domain.clone().expect("a domain");
+        let mut domain = domain.borrow_mut();
         let Some(object) = slot.and_then(|i| domain.get(i).copied().flatten()) else {
             return Err(IpcError::Stop(format!(
                 "a request to domain object {}, which does not exist",
@@ -449,6 +491,8 @@ impl Process {
         };
         if d.kind == domain_kind::CLOSE {
             domain[slot.unwrap()] = None;
+            drop(domain);
+            self.interface_released(object);
             return ipc::cmif_reply(&Reply::ok(Vec::new()), Some(&[])).map_err(IpcError::Stop);
         }
         if !d.in_objects.is_empty() {
@@ -457,6 +501,7 @@ impl Process {
                 object.name()
             )));
         }
+        drop(domain);
         let cmif = d.cmif.expect("SendMessage has a command");
         let call = Call {
             session: id,
@@ -482,11 +527,8 @@ impl Process {
         let mut ids = Vec::new();
         for object in out.objects {
             if in_domain {
-                let domain = self
-                    .session(call.session)
-                    .domain
-                    .as_mut()
-                    .expect("a domain");
+                let domain = self.session(call.session).domain.clone().expect("a domain");
+                let mut domain = domain.borrow_mut();
                 let free = domain.iter().position(Option::is_none);
                 let i = free.unwrap_or_else(|| {
                     domain.push(None);
@@ -513,6 +555,7 @@ impl Process {
             | DebugFunctions => self.am(call),
             Hid | AppletResource => self.hid(call),
             TimeU | SystemClock | SteadyClock | TimeZoneService => self.time(call),
+            FileSystemProxy | SdCard | File(_) | Directory(_) => self.fs(call),
             #[cfg(test)]
             Test => match call.n {
                 0 => Ok(Out::ok(call.args.to_vec())),
@@ -535,6 +578,61 @@ impl Process {
             IpcError::Stop(format!(
                 "cannot read pointer buffer {index} at {:#x}: {e}",
                 x.addr
+            ))
+        })
+    }
+
+    /// An interface is gone: a domain object closed, or the last session
+    /// serving it.
+    fn interface_released(&mut self, object: Interface) {
+        self.fs_released(object);
+    }
+
+    /// The kernel freed a session: its object goes, or, for the last
+    /// session of a domain, every object in the domain.
+    pub(crate) fn session_released(&mut self, session: Session) {
+        match session.domain {
+            Some(d) if Rc::strong_count(&d) == 1 => {
+                for object in d.take().into_iter().flatten() {
+                    self.interface_released(object);
+                }
+            }
+            Some(_) => {}
+            None => self.interface_released(session.object),
+        }
+    }
+
+    /// `size` bytes from the client's send buffer (A) `i`. A missing or
+    /// smaller buffer stops.
+    fn read_send(&self, req: &Request, i: usize, size: u64) -> Result<Vec<u8>, IpcError> {
+        let Some(a) = req.sends.get(i).filter(|a| a.size >= size) else {
+            return Err(IpcError::Stop(format!(
+                "a request without a send buffer {i} of {size:#x} bytes"
+            )));
+        };
+        self.mem.read_vec(a.addr, size as usize).map_err(|e| {
+            IpcError::Stop(format!("cannot read send buffer {i} at {:#x}: {e}", a.addr))
+        })
+    }
+
+    /// Write `data` at the start of the client's receive buffer (B) `i`,
+    /// which must hold `size` bytes. A missing or smaller buffer stops.
+    fn write_buffer(
+        &mut self,
+        req: &Request,
+        i: usize,
+        size: u64,
+        data: &[u8],
+    ) -> Result<(), IpcError> {
+        let Some(b) = req.receives.get(i).filter(|b| b.size >= size) else {
+            return Err(IpcError::Stop(format!(
+                "a request without a receive buffer {i} of {size:#x} bytes"
+            )));
+        };
+        self.mem.write_bytes(b.addr, data).map_err(|e| {
+            IpcError::Stop(format!(
+                "cannot write receive buffer {i} at {:#x}: {e}",
+                b.addr
             ))
         })
     }
@@ -965,6 +1063,56 @@ mod tests {
         );
     }
 
+    /// CloneCurrentObject over `h`: the moved handle.
+    fn clone(p: &mut Process, h: u64) -> u64 {
+        assert_eq!(send(p, h, &cmif(5, false, 2, &[])), Ok(0));
+        let (rc, _, moved, data, _) = answer(p, false, 0);
+        assert_eq!((rc, moved.len(), data), (0, 1, vec![]));
+        moved[0] as u64
+    }
+
+    #[test]
+    fn a_clone_of_a_domain_session_shares_its_domain() {
+        let mut p = setup();
+        let h = open(&mut p, b"test");
+        assert_eq!(convert(&mut p, h), Ok(1));
+        let c = clone(&mut p, h);
+        assert_ne!(c, h);
+        // An object made through one session is reached through the other.
+        assert_eq!(
+            send(&mut p, h, &request(false, &[], Some(1), 2, &[])),
+            Ok(0)
+        );
+        assert_eq!(answer(&p, true, 0).4, vec![2]);
+        assert_eq!(
+            send(&mut p, c, &request(false, &[], Some(2), 0, &[5; 4])),
+            Ok(0)
+        );
+        assert_eq!(answer(&p, true, 4).3, vec![5; 4]);
+        // Closing it through the clone closes it for both.
+        let close = words(&[4, 8, 0, 0, 2, 2, 0, 0]);
+        assert_eq!(send(&mut p, c, &close), Ok(0));
+        let e = send(&mut p, h, &request(false, &[], Some(2), 0, &[])).unwrap_err();
+        assert!(e.contains("domain object 2, which does not exist"), "{e}");
+        // Closing the clone's session leaves the first one working.
+        assert_eq!(send(&mut p, c, &words(&[2, 0])), Ok(0));
+        assert_eq!(
+            send(&mut p, h, &request(false, &[], Some(1), 0, &[6; 4])),
+            Ok(0)
+        );
+        assert_eq!(answer(&p, true, 4).3, vec![6; 4]);
+        // Outside a domain, a clone is another session to the same object.
+        let t = open(&mut p, b"test");
+        let u = clone(&mut p, t);
+        assert_eq!(send(&mut p, u, &cmif(4, false, 0, &[7; 4])), Ok(0));
+        assert_eq!(answer(&p, false, 4).3, vec![7; 4]);
+        let e = send(&mut p, t, &cmif(5, false, 4, &[0; 4])).unwrap_err();
+        assert!(
+            e.contains("control command 4 (CloneCurrentObjectEx)"),
+            "{e}"
+        );
+    }
+
     #[test]
     fn an_application_starts_the_way_libnx_starts_it() {
         let mut p = setup();
@@ -1239,6 +1387,306 @@ mod tests {
         assert!(e.contains("does not fit CalendarTime's u16"), "{e}");
         let e = send(&mut p, t, &cmif(4, false, 5, &[])).unwrap_err();
         assert!(e.starts_with("unimplemented: time:u command 5"), "{e}");
+    }
+
+    /// A domain request to `object` with pointer (X), send (A) and receive
+    /// (B) buffers as (address, size), laid out as libnx's hipcMakeRequest
+    /// and cmifMakeRequest lay them out.
+    fn buffers(
+        object: u32,
+        cmd: u32,
+        args: &[u8],
+        x: &[(u64, u64)],
+        a: &[(u64, u64)],
+        b: &[(u64, u64)],
+    ) -> Vec<u8> {
+        let size = (16 + 16 + 16 + args.len() + 1) & !1;
+        let w0 = 4 | (x.len() as u32) << 16 | (a.len() as u32) << 20 | (b.len() as u32) << 24;
+        let mut m = words(&[w0, size.div_ceil(4) as u32]);
+        for (i, &(addr, size)) in x.iter().enumerate() {
+            m.extend(words(&[
+                i as u32
+                    | ((addr >> 36) as u32 & 0x3f) << 6
+                    | ((addr >> 32) as u32 & 0xf) << 12
+                    | (size as u32) << 16,
+                addr as u32,
+            ]));
+        }
+        for &(addr, size) in a.iter().chain(b) {
+            m.extend(words(&[
+                size as u32,
+                addr as u32,
+                ((addr >> 36) as u32 & 0x3f_ffff) << 2
+                    | ((size >> 32) as u32 & 0xf) << 24
+                    | ((addr >> 32) as u32 & 0xf) << 28,
+            ]));
+        }
+        m.resize(m.len().next_multiple_of(16), 0);
+        m.extend(words(&[1 | ((16 + args.len()) as u32) << 16, object, 0, 0]));
+        m.extend(words(&[CMIF_IN_MAGIC, 0, cmd, 0]));
+        m.extend(args);
+        m
+    }
+
+    /// A fresh, empty folder for one test's SD card.
+    fn sd_folder(test: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kestrel-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn fs_serves_the_sd_folder() {
+        let mut p = setup();
+        let sd = sd_folder("fs-unit");
+        p.services.fs.sd = Some(sd.clone());
+        const BUF: u64 = 0x20_0000;
+        p.mem.map(BUF, 0x4000, Perm::RW, "fs").unwrap();
+        // Paths go at BUF and BUF + 0x400, padded to 0x301 bytes; data at
+        // BUF + 0x800, read buffers at BUF + 0x1000.
+        let put = |p: &mut Process, at: u64, s: &str| {
+            let mut b = s.as_bytes().to_vec();
+            b.resize(0x301, 0);
+            p.mem.write_bytes(at, &b).unwrap();
+        };
+        let x1 = [(BUF, 0x301)];
+        let x2 = [(BUF, 0x301), (BUF + 0x400, 0x301)];
+
+        // fsInitialize: a domain, SetCurrentProcess, two clones.
+        let h = open(&mut p, b"fsp-srv");
+        assert_eq!(convert(&mut p, h), Ok(1));
+        let e = send(&mut p, h, &request(false, &[], Some(1), 18, &[])).unwrap_err();
+        assert!(e.contains("before SetCurrentProcess"), "{e}");
+        let e = send(&mut p, h, &request(false, &[], Some(1), 1, &[0; 8])).unwrap_err();
+        assert!(e.contains("without the process ID"), "{e}");
+        assert_eq!(
+            send(&mut p, h, &request(true, &[], Some(1), 1, &[0; 8])),
+            Ok(0)
+        );
+        assert_eq!(answer(&p, true, 0).0, 0);
+        let c = clone(&mut p, h);
+        assert_eq!(
+            send(&mut p, h, &request(false, &[], Some(1), 18, &[])),
+            Ok(0)
+        );
+        let (rc, _, _, _, objects) = answer(&p, true, 0);
+        assert_eq!((rc, objects.len()), (0, 1));
+        let sdfs = objects[0];
+
+        // (object, command, args, X, A, B, output size) over the clone.
+        let call = |p: &mut Process,
+                    object,
+                    n,
+                    args: &[u8],
+                    x: &[(u64, u64)],
+                    a: &[(u64, u64)],
+                    b: &[(u64, u64)],
+                    size| {
+            assert_eq!(send(p, c, &buffers(object, n, args, x, a, b)), Ok(0));
+            let (rc, _, _, data, objects) = answer(p, true, size);
+            (rc, data, objects)
+        };
+        let stop = |p: &mut Process,
+                    object,
+                    n,
+                    args: &[u8],
+                    x: &[(u64, u64)],
+                    a: &[(u64, u64)],
+                    b: &[(u64, u64)]| {
+            send(p, c, &buffers(object, n, args, x, a, b)).unwrap_err()
+        };
+        let create_file = [0u8; 16];
+        put(&mut p, BUF, "/d");
+        assert_eq!(call(&mut p, sdfs, 2, &[], &x1, &[], &[], 0).0, 0);
+        assert_eq!(
+            call(&mut p, sdfs, 2, &[], &x1, &[], &[], 0).0,
+            fs::result::PATH_ALREADY_EXISTS
+        );
+        assert!(sd.join("d").is_dir());
+        put(&mut p, BUF, "/d/f");
+        assert_eq!(call(&mut p, sdfs, 0, &create_file, &x1, &[], &[], 0).0, 0);
+        put(&mut p, BUF, "/nope/f");
+        assert_eq!(
+            call(&mut p, sdfs, 0, &create_file, &x1, &[], &[], 0).0,
+            fs::result::PATH_NOT_FOUND
+        );
+        // GetEntryType.
+        for (path, want) in [
+            ("/d", (0, 0u32)),
+            ("/d/f", (0, 1)),
+            ("/", (0, 0)),
+            ("/x", (fs::result::PATH_NOT_FOUND, 0)),
+        ] {
+            put(&mut p, BUF, path);
+            let (rc, data, _) = call(&mut p, sdfs, 7, &[], &x1, &[], &[], 4);
+            let ty = if rc == 0 {
+                u32::from_le_bytes(data.try_into().unwrap())
+            } else {
+                0
+            };
+            assert_eq!((rc, ty), want, "{path}");
+        }
+        // Paths kestrel refuses.
+        for (path, rc) in [
+            ("/d/../d", fs::result::NOT_NORMALIZED),
+            ("/a:b", fs::result::INVALID_CHARACTER),
+            ("d", fs::result::INVALID_PATH_FORMAT),
+        ] {
+            put(&mut p, BUF, path);
+            assert_eq!(call(&mut p, sdfs, 7, &[], &x1, &[], &[], 0).0, rc, "{path}");
+        }
+
+        // Write through a write+append handle, then a write-only one.
+        put(&mut p, BUF, "/d/f");
+        let open_file = |p: &mut Process, m: u32| {
+            let (rc, _, objects) = call(p, sdfs, 8, &m.to_le_bytes(), &x1, &[], &[], 0);
+            assert_eq!((rc, objects.len()), (0, 1));
+            objects[0]
+        };
+        let io = |offset: u64, size: u64| {
+            let mut a = vec![0u8; 8];
+            a.extend(offset.to_le_bytes());
+            a.extend(size.to_le_bytes());
+            a
+        };
+        let appender = open_file(&mut p, 6);
+        p.mem.write_bytes(BUF + 0x800, b"hello").unwrap();
+        let data = [(BUF + 0x800, 5)];
+        assert_eq!(
+            call(&mut p, appender, 1, &io(0, 5), &[], &data, &[], 0).0,
+            0
+        );
+        let writer = open_file(&mut p, 2);
+        assert_eq!(
+            call(&mut p, writer, 1, &io(3, 5), &[], &data, &[], 0).0,
+            fs::result::FILE_EXTENSION_WITHOUT_OPEN_MODE_ALLOW_APPEND
+        );
+        p.mem.write_bytes(BUF + 0x800, b"HE").unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                writer,
+                1,
+                &io(0, 2),
+                &[],
+                &[(BUF + 0x800, 2)],
+                &[],
+                0
+            )
+            .0,
+            0
+        );
+        let e = stop(&mut p, writer, 0, &io(0, 2), &[], &[], &[(BUF + 0x1000, 2)]);
+        assert!(
+            e.contains("IFile Read on a file opened with mode 0x2"),
+            "{e}"
+        );
+        // Read it back: five bytes of a 16-byte read, then none past the end.
+        let reader = open_file(&mut p, 1);
+        let (rc, data, _) = call(
+            &mut p,
+            reader,
+            0,
+            &io(0, 16),
+            &[],
+            &[],
+            &[(BUF + 0x1000, 16)],
+            8,
+        );
+        assert_eq!((rc, u64::from_le_bytes(data.try_into().unwrap())), (0, 5));
+        assert_eq!(p.mem.read_vec(BUF + 0x1000, 5).unwrap(), b"HEllo");
+        let (_, data, _) = call(
+            &mut p,
+            reader,
+            0,
+            &io(9, 4),
+            &[],
+            &[],
+            &[(BUF + 0x1000, 4)],
+            8,
+        );
+        assert_eq!(data, 0u64.to_le_bytes());
+        assert_eq!(
+            call(&mut p, reader, 4, &[], &[], &[], &[], 8).1,
+            5u64.to_le_bytes()
+        );
+        assert_eq!(std::fs::read(sd.join("d/f")).unwrap(), b"HEllo");
+        // An open file cannot be deleted or renamed.
+        assert_eq!(
+            call(&mut p, sdfs, 1, &[], &x1, &[], &[], 0).0,
+            fs::result::TARGET_LOCKED
+        );
+        put(&mut p, BUF + 0x400, "/d/g");
+        assert_eq!(
+            call(&mut p, sdfs, 5, &[], &x2, &[], &[], 0).0,
+            fs::result::TARGET_LOCKED
+        );
+
+        // List /d: one file of five bytes.
+        put(&mut p, BUF, "/d");
+        let (rc, _, objects) = call(&mut p, sdfs, 9, &3u64.to_le_bytes(), &x1, &[], &[], 0);
+        assert_eq!(rc, 0);
+        let dir = objects[0];
+        assert_eq!(
+            call(&mut p, dir, 1, &[], &[], &[], &[], 8).1,
+            1u64.to_le_bytes()
+        );
+        let b = [(BUF + 0x1000, 2 * fs::ENTRY_SIZE as u64)];
+        assert_eq!(
+            call(&mut p, dir, 0, &[], &[], &[], &b, 8).1,
+            1u64.to_le_bytes()
+        );
+        let e = p.mem.read_vec(BUF + 0x1000, fs::ENTRY_SIZE).unwrap();
+        assert_eq!((&e[..2], e[0x301], e[0x304]), (&b"f\0"[..], 0, 1));
+        assert_eq!(e[0x308..], 5u64.to_le_bytes());
+        assert_eq!(
+            call(&mut p, dir, 0, &[], &[], &[], &b, 8).1,
+            0u64.to_le_bytes()
+        );
+
+        // Closing the objects unlocks the file.
+        assert_eq!(p.services.fs.open_objects(), 4);
+        for object in [appender, writer, reader, dir] {
+            assert_eq!(
+                send(&mut p, c, &words(&[4, 8, 0, 0, 2, object, 0, 0])),
+                Ok(0)
+            );
+        }
+        assert_eq!(p.services.fs.open_objects(), 0);
+        put(&mut p, BUF, "/d/f");
+        assert_eq!(call(&mut p, sdfs, 5, &[], &x2, &[], &[], 0).0, 0);
+        assert!(sd.join("d/g").is_file() && !sd.join("d/f").exists());
+        put(&mut p, BUF, "/d");
+        let e = stop(&mut p, sdfs, 3, &[], &x1, &[], &[]);
+        assert!(
+            e.contains("DeleteDirectory of /d, which is not empty"),
+            "{e}"
+        );
+        assert_eq!(call(&mut p, sdfs, 4, &[], &x1, &[], &[], 0).0, 0);
+        assert!(!sd.join("d").exists());
+
+        // A file left open goes with the domain's last session.
+        put(&mut p, BUF, "/f");
+        assert_eq!(call(&mut p, sdfs, 0, &create_file, &x1, &[], &[], 0).0, 0);
+        open_file(&mut p, 1);
+        assert_eq!(p.services.fs.open_objects(), 1);
+        for s in [c, h] {
+            p.cpu.x[0] = s;
+            assert_eq!(dispatch(&mut p, nr::CLOSE_HANDLE), None);
+        }
+        assert_eq!(p.services.fs.open_objects(), 0);
+        std::fs::remove_dir_all(&sd).unwrap();
+
+        // Without a card, OpenSdCardFileSystem fails.
+        let mut p = setup();
+        let h = open(&mut p, b"fsp-srv");
+        assert_eq!(
+            send(&mut p, h, &request(true, &[], None, 1, &[0; 8])),
+            Ok(0)
+        );
+        assert_eq!(send(&mut p, h, &request(false, &[], None, 18, &[])), Ok(0));
+        assert_eq!(answer(&p, false, 0).0, fs::result::PORT_SD_CARD_NO_DEVICE);
     }
 
     #[test]
