@@ -1,6 +1,6 @@
 [package]
 name = "kestrel-loader"
-description = "Executable loaders (ELF test programs; homebrew formats next)"
+description = "Executable loaders (ELF test programs, homebrew NRO)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

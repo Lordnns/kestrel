@@ -1,15 +1,17 @@
 //! Executable loaders.
 //!
-//! Today: static AArch64 ELF64 executables, which is what the test programs
-//! in `guest/` build to. Next on the roadmap is the open homebrew executable
-//! format, so community-written homebrew can run without any console files.
+//! Static AArch64 ELF64 executables, which is what the test programs in
+//! `guest/` build to, and the open homebrew executable format (NRO), so
+//! community-written homebrew runs without any console files.
 //!
 //! The loaders deliberately do not handle encrypted containers. Decryption
 //! keys come from the user's own console and are out of scope for this repo.
 
 pub mod elf;
+pub mod nro;
 
 pub use elf::load_elf;
+pub use nro::{is_nro, load_nro, Assets, Nro};
 
 use kestrel_core::MemFault;
 use std::fmt;
@@ -19,6 +21,8 @@ pub enum LoadError {
     NotElf,
     Unsupported(&'static str),
     Truncated,
+    InvalidNro(&'static str),
+    UnsupportedNro(&'static str),
     Memory(MemFault),
 }
 
@@ -28,6 +32,8 @@ impl fmt::Display for LoadError {
             LoadError::NotElf => write!(f, "not an ELF file"),
             LoadError::Unsupported(what) => write!(f, "unsupported ELF: {what}"),
             LoadError::Truncated => write!(f, "ELF file is truncated"),
+            LoadError::InvalidNro(why) => write!(f, "invalid NRO: {why}"),
+            LoadError::UnsupportedNro(what) => write!(f, "unsupported NRO: {what}"),
             LoadError::Memory(e) => write!(f, "could not map segment: {e}"),
         }
     }
