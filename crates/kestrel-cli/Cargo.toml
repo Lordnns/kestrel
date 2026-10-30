@@ -16,3 +16,15 @@ kestrel-cpu.workspace = true
 kestrel-loader.workspace = true
 kestrel-hle.workspace = true
 kestrel-testsuite.workspace = true
+
+# The window and controllers (the owner's choice, 2026-10-30): winit for the
+# window and keyboard, softbuffer to paint it, gilrs for gamepads. Only the
+# front end uses them; the emulator crates stay standard-library only.
+# `--no-default-features` builds a terminal-only kestrel.
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+gilrs = { version = "0.11", optional = true }
+
+[features]
+default = ["window"]
+window = ["dep:winit", "dep:softbuffer", "dep:gilrs"]

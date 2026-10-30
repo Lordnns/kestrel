@@ -1,9 +1,17 @@
 //! `kestrel` command-line front end.
 
+#[cfg(feature = "window")]
+mod input_config;
+#[cfg(feature = "window")]
+mod window;
+
 use kestrel_cpu::{create_backend, interp::Interpreter, BackendKind, CpuBackend};
+use kestrel_hle::input::Source;
 use kestrel_hle::{Process, Stop};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Release builds get the git tag (e.g. `v0.1.4`) from the Release workflow;
@@ -30,6 +38,9 @@ RUN OPTIONS:
     --stats                              Print instruction count and speed
     --sd <folder>                        The folder that is the SD card
                                          (default: user/sdmc next to kestrel)
+    --headless                           No window for a homebrew NRO; the
+                                         window maps keys and gamepads as
+                                         user/config/input.cfg says
     -- args...                           Arguments for a homebrew NRO (argv[0]
                                          is its file name)
 ";
@@ -42,6 +53,7 @@ struct Opts {
     regs: bool,
     stats: bool,
     sd: Option<PathBuf>,
+    headless: bool,
     args: Vec<String>,
 }
 
@@ -56,6 +68,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         regs: false,
         stats: false,
         sd: None,
+        headless: false,
         args: Vec::new(),
     };
     while let Some(a) = it.next() {
@@ -73,6 +86,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--regs" => o.regs = true,
             "--stats" => o.stats = true,
             "--sd" => o.sd = Some(it.next().ok_or("--sd needs a folder")?.into()),
+            "--headless" => o.headless = true,
             "--" => {
                 o.args = it.by_ref().cloned().collect();
             }
@@ -225,14 +239,67 @@ fn sd_folder(chosen: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
+/// The input settings: `user/config/input.cfg`, written with the defaults
+/// when missing.
+#[cfg(feature = "window")]
+fn input_config() -> Result<input_config::InputConfig, String> {
+    let Some(path) = user_folder().map(|u| u.join("config").join("input.cfg")) else {
+        return input_config::InputConfig::parse(input_config::DEFAULT);
+    };
+    if !path.exists() {
+        let made = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, input_config::DEFAULT));
+        if let Err(e) = made {
+            eprintln!("note: cannot write {}: {e}", path.display());
+            return input_config::InputConfig::parse(input_config::DEFAULT);
+        }
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    input_config::InputConfig::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// `kestrel run`: a homebrew NRO gets a window (the owner's choice) unless
+/// `--headless`, or kestrel was built without the window feature.
 fn run(o: Opts) -> Result<ExitCode, String> {
     let file = std::fs::read(&o.path).map_err(|e| format!("cannot read {}: {e}", o.path))?;
     let name = std::path::Path::new(&o.path)
         .file_name()
         .map_or(o.path.clone(), |n| n.to_string_lossy().into_owned());
-    let mut proc = Process::load(&file, &name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
+    let o = Arc::new(o);
+    #[cfg(feature = "window")]
+    if kestrel_loader::is_nro(&file) && !o.headless {
+        let config = input_config()?;
+        let title = format!("kestrel - {name}");
+        let (opts, f, n) = (o.clone(), file.clone(), name.clone());
+        let windowed = window::run(title, config, move |source, interrupt| {
+            emulate(&opts, &f, &n, Some(source), Some(interrupt))
+        });
+        match windowed {
+            Ok(result) => return result,
+            // No display here (a server, an SSH session): run without one.
+            Err(e) => eprintln!("note: no window ({e}); running without one"),
+        }
+    }
+    emulate(&o, &file, &name, None, None)
+}
+
+/// Load and run the program, with a controller and a stop flag when a
+/// window gives them, and report how it stopped.
+fn emulate(
+    o: &Opts,
+    file: &[u8],
+    name: &str,
+    input: Option<Box<dyn Source>>,
+    interrupt: Option<Arc<AtomicBool>>,
+) -> Result<ExitCode, String> {
+    let mut proc = Process::load(file, name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
     proc.echo = true;
-    proc.services.fs.sd = sd_folder(o.sd);
+    proc.services.fs.sd = sd_folder(o.sd.clone());
+    proc.input = input;
+    proc.interrupt = interrupt;
 
     let mut backend: Box<dyn CpuBackend> = if o.trace {
         if !matches!(o.backend, BackendKind::Auto | BackendKind::Interp) {
