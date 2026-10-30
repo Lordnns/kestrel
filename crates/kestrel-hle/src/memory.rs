@@ -2,7 +2,8 @@
 //! mapping (Switchbrew, "SVC": MemoryType, MemoryAttribute) and the block
 //! svcQueryMemory reports for any address.
 
-use crate::layout;
+use crate::svc::result;
+use crate::{layout, Process};
 use kestrel_core::{Memory, Perm, Tag};
 
 /// MemoryType values (Switchbrew, "SVC"; the 4.0.0+ values where they
@@ -116,10 +117,113 @@ pub fn query(mem: &Memory, addr: u64) -> MemInfo {
     }
 }
 
+impl Process {
+    /// Memory counted against TotalMemorySize: the image, the main stack
+    /// and the heap (Switchbrew, "SVC", svcGetInfo UsedMemorySize).
+    pub fn used_memory(&self) -> u64 {
+        self.image_size + layout::STACK_SIZE + self.heap_size
+    }
+
+    /// svcSetHeapSize (Switchbrew, "SVC"): grow or shrink the heap at the
+    /// start of the heap region, keeping its contents. Returns the heap
+    /// address, or a result code.
+    pub fn set_heap_size(&mut self, size: u64) -> Result<u64, u64> {
+        let (base, region_size) = layout::HEAP_REGION;
+        if size % 0x20_0000 != 0 || size > 1 << 32 {
+            return Err(result::INVALID_SIZE);
+        }
+        if size > region_size {
+            return Err(result::OUT_OF_MEMORY);
+        }
+        let old = self.heap_size;
+        if size > old {
+            if self.used_memory() - old + size > layout::TOTAL_MEMORY {
+                return Err(result::LIMIT_REACHED);
+            }
+            self.mem
+                .map_tagged(base + old, size - old, Perm::RW, tag(state::NORMAL), "heap")
+                .map_err(|_| result::INVALID_STATE)?;
+        } else if size < old {
+            // Only untouched heap can be released: Normal, read-write, no
+            // attribute.
+            let tail = self
+                .mem
+                .range_regions(base + size, old - size)
+                .map_err(|_| result::INVALID_STATE)?;
+            if tail
+                .iter()
+                .any(|b| b.tag != tag(state::NORMAL) || b.perm != Perm::RW)
+            {
+                return Err(result::INVALID_STATE);
+            }
+            self.mem
+                .unmap_range(base + size, old - size)
+                .map_err(|_| result::INVALID_STATE)?;
+        }
+        self.heap_size = size;
+        Ok(base)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kestrel_loader::Loaded;
     use layout::{ADDRESS_SPACE_BASE as LO, ADDRESS_SPACE_END as HI};
+
+    const MB2: u64 = 0x20_0000;
+
+    fn process() -> Process {
+        let image = Loaded {
+            entry: 0,
+            image_start: 0,
+            image_end: 0,
+        };
+        Process::new(Memory::new(), &image).unwrap()
+    }
+
+    #[test]
+    fn the_heap_grows_and_shrinks_in_place() {
+        let mut p = process();
+        let base = p.set_heap_size(MB2).unwrap();
+        assert_eq!(base, layout::HEAP_REGION.0);
+        p.mem.write64(base + 8, 0x1234).unwrap();
+        assert_eq!(p.set_heap_size(3 * MB2), Ok(base));
+        assert_eq!(
+            p.mem.read64(base + 8).unwrap(),
+            0x1234,
+            "growing keeps contents"
+        );
+        p.mem.write8(base + 3 * MB2 - 1, 7).unwrap();
+        assert_eq!(p.set_heap_size(MB2), Ok(base));
+        assert!(!p.mem.is_mapped(base + MB2));
+        assert_eq!(
+            p.mem.read64(base + 8).unwrap(),
+            0x1234,
+            "shrinking keeps the rest"
+        );
+        assert_eq!(p.set_heap_size(0), Ok(base));
+        assert!(!p.mem.is_mapped(base));
+        assert_eq!(p.heap_size, 0);
+    }
+
+    #[test]
+    fn heap_sizes_are_checked_as_documented() {
+        let mut p = process();
+        assert_eq!(p.set_heap_size(0x1000), Err(result::INVALID_SIZE));
+        assert_eq!(p.set_heap_size((1 << 32) + MB2), Err(result::INVALID_SIZE));
+        // Within 4 GiB and the heap region, but over the memory total.
+        let over = (layout::TOTAL_MEMORY + MB2) & !(MB2 - 1);
+        assert_eq!(p.set_heap_size(over), Err(result::LIMIT_REACHED));
+        assert_eq!(p.heap_size, 0);
+        // A reprotected page cannot be released.
+        let base = p.set_heap_size(2 * MB2).unwrap();
+        p.mem
+            .update_range(base + MB2, 0x1000, |perm, _| *perm = Perm::R)
+            .unwrap();
+        assert_eq!(p.set_heap_size(MB2), Err(result::INVALID_STATE));
+        assert_eq!(p.heap_size, 2 * MB2);
+    }
 
     #[test]
     fn neighbours_of_the_same_kind_merge() {

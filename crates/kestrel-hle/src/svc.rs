@@ -4,7 +4,6 @@
 //! output registers. A result code of 0 means success.
 
 use crate::{layout, memory, Process, Stop};
-use kestrel_core::Perm;
 use std::io::Write;
 
 /// Publicly documented SVC numbers implemented so far.
@@ -24,6 +23,11 @@ pub mod result {
     pub const SUCCESS: u64 = 0;
     pub const INVALID_SIZE: u64 = 0xca01;
     pub const INVALID_ADDRESS: u64 = 0xcc01;
+    pub const OUT_OF_MEMORY: u64 = 0xd001;
+    pub const INVALID_STATE: u64 = 0xd401;
+    pub const INVALID_NEW_PERMISSION: u64 = 0xd801;
+    pub const INVALID_MEMORY_RANGE: u64 = 0xdc01;
+    pub const LIMIT_REACHED: u64 = 0x10801;
     pub const INVALID_HANDLE: u64 = 0xe401;
     pub const INVALID_COMBINATION: u64 = 0xf601;
 }
@@ -57,7 +61,7 @@ fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> 
             Ok(v)
         }
     };
-    let used = p.image_size + STACK_SIZE + p.heap_size;
+    let used = p.used_memory();
     match kind {
         2 => process(ALIAS_REGION.0),
         3 => process(ALIAS_REGION.1),
@@ -101,26 +105,13 @@ fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> 
 pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
     match n {
         nr::SET_HEAP_SIZE => {
-            let size = p.cpu.x[1];
-            if size % 0x20_0000 != 0 {
-                p.cpu.x[0] = result::INVALID_SIZE;
-                return None;
-            }
-            if p.heap_size != 0 {
-                p.mem.unmap(layout::HEAP_BASE);
-            }
-            if size != 0 {
-                let normal = memory::tag(memory::state::NORMAL);
-                if let Err(e) = p
-                    .mem
-                    .map_tagged(layout::HEAP_BASE, size, Perm::RW, normal, "heap")
-                {
-                    return Some(Stop::Error(format!("SetHeapSize({size:#x}) failed: {e}")));
+            match p.set_heap_size(p.cpu.x[1]) {
+                Ok(addr) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = addr;
                 }
+                Err(code) => p.cpu.x[0] = code,
             }
-            p.heap_size = size;
-            p.cpu.x[0] = result::SUCCESS;
-            p.cpu.x[1] = layout::HEAP_BASE;
             None
         }
         nr::QUERY_MEMORY => {
@@ -207,7 +198,7 @@ fn read_guest(p: &Process, addr: u64, len: u64) -> Result<Vec<u8>, kestrel_core:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_core::Memory;
+    use kestrel_core::{Memory, Perm};
     use kestrel_loader::Loaded;
 
     fn process() -> Process {
