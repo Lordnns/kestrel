@@ -9,6 +9,7 @@
 //! documentation and from observing homebrew, never from console firmware.
 
 pub mod homebrew;
+pub mod input;
 pub mod ipc;
 pub mod kernel;
 pub mod memory;
@@ -116,6 +117,8 @@ pub enum Stop {
     Error(String),
     /// The step budget ran out.
     StepLimit,
+    /// The frontend asked the program to stop (its window was closed).
+    Interrupted,
 }
 
 /// One emulated process.
@@ -143,6 +146,10 @@ pub struct Process {
     pub echo: bool,
     /// Kestrel's notes on what the program did that it should hear of.
     pub log: Vec<String>,
+    /// Where controller input comes from; None: no controller.
+    pub input: Option<Box<dyn input::Source>>,
+    /// Set by the frontend to stop the program (its window closed).
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub svc_count: u64,
 }
 
@@ -184,6 +191,8 @@ impl Process {
             debug_output: Vec::new(),
             echo: false,
             log: Vec::new(),
+            input: None,
+            interrupt: None,
             svc_count: 0,
         };
         p.main_thread = p
@@ -233,6 +242,12 @@ impl Process {
             if used >= max_steps {
                 return Stop::StepLimit;
             }
+            if let Some(flag) = &self.interrupt {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Stop::Interrupted;
+                }
+            }
+            self.hid_tick();
             let budget = (max_steps - used).min(self.sched.slice_left);
             let before = self.cpu.retired;
             let exit = backend.run(&mut self.cpu, &mut self.mem, budget);

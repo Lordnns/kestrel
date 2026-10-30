@@ -287,6 +287,10 @@ fn run(o: Opts) -> Result<ExitCode, String> {
             eprintln!("stopped: instruction budget exhausted");
             Ok(ExitCode::from(4))
         }
+        Stop::Interrupted => {
+            eprintln!("stopped: the window was closed");
+            Ok(ExitCode::SUCCESS)
+        }
         Stop::Unimplemented { what, pc } => {
             eprintln!("unimplemented: {what}, at pc {pc:#x}");
             // Every run that reaches something kestrel lacks adds a line,

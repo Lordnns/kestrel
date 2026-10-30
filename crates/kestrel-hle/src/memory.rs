@@ -457,6 +457,25 @@ impl Process {
         })
     }
 
+    /// Write `data` at `offset` in shared memory object `id`: into the
+    /// process's mapping when it is mapped, else into the object.
+    pub(crate) fn write_shared_memory(&mut self, id: ObjectId, offset: usize, data: &[u8]) {
+        match self.handles.object_mut(id) {
+            Object::SharedMemory {
+                mapped: Some(addr), ..
+            } => {
+                let addr = *addr + offset as u64;
+                self.mem
+                    .poke_bytes(addr, data)
+                    .expect("a shared memory mapping covers the object");
+            }
+            Object::SharedMemory { contents, .. } => {
+                contents[offset..offset + data.len()].copy_from_slice(data);
+            }
+            o => unreachable!("shared memory {id} is {o:?}"),
+        }
+    }
+
     /// The shared memory object `h` names.
     fn shared_memory(&mut self, h: u64) -> Result<ObjectId, u64> {
         match self.handles.get(h as u32) {

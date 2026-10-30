@@ -1789,6 +1789,198 @@ mod tests {
         assert!(e.starts_with("unimplemented: psm command 2"), "{e}");
     }
 
+    /// A scripted controller: A for the first three samples, then B; the
+    /// left stick fully right, the right stick a quarter down.
+    struct Script(crate::input::Controller);
+
+    impl crate::input::Source for Script {
+        fn controller(&self) -> crate::input::Controller {
+            self.0
+        }
+        fn sample(&mut self, n: u64) -> crate::input::Pad {
+            use crate::input::button;
+            crate::input::Pad {
+                buttons: if n < 3 { button::A } else { button::B },
+                left: (0x7fff, 0),
+                right: (0, -0x2000),
+            }
+        }
+    }
+
+    /// Open hid and its shared memory as hidInitialize does; with `setup`,
+    /// also configure it as padConfigureInput(1, standard styles) does.
+    fn hid_with_input(p: &mut Process, c: crate::input::Controller, setup: bool) -> ObjectId {
+        p.input = Some(Box::new(Script(c)));
+        let hid = open(p, b"hid");
+        let aruid = PROCESS_ID.to_le_bytes();
+        assert_eq!(send(p, hid, &request(true, &[], None, 0, &aruid)), Ok(0));
+        let resource = answer(p, false, 0).2[0] as u64;
+        assert_eq!(send(p, resource, &cmif(4, false, 0, &[])), Ok(0));
+        let shm = answer(p, false, 0).1[0];
+        if setup {
+            let mut rev = 5u64.to_le_bytes().to_vec();
+            rev.extend(aruid);
+            assert_eq!(send(p, hid, &request(true, &[], None, 109, &rev)), Ok(0));
+            p.mem
+                .write_bytes(STRINGS + 0x200, &words(&[0, 1, 2, 3, 4, 5, 6, 7, 0x20]))
+                .unwrap();
+            let ids = with_pointer(request(true, &[], None, 102, &aruid), STRINGS + 0x200, 36);
+            assert_eq!(send(p, hid, &ids), Ok(0));
+            let mut styles = 0x1fu64.to_le_bytes().to_vec();
+            styles.extend(aruid);
+            assert_eq!(send(p, hid, &request(true, &[], None, 100, &styles)), Ok(0));
+        }
+        // Sample next one period from now.
+        p.services.hid.next_sample = p.cpu.retired + hid::SAMPLE_PERIOD;
+        p.handles.get(shm).unwrap().1
+    }
+
+    /// Advance the guest clock by one sampling period and let hid sample.
+    fn sample(p: &mut Process) {
+        p.cpu.retired += hid::SAMPLE_PERIOD;
+        p.hid_tick();
+    }
+
+    fn shared_bytes(p: &Process, id: ObjectId, at: usize, len: usize) -> Vec<u8> {
+        match p.handles.object(id) {
+            Object::SharedMemory {
+                contents,
+                mapped: None,
+                ..
+            } => contents[at..at + len].to_vec(),
+            Object::SharedMemory {
+                mapped: Some(addr), ..
+            } => p.mem.read_vec(addr + at as u64, len).unwrap(),
+            o => panic!("{o:?}"),
+        }
+    }
+
+    fn u64_at(p: &Process, id: ObjectId, at: usize) -> u64 {
+        u64::from_le_bytes(shared_bytes(p, id, at, 8).try_into().unwrap())
+    }
+
+    #[test]
+    fn hid_writes_the_controller_into_its_shared_memory() {
+        use crate::input::{button, Controller};
+        use hid::layout::*;
+        let mut p = setup();
+        let shm = hid_with_input(&mut p, Controller::ProController, true);
+        let entry = NPAD; // No1
+        let lifo = entry + FULL_KEY_LIFO;
+        for _ in 0..3 {
+            sample(&mut p);
+        }
+        assert_eq!(u64_at(&p, shm, entry + STYLE_SET), 1); // FullKey, Dual
+        assert_eq!(shared_bytes(&p, shm, entry + DEVICE_TYPE, 4), [1, 0, 0, 0]);
+        assert_eq!(
+            u64_at(&p, shm, entry + SYSTEM_PROPERTIES),
+            1 << 11 | 1 << 13 | 1 << 14 | 1 << 15
+        );
+        assert_eq!(
+            shared_bytes(&p, shm, entry + APPLET_FOOTER_UI_TYPE, 1),
+            [12]
+        );
+        // FullKeyColor Ok, JoyColor NoController.
+        assert_eq!(shared_bytes(&p, shm, entry + FULL_KEY_COLOR, 4), [0; 4]);
+        assert_eq!(shared_bytes(&p, shm, entry + JOY_COLOR, 4), [2, 0, 0, 0]);
+        // The ring: BufferCount 17, Tail 2, Count 3.
+        assert_eq!(
+            [8, 0x10, 0x18].map(|at| u64_at(&p, shm, lifo + at)),
+            [17, 2, 3]
+        );
+        let newest = lifo + LIFO_HEADER + 2 * LIFO_ENTRY;
+        let e = shared_bytes(&p, shm, newest, LIFO_ENTRY);
+        assert_eq!(e[..8], 2u64.to_le_bytes());
+        assert_eq!(e[8..0x10], 2u64.to_le_bytes());
+        // A, StickLRight; the right stick at a quarter presses nothing.
+        assert_eq!(e[0x10..0x18], (button::A | 1 << 18).to_le_bytes());
+        assert_eq!(e[0x18..0x1c], 0x7fffi32.to_le_bytes());
+        assert_eq!(e[0x24..0x28], (-0x2000i32).to_le_bytes());
+        assert_eq!(e[0x28..0x2c], 1u32.to_le_bytes()); // IsConnected
+                                                       // The ring wraps: after 20 samples Tail is 19 % 17 and Count 16.
+        for _ in 3..20 {
+            sample(&mut p);
+        }
+        assert_eq!([0x10, 0x18].map(|at| u64_at(&p, shm, lifo + at)), [2, 16]);
+        assert_eq!(u64_at(&p, shm, newest), 19);
+        assert_eq!(
+            shared_bytes(&p, shm, newest + 0x10, 8),
+            (button::B | 1 << 18).to_le_bytes()
+        );
+        // Samples land in the program's mapping once it is mapped.
+        let h = p.handles.add_handle(shm, Kind::SharedMemory).unwrap() as u64;
+        assert!(p
+            .map_shared_memory(h, 0x4000_0000, hid::SHARED_MEMORY_SIZE, 1)
+            .is_ok());
+        sample(&mut p);
+        assert_eq!(u64_at(&p, shm, lifo + 0x10), 3);
+        assert_eq!(u64_at(&p, shm, lifo + LIFO_HEADER + 3 * LIFO_ENTRY), 20);
+        // After a long sleep hid catches up with a ring's worth of samples.
+        p.cpu.retired += 40 * hid::SAMPLE_PERIOD;
+        p.hid_tick();
+        assert_eq!(p.services.hid.samples, 21 + 17);
+        assert_eq!(u64_at(&p, shm, lifo + 0x18), 16);
+    }
+
+    #[test]
+    fn handheld_joy_con_connect_as_the_handheld_npad() {
+        use crate::input::Controller;
+        use hid::layout::*;
+        let mut p = setup();
+        let shm = hid_with_input(&mut p, Controller::Handheld, true);
+        sample(&mut p);
+        let entry = NPAD + HANDHELD_ENTRY * NPAD_ENTRY;
+        assert_eq!(u64_at(&p, shm, entry + STYLE_SET), 2);
+        assert_eq!(
+            shared_bytes(&p, shm, entry + DEVICE_TYPE, 4),
+            [0xc, 0, 0, 0]
+        );
+        assert_eq!(shared_bytes(&p, shm, entry + APPLET_FOOTER_UI_TYPE, 1), [4]);
+        assert_eq!(shared_bytes(&p, shm, entry + JOY_COLOR, 4), [0; 4]);
+        let e = shared_bytes(&p, shm, entry + HANDHELD_LIFO + LIFO_HEADER, LIFO_ENTRY);
+        assert_eq!(e[0x28..0x2c], 0x3fu32.to_le_bytes());
+        // Player 1's entry stays empty.
+        assert_eq!(u64_at(&p, shm, NPAD + STYLE_SET), 0);
+    }
+
+    #[test]
+    fn no_controller_until_the_program_accepts_it() {
+        use crate::input::Controller;
+        let mut p = setup();
+        let shm = hid_with_input(&mut p, Controller::ProController, false);
+        sample(&mut p);
+        assert!(shared_bytes(&p, shm, 0, hid::SHARED_MEMORY_SIZE as usize)
+            .iter()
+            .all(|&b| b == 0));
+        assert!(p.log.is_empty());
+        // Activated, but only Handheld supported: refused, noted once.
+        let hid = open(&mut p, b"hid");
+        let aruid = PROCESS_ID.to_le_bytes();
+        let mut rev = 5u64.to_le_bytes().to_vec();
+        rev.extend(aruid);
+        assert_eq!(
+            send(&mut p, hid, &request(true, &[], None, 109, &rev)),
+            Ok(0)
+        );
+        let mut styles = 2u64.to_le_bytes().to_vec();
+        styles.extend(aruid);
+        assert_eq!(
+            send(&mut p, hid, &request(true, &[], None, 100, &styles)),
+            Ok(0)
+        );
+        sample(&mut p);
+        sample(&mut p);
+        assert!(shared_bytes(&p, shm, 0, hid::SHARED_MEMORY_SIZE as usize)
+            .iter()
+            .all(|&b| b == 0));
+        assert_eq!(p.log.len(), 1);
+        assert!(
+            p.log[0].contains("does not accept the emulated ProController"),
+            "{}",
+            p.log[0]
+        );
+    }
+
     #[test]
     fn fatal_errors_are_reported_or_end_the_program() {
         let mut p = setup();
