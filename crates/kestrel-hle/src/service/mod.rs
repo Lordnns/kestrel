@@ -24,6 +24,7 @@ pub mod psm;
 pub mod set;
 pub mod sm;
 pub mod time;
+pub mod vi;
 
 use crate::ipc::{self, command_type, domain_kind, Reply, Request};
 use crate::kernel::{Kind, Object, ObjectId};
@@ -85,6 +86,11 @@ pub enum Interface {
     FatalU,
     /// "nvdrv", the GPU driver.
     NvDrv,
+    /// "vi:u", the display, its IApplicationDisplayService, and the
+    /// IHOSBinderDriver relay to a layer's buffer queue.
+    ViU,
+    ApplicationDisplayService,
+    HosBinderDriver,
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234, command 2 hands out another test object. For unit
     /// tests of the session path.
@@ -103,6 +109,7 @@ const SERVICES: &[(&str, Interface)] = &[
     ("psm", Interface::Psm),
     ("fatal:u", Interface::FatalU),
     ("nvdrv", Interface::NvDrv),
+    ("vi:u", Interface::ViU),
     #[cfg(test)]
     ("test", Interface::Test),
 ];
@@ -141,6 +148,9 @@ impl Interface {
             PsmSession => "IPsmSession",
             FatalU => "fatal:u",
             NvDrv => "nvdrv",
+            ViU => "vi:u",
+            ApplicationDisplayService => "IApplicationDisplayService",
+            HosBinderDriver => "IHOSBinderDriver",
             #[cfg(test)]
             Test => "test",
         }
@@ -344,6 +354,7 @@ pub struct State {
     /// psm: the IPsmSession state-change event.
     pub psm_state_event: Option<ObjectId>,
     pub nv: nv::State,
+    pub vi: vi::State,
 }
 
 impl Process {
@@ -592,6 +603,7 @@ impl Process {
             Psm | PsmSession => self.psm(call),
             FatalU => self.fatal(call),
             NvDrv => self.nvdrv(call),
+            ViU | ApplicationDisplayService | HosBinderDriver => self.vi(call),
             #[cfg(test)]
             Test => match call.n {
                 0 => Ok(Out::ok(call.args.to_vec())),
@@ -744,7 +756,7 @@ mod tests {
     use crate::kernel::PROCESS_ID;
     use crate::svc::handle;
     use crate::svc::{dispatch, nr};
-    use crate::testutil::process;
+    use crate::testutil::{process, svc};
     use crate::Stop;
     use kestrel_core::Perm;
 
@@ -1318,6 +1330,13 @@ mod tests {
         );
         assert_eq!(call(&mut p, selfc, 11, &[1], 0).0, 0);
         assert_eq!(call(&mut p, selfc, 12, &[1], 0).0, 0);
+        // CreateManagedDisplayLayer: the layer vi's OpenLayer opens.
+        assert!(!p.services.vi.layer_made);
+        assert_eq!(
+            call(&mut p, selfc, 40, &[], 8),
+            (0, vec![], vi::LAYER_ID.to_le_bytes().to_vec())
+        );
+        assert!(p.services.vi.layer_made);
         // The events are readable events that nothing signals; asking
         // again names the same event.
         let (_, again, _) = call(&mut p, state, 0, &[], 0);
@@ -1791,6 +1810,262 @@ mod tests {
         assert_eq!(ioctl(&mut p, 1, 0xc008_0101, &[0; 8]).unwrap().0, 4);
         assert_eq!(send(&mut p, nv, &close), Ok(0));
         assert_eq!(u32s(&answer(&p, false, 4).3), vec![4]);
+    }
+
+    /// A parcel as libnx's parcelTransact sends it: the header, then
+    /// IGraphicBufferProducer's interface token and `args`.
+    fn parcel(args: &[u8]) -> Vec<u8> {
+        let token = "android.gui.IGraphicBufferProducer";
+        let mut payload = words(&[0x100, token.len() as u32]);
+        for c in token.encode_utf16().chain([0]) {
+            payload.extend(c.to_le_bytes());
+        }
+        payload.resize(payload.len().next_multiple_of(4), 0);
+        payload.extend(args);
+        let size = payload.len() as u32;
+        let mut p = words(&[size, 0x10, 0, 0x10 + size]);
+        p.extend(payload);
+        p
+    }
+
+    /// A flattened object: its length, no file descriptors, its bytes.
+    fn flattened(b: &[u8]) -> Vec<u8> {
+        let mut v = words(&[b.len() as u32, 0]);
+        v.extend(b);
+        v
+    }
+
+    /// The GraphicBuffer libnx's framebufferCreate and
+    /// bqSetPreallocatedBuffer send for a 32x8 block-linear RGB 565
+    /// surface (blocks one GOB high) at `offset` in nvmap object `nvmap`:
+    /// the "GBFR" header, then the NvGraphicBuffer after its NativeHandle
+    /// header, as ints.
+    fn graphic_buffer(nvmap: u32, offset: u32) -> Vec<u8> {
+        let mut ints = vec![0u32; 0x51];
+        ints[0] = u32::MAX;
+        ints[1] = nvmap;
+        ints[3] = 0xdaff_caff;
+        ints[0x34 / 4] = 32;
+        ints[0x38 / 4] = 8;
+        ints[0x44 / 4] = 3;
+        ints[0x48 / 4] = 64;
+        ints[0x50 / 4] = offset;
+        let mut v = words(&[0x4742_4652, 32, 8, 32, 4, 0xb00, 42, 0, 0, 0x51]);
+        v.extend(words(&ints));
+        v
+    }
+
+    /// Frames a test's screen was shown.
+    struct Keep(Rc<RefCell<Vec<crate::display::Frame>>>);
+
+    impl crate::display::Screen for Keep {
+        fn present(&mut self, frame: &crate::display::Frame) {
+            self.0.borrow_mut().push(frame.clone());
+        }
+    }
+
+    #[test]
+    fn vi_shows_the_frames_a_layer_queues_and_frees_them_at_vsync() {
+        let mut p = setup();
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        p.screen = Some(Box::new(Keep(frames.clone())));
+        // viInitialize asks for vi:m, then vi:s, then vi:u.
+        let h = sm(&mut p);
+        for refused in [&b"vi:m"[..], b"vi:s"] {
+            assert_eq!(send(&mut p, h, &cmif(4, false, 1, &name(refused))), Ok(0));
+            assert_eq!(reply(&p, true).0, sm::result::NOT_ALLOWED);
+        }
+        let vi = open(&mut p, b"vi:u");
+        let get = |p: &mut Process, h: u64, n: u32, args: &[u8]| {
+            assert_eq!(send(p, h, &cmif(4, false, n, args)), Ok(0));
+            let (rc, moved, _) = reply(p, true);
+            (rc, moved.first().map(|&m| m as u64))
+        };
+        assert_eq!(
+            get(&mut p, vi, 0, &[1, 0, 0, 0]),
+            (vi::result::NOT_AVAILABLE, None)
+        );
+        let ads = get(&mut p, vi, 0, &[0; 4]).1.unwrap();
+        let relay = get(&mut p, ads, 100, &[]).1.unwrap();
+        assert_eq!(
+            get(&mut p, ads, 101, &[]),
+            (vi::result::NOT_AVAILABLE, None)
+        );
+        // OpenDisplay "Default", then its resolution.
+        let mut display = [0u8; 0x40];
+        display[..7].copy_from_slice(b"Default");
+        assert_eq!(send(&mut p, ads, &cmif(4, false, 1010, &display)), Ok(0));
+        assert_eq!(answer(&p, false, 8).3, 1u64.to_le_bytes());
+        let resolution = cmif(4, false, 1102, &1u64.to_le_bytes());
+        assert_eq!(send(&mut p, ads, &resolution), Ok(0));
+        assert_eq!(answer(&p, false, 16).3, words(&[1920, 0, 1080, 0]));
+        let mut external = [0u8; 0x40];
+        external[..8].copy_from_slice(b"External");
+        let e = send(&mut p, ads, &cmif(4, false, 1010, &external)).unwrap_err();
+        assert!(e.contains("unimplemented: vi display \"External\""), "{e}");
+        // OpenLayer: the layer CreateManagedDisplayLayer made, the native
+        // window through a receive buffer.
+        let (window, input, output) = (STRINGS + 0x100, STRINGS + 0x200, STRINGS + 0x600);
+        let mut args = display.to_vec();
+        args.extend(vi::LAYER_ID.to_le_bytes());
+        args.extend(PROCESS_ID.to_le_bytes());
+        let open_layer = hipc(true, &[], 2020, &args, &[], &[], &[(window, 0x100)], &[]);
+        let e = send(&mut p, ads, &open_layer).unwrap_err();
+        assert!(
+            e.contains("which the program has not made and opened"),
+            "{e}"
+        );
+        p.services.vi.layer_made = true;
+        assert_eq!(send(&mut p, ads, &open_layer), Ok(0));
+        assert_eq!(answer(&p, false, 8).3, 0x3cu64.to_le_bytes());
+        let w = p.mem.read_vec(window, 0x3c).unwrap();
+        assert_eq!(
+            u32s(&w[..0x28]),
+            [0x28, 0x10, 4, 0x38, 2, PROCESS_ID as u32, 1, 0, 0, 0]
+        );
+        assert_eq!(&w[0x28..0x30], b"dispdrv\0");
+        assert!(w[0x30..].iter().all(|&b| b == 0));
+        // SetLayerScalingMode: FitToLayer (2), padding, the layer.
+        let mut scaling = words(&[2, 0]);
+        scaling.extend(vi::LAYER_ID.to_le_bytes());
+        assert_eq!(get(&mut p, ads, 2101, &scaling), (0, None));
+        // The relay: references, then the buffer-free event.
+        assert_eq!(get(&mut p, relay, 1, &words(&[1, 1, 0])), (0, None));
+        let e = send(&mut p, relay, &cmif(4, false, 1, &words(&[2, 1, 0]))).unwrap_err();
+        assert!(e.contains("binder object 2, which is not open"), "{e}");
+        let native = cmif(4, false, 2, &words(&[1, 0x0f]));
+        assert_eq!(send(&mut p, relay, &native), Ok(0));
+        let (rc, event, _, _, _) = answer(&p, false, 0);
+        assert_eq!((rc, event.len()), (0, 1));
+        let event = event[0];
+        let signaled = |p: &Process| match p.handles.object(p.handles.get(event).unwrap().1) {
+            Object::Event { signaled } => *signaled,
+            o => panic!("{o:?}"),
+        };
+        // Transactions as TransactParcelAuto with pointers: the reply's
+        // payload.
+        let transact = |p: &mut Process, code: u32, args: &[u8]| {
+            let req = parcel(args);
+            p.mem.write_bytes(input, &req).unwrap();
+            let (x, c) = ([(input, req.len() as u64)], [(output, 0x200)]);
+            let a = words(&[1, code, 0]);
+            let msg = hipc(false, &[], 3, &a, &x, &[(0, 0)], &[(0, 0)], &c);
+            send(p, relay, &msg).map(|_| {
+                assert_eq!(answer(p, false, 0).0, 0);
+                let r = p.mem.read_vec(output, 0x200).unwrap();
+                let (size, off) = (u32s(&r[..4])[0] as usize, u32s(&r[4..8])[0] as usize);
+                r[off..off + size].to_vec()
+            })
+        };
+        // CONNECT: no listener, the CPU API, not controlled by the app.
+        let connect = words(&[0, 2, 0]);
+        assert_eq!(
+            u32s(&transact(&mut p, 10, &connect).unwrap()),
+            [1280, 720, 0, 0, 0]
+        );
+        let again = transact(&mut p, 10, &connect).unwrap();
+        assert_eq!(u32s(&again)[4] as i32, -22);
+        // Two buffers in one nvmap object, 0x400 bytes each.
+        let fb = 0x50_0000;
+        p.mem.map(fb, 0x1000, Perm::RW, "fb").unwrap();
+        p.services.nv.maps.push(Some(nv::MapObject {
+            size: 0x800,
+            addr: Some(fb),
+            align: 0x1000,
+            kind: 0,
+            refs: 1,
+        }));
+        for slot in 0..2u32 {
+            let mut args = words(&[slot, 1]);
+            args.extend(flattened(&graphic_buffer(1, slot * 0x400)));
+            assert_eq!(transact(&mut p, 14, &args), Ok(vec![]));
+        }
+        assert!(signaled(&p), "free buffers");
+        // DEQUEUE_BUFFER: the slot, an empty fence, the status.
+        let dequeue_args = words(&[1, 32, 8, 4, 0xb00]);
+        let dequeue = |p: &mut Process| transact(p, 3, &dequeue_args).map(|r| u32s(&r));
+        let mut first = vec![0, 1, 0x24, 0];
+        first.extend([0; 9]);
+        first.push(0);
+        assert_eq!(dequeue(&mut p), Ok(first));
+        // REQUEST_BUFFER: the GraphicBuffer the slot was given.
+        let mut buffer = words(&[1]);
+        buffer.extend(flattened(&graphic_buffer(1, 0)));
+        buffer.extend(words(&[0]));
+        assert_eq!(transact(&mut p, 1, &words(&[0])), Ok(buffer));
+        // Light pixel (3, 5): byte 6 of row 5, in sector 4's second row.
+        p.mem
+            .write_bytes(fb + 4 * 32 + 16 + 6, &[0xff, 0xff])
+            .unwrap();
+        // QUEUE_BUFFER: the slot and a QueueBufferInput of 0x54 bytes.
+        let mut queue = words(&[0]);
+        queue.extend(flattened(&[0; 0x54]));
+        p.cpu.retired = 1000;
+        assert_eq!(
+            u32s(&transact(&mut p, 7, &queue).unwrap()),
+            [32, 8, 0, 1, 0]
+        );
+        let shown = frames.borrow().last().cloned().unwrap();
+        assert_eq!((shown.width, shown.height), (32, 8));
+        let lit: Vec<usize> = (0..256).filter(|&i| shown.pixels[i] != 0).collect();
+        assert_eq!(lit, vec![5 * 32 + 3]);
+        assert_eq!(shown.pixels[5 * 32 + 3], 0xffffff);
+        // The second buffer, then none: WOULD_BLOCK, the event clear.
+        assert_eq!(dequeue(&mut p).unwrap()[0], 1);
+        assert_eq!(dequeue(&mut p), Ok(vec![u32::MAX, 0, -11i32 as u32]));
+        assert!(!signaled(&p));
+        queue[0] = 1;
+        let pending = u32s(&transact(&mut p, 7, &queue).unwrap())[3];
+        assert_eq!(pending, 2);
+        // The thread waits on the event: the clock goes to the vsync that
+        // frees the buffers, and the wait ends.
+        let list = STRINGS + 0xf00;
+        p.mem.write_bytes(list, &event.to_le_bytes()).unwrap();
+        let wait = [0, list, 1, u64::MAX];
+        svc(&mut p, nr::WAIT_SYNCHRONIZATION, &wait);
+        // The wake-up wrote the result and the index.
+        assert_eq!((p.cpu.x[0], p.cpu.x[1]), (0, 0));
+        assert_eq!(p.cpu.retired, vi::VSYNC_PERIOD);
+        assert_eq!(frames.borrow().len(), 2);
+        // Freed oldest first; CANCEL_BUFFER frees a dequeued buffer.
+        assert_eq!(dequeue(&mut p).unwrap()[0], 0);
+        let mut cancel = words(&[0]);
+        cancel.extend(flattened(&[0; 0x24]));
+        assert_eq!(transact(&mut p, 8, &cancel), Ok(vec![]));
+        assert_eq!(dequeue(&mut p).unwrap()[0], 1);
+        // DISCONNECT forgets the buffers.
+        assert_eq!(transact(&mut p, 11, &words(&[2])), Ok(words(&[0])));
+        assert_eq!(dequeue(&mut p).unwrap()[2] as i32, -11);
+        // What kestrel does not know stops.
+        let e = transact(&mut p, 9, &words(&[0])).unwrap_err();
+        assert!(
+            e.contains("unimplemented: IGraphicBufferProducer transaction 9"),
+            "{e}"
+        );
+        let mut bad = parcel(&[]);
+        bad[0x10 + 8] = b'X';
+        p.mem.write_bytes(input, &bad).unwrap();
+        let (x, c) = ([(input, bad.len() as u64)], [(output, 0x200)]);
+        let msg = hipc(
+            false,
+            &[],
+            3,
+            &words(&[1, 10, 0]),
+            &x,
+            &[(0, 0)],
+            &[(0, 0)],
+            &c,
+        );
+        let e = send(&mut p, relay, &msg).unwrap_err();
+        assert!(e.contains("a binder transaction for \"Xndroid.gui"), "{e}");
+        // TransactParcel (0) takes mapped buffers.
+        let req = parcel(&connect);
+        p.mem.write_bytes(input, &req).unwrap();
+        let (a, b) = ([(input, req.len() as u64)], [(output, 0x200)]);
+        let msg = hipc(false, &[], 0, &words(&[1, 10, 0]), &[], &a, &b, &[]);
+        assert_eq!(send(&mut p, relay, &msg), Ok(0));
+        let r = p.mem.read_vec(output, 0x24).unwrap();
+        assert_eq!(u32s(&r), [0x14, 0x10, 0, 0x24, 1280, 720, 0, 0, 0]);
     }
 
     /// A fresh, empty folder for one test's SD card.

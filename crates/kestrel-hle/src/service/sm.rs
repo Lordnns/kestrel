@@ -9,7 +9,14 @@ use crate::Process;
 pub mod result {
     pub const INVALID_CLIENT: u32 = 0x415;
     pub const INVALID_SERVICE_NAME: u32 = 0xc15;
+    pub const NOT_ALLOWED: u32 = 0x1015;
 }
+
+/// Services that exist on the console but that an application may not
+/// open, so sm: refuses them with NotAllowed (kestrel's choice of list).
+/// libnx asks for these first and falls back: viInitialize tries vi:m,
+/// then vi:s, then vi:u.
+const NOT_ALLOWED: &[&str] = &["vi:m", "vi:s"];
 
 impl Process {
     /// RegisterClient (0) takes the process ID descriptor; GetServiceHandle
@@ -37,6 +44,9 @@ impl Process {
                 };
                 match SERVICES.iter().find(|(n, _)| *n == name) {
                     Some(&(_, interface)) => Ok(Out::object(interface)),
+                    None if NOT_ALLOWED.contains(&name.as_str()) => {
+                        Ok(Out::error(result::NOT_ALLOWED))
+                    }
                     None => Err(IpcError::Unimplemented(format!("service \"{name}\""))),
                 }
             }

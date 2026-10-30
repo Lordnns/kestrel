@@ -93,6 +93,12 @@ impl Process {
             (SelfController, 11 | 12 | 16) => call.u8(0).and_then(|_| ok()),
             // SetFocusHandlingMode: three u8 flags.
             (SelfController, 13) => call.arg::<3>(0).and_then(|_| ok()),
+            // CreateManagedDisplayLayer: the layer the program then opens
+            // with vi's OpenLayer.
+            (SelfController, 40) => {
+                self.services.vi.layer_made = true;
+                Ok(Out::ok(super::vi::LAYER_ID.to_le_bytes().to_vec()))
+            }
             (SelfController, 91) => Ok(self.event_handle(|s| &mut s.suspended_tick_event)),
             // GetAppletResourceUserId: the process ID, kestrel's choice.
             (WindowController, 1) => Ok(Out::ok(PROCESS_ID.to_le_bytes().to_vec())),

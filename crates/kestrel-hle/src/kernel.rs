@@ -266,6 +266,18 @@ impl Process {
         Ok(())
     }
 
+    /// Set the event a service keeps, `id`, signaled or not, waking its
+    /// waiters when signaled.
+    pub(crate) fn set_event(&mut self, id: ObjectId, signaled: bool) {
+        match self.handles.object_mut(id) {
+            Object::Event { signaled: s } => *s = signaled,
+            o => unreachable!("an event ID names {o:?}"),
+        }
+        if signaled {
+            self.wake_object_waiters();
+        }
+    }
+
     /// svcClearEvent: either side clears.
     pub fn clear_event(&mut self, h: u64) -> Result<(), u64> {
         *self.event(h, &[Kind::WritableEvent, Kind::ReadableEvent])? = false;

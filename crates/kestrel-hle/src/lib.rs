@@ -8,6 +8,7 @@
 //! Switchbrew's "SVC" page). Behaviour is implemented from that public
 //! documentation and from observing homebrew, never from console firmware.
 
+pub mod display;
 pub mod homebrew;
 pub mod input;
 pub mod ipc;
@@ -150,6 +151,8 @@ pub struct Process {
     pub input: Option<Box<dyn input::Source>>,
     /// Set by the frontend to stop the program (its window closed).
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Where the frames the program queues go: the window, or a test.
+    pub screen: Option<Box<dyn display::Screen>>,
     /// Set by the frontend when someone is using the program (its window
     /// is open): the time every thread sleeps through also passes on the
     /// host, instead of being skipped.
@@ -197,6 +200,7 @@ impl Process {
             log: Vec::new(),
             input: None,
             interrupt: None,
+            screen: None,
             realtime: false,
             svc_count: 0,
         };
@@ -274,6 +278,7 @@ impl Process {
             // After any wait, so the controller is read when the program
             // wakes.
             self.hid_tick();
+            self.vsync_tick();
             let budget = (max_steps - used).min(self.sched.slice_left);
             let before = self.cpu.retired;
             let exit = backend.run(&mut self.cpu, &mut self.mem, budget);

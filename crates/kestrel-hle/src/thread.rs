@@ -15,7 +15,8 @@
 //!   spinning on one core cannot starve the others.
 //! - One process-wide clock counts guest instructions as ticks of the
 //!   documented 19.2 MHz counter ("SVC", GetSystemTick). When every live
-//!   thread sleeps, the clock jumps to the earliest wake-up. With
+//!   thread sleeps, the clock jumps to the earliest wake-up, or to the
+//!   next vsync that frees a buffer the program queued. With
 //!   `Process::realtime` (a window is open) the run loop then waits that
 //!   time out on the host, so a sleeping program sleeps for real.
 
@@ -502,6 +503,9 @@ impl Process {
     /// skips idle time. Stops the process when no thread is left to run.
     pub(crate) fn schedule(&mut self, rotate: bool) -> Option<Stop> {
         loop {
+            // The display frees queued buffers at vsync, which may wake
+            // a thread waiting for one.
+            self.vsync_tick();
             let now = self.cpu.retired;
             for i in 0..self.sched.threads.len() {
                 match self.sched.threads[i].state {
@@ -545,6 +549,7 @@ impl Process {
                     }
                     _ => None,
                 })
+                .chain(self.services.vi.next_release())
                 .min();
             match wake {
                 Some(until) => {
