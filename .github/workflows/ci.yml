@@ -24,7 +24,7 @@ jobs:
           - { name: "macOS aarch64",  os: macos-14 }
           - { name: "macOS x86_64",   os: macos-15-intel }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -47,7 +47,7 @@ jobs:
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
@@ -60,7 +60,7 @@ jobs:
     name: Guest programs rebuild and still pass
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Expected output matches the independent Python model
         run: python3 scripts/gen-expected.py --check
       - uses: dtolnay/rust-toolchain@stable
@@ -84,7 +84,7 @@ jobs:
           - { name: "Linux aarch64", os: ubuntu-24.04-arm }
           - { name: "macOS aarch64", os: macos-14 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang
       - run: clang --version
