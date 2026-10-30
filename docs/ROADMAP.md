@@ -726,10 +726,35 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. Host input into hid's shared memory, with the frontend (a window and
-   keyboard or gamepad). There is no window yet: ask the owner which way
-   the frontend should go (a windowing library, or a console-only input
-   path first) before starting.
+1. Host input with a window, in progress. The owner's decisions
+   (2026-10-30):
+   - dependencies: winit, softbuffer and gilrs, in kestrel-cli only;
+   - the window opens by default for an NRO, `--headless` skips it;
+   - this task covers one emulated controller, a Pro Controller as player
+     1 or the handheld Joy-Con, chosen in a settings file;
+   - keyboard and any gamepad map onto it.
+
+   Later tasks: the other NpadStyleTag controllers (GameCube,
+   NES/SNES/N64/Genesis), several players, and real Joy-Con motion,
+   rumble and pairing. A Wii Remote is not a Switch controller type; it
+   can only be mapped as a host gamepad.
+
+   Done: hid samples a `kestrel_hle::input::Source` into its shared memory
+   (90c5b80); `hbinput` and ScriptedPad (4d59739).
+
+   Left:
+   - `window.rs` in kestrel-cli behind a default `window` feature. The
+     winit event loop runs on the main thread; the Process is created and
+     run on a worker thread (it is not Send). An `Arc<Mutex<Pad>>` feeds a
+     Source. Closing the window sets `Process::interrupt`. softbuffer
+     paints a plain background. gilrs is polled about every 4 ms.
+   - `user/config/input.cfg`, written with defaults when missing:
+     `controller = pro|handheld`, and per button `key:<winit KeyCode
+     name>` and `pad:<gilrs Button name>` lists. The gamepad sticks map to
+     the two sticks.
+   - CI and release: `libudev-dev` (and pkg-config) on the Linux jobs.
+     The cross + qemu job builds with `--no-default-features`.
+   - Docs: these phase 2 notes, README (window, mapping), ARCHITECTURE.
 2. Phase 2 acceptance (`PLAN.md`): the standard homebrew examples (hello
    world, input, file I/O, threads) built from source with the public
    libnx toolchain in CI, run on all five platforms. Building them shows
