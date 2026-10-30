@@ -41,7 +41,7 @@ cargo run --release -p kestrel-cli -- selftest
 
 ## Self-test and test programs
 
-`kestrel selftest` runs twelve ARM64 programs compiled into the binary and
+`kestrel selftest` runs thirteen ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
 by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
 nothing but the executable. Each integer C program is in the suite twice:
@@ -57,6 +57,7 @@ built integer-only, and built with floating point and NEON allowed
 | `algos`      | recursion, CRC32, prime sieve, heap allocation, sort            |
 | `sha256`     | SHA-256 of three inputs (about 6.5M guest instructions)         |
 | `fp`         | 127 scalar FP operations printed as bit patterns: NaN rules, flush-to-zero, default NaN, FPCR rounding modes |
+| `intrinsics` | 168 NEON intrinsics across every instruction class, including structure loads and stores |
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 

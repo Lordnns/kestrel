@@ -223,6 +223,59 @@ def fp():
     return "".join(lines)
 
 
+def intrinsics():
+    """guest/src/intrinsics.c: model each T/TS line's assembly with the lane
+    models of gen-neon-vectors.py, on the program's own input vectors."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("neonmodel", ROOT / "scripts" / "gen-neon-vectors.py")
+    nm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nm)
+    text = (SRC / "intrinsics.c").read_text()
+    body = re.search(r"IN\[14\]\[2\] = \{(.*?)\};", text, re.S).group(1)
+    pairs = re.findall(r"\{(0x[0-9a-f]+), (0x[0-9a-f]+)\}", body)
+    vin = [int(lo, 16) | int(hi, 16) << 64 for lo, hi in pairs]
+    x3 = int(re.search(r"X3 = (0x[0-9a-f]+);", text).group(1), 16)
+    mem = b"".join(v.to_bytes(16, "little") for v in vin)
+
+    def chunks(data):
+        return "".join(" " + data[k:k + 16][::-1].hex() for k in range(0, len(data), 16))
+
+    lines = []
+    tests = re.findall(r'^\s*(TS?)\("([^"]+)", (\d+), (\d+), (\d+),', text, re.M)
+    for n, (macro, asm, p1, p2, p3) in enumerate(tests):
+        st = nm.State(0)
+        nm.ST = st
+        st.x[3] = x3
+        if macro == "TS":
+            a, b, size = int(p1), int(p2), int(p3)
+            st.v[1:5] = [vin[a], vin[b], vin[(b + 1) % 14], vin[(b + 2) % 14]]
+            st.mem = bytearray(len(st.mem))
+            nm.model(asm)
+            data = bytes(st.mem[:size])
+        else:
+            d, a, b = int(p1), int(p2), int(p3)
+            st.v[0:5] = [vin[d], vin[a], vin[b], vin[(b + 1) % 14], vin[(b + 2) % 14]]
+            st.mem[: len(mem)] = mem
+            st.x[1] = nm.MEM_BASE + 16 * a
+            nm.model(asm)
+            first = asm.split(" ", 1)[1].split(",")[0].strip()
+            if asm.startswith("ld"):
+                regs = [int(r) for r in re.findall(r"v(\d+)", asm.split("}")[0])]
+                data = b"".join(st.v[r].to_bytes(16, "little") for r in regs)
+            else:
+                m = re.match(r"v\d+\.(\d+)([bhsd])", first)
+                if m:
+                    size = 8 if m.group(1) + m.group(2) in ("8b", "4h", "2s", "1d") else 16
+                elif first[0] == "v":
+                    size = 16  # an element insert keeps the whole register
+                else:
+                    size = {"b": 1, "h": 2, "s": 4, "d": 8}[first[0]]
+                data = st.v[0].to_bytes(16, "little")[:size]
+        lines.append(f"{n:03} {asm} ={chunks(data)}\n")
+    return "".join(lines)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -231,6 +284,7 @@ PROGRAMS = {
     "algos": algos,
     "sha256": sha256,
     "fp": fp,
+    "intrinsics": intrinsics,
 }
 
 
