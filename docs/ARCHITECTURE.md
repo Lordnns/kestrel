@@ -129,7 +129,9 @@ method; the methods live next to the state they change:
   port, service or command kestrel does not implement stops the process
   with its name and number. `kestrel_hle::firmware` holds the system
   version every service answers as, and the time the clocks start at and
-  the time zone.
+  the time zone. Sessions cloned from a domain session share the domain.
+  The SD card is a host folder the frontend chooses (`fs::State::sd`);
+  fsp-srv checks every path so none leads outside it.
 
 ### Scheduling
 

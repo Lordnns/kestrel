@@ -55,8 +55,8 @@ qemu for Linux ARM64.
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
-| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; self-test programs `hbapplet`, `hbhid`, `hbtime`. Not yet: fsp-srv, power state, logging |
-| SD folder option, unimplemented-call log | not started | unknown SVCs, ports, services and commands stop with their name and number |
+| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`. Not yet: power state, logging |
+| SD folder option, unimplemented-call log | SD folder done; log not started | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, ports, services and commands stop with their name and number |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
 ### Phase 3: Native execution on ARM hosts: **not started**
@@ -196,7 +196,9 @@ Gaps:
 
 - Not provided yet: SyscallAvailableHint, OverrideHeap and the other
   optional keys.
-- argv[0] becomes an `sdmc:/` path once the SD folder option exists.
+- argv[0] is the program's file name, not an `sdmc:/` path as hbmenu
+  passes it, so libnx's __libnx_init_cwd leaves the working directory at
+  the card's root.
 - An argument containing a double quote is refused, because the argument
   string cannot carry it.
 - Compressed NROs (a newer system feature) stop as unsupported.
@@ -433,12 +435,13 @@ Gaps:
 - Stop as unsupported: other named ports; sm: RegisterService,
   UnregisterService and DetachClient (guest servers need server sessions
   and svcReplyAndReceive); CMIF control requests other than
-  ConvertCurrentObjectToDomain (cloning, QueryPointerBufferSize, and any
-  on a domain); domain objects as arguments; legacy command types 1 and 3;
-  moved handles in requests; receive list modes 1 and 2 and explicit
-  receive list offsets.
-- Services write output through receive list (C) buffers; none reads or
-  writes through the A, B, W or X descriptors yet.
+  ConvertCurrentObjectToDomain and CloneCurrentObject
+  (CopyFromCurrentDomain, QueryPointerBufferSize, CloneCurrentObjectEx,
+  and converting a domain again); domain objects as arguments; legacy
+  command types 1 and 3; moved handles in requests; receive list modes 1
+  and 2 and explicit receive list offsets.
+- Services read pointer (X) and send (A) buffers and write receive list
+  (C) and receive (B) buffers; none uses exchange (W) buffers yet.
 - Switchbrew notes that on Switch 2 every error from the SendSyncRequest
   calls closes the session (`docs/SWITCH2_NOTES.md`); not modelled.
 
@@ -573,6 +576,77 @@ Gaps:
   the location, time:a, time:r and every other time command. A zone with
   daylight saving time would need the TZif rule format and zone data.
 
+File system, from Switchbrew's "Filesystem services" (fsp-srv,
+IFileSystem, IFile, IDirectory, DirectoryEntry, OpenFile's mode bits),
+"HIPC" (CloneCurrentObject) and "Error codes" (module 2), and the
+requests libnx's fsInitialize, fsdevMountSdmc and "sdmc:" device send
+(`fs.c`, `fs_dev.c`, `sessionmgr.c`), in `hle/service/fs.rs`.
+
+fsInitialize makes fsp-srv a domain and clones the session twice, then
+sends requests for the domain's objects over any of the three. So
+CloneCurrentObject hands out a new session to the same object, and a
+clone of a domain session shares its domain (`service::Domain`, shared
+and reference-counted). A domain's objects go when the last of its
+sessions closes.
+
+The owner chose where the card is, as Dolphin's portable mode keeps its
+user folder: `user/sdmc` next to the kestrel executable, made on first
+use, or the folder `--sd` names. Writes reach the folder. Games load from
+any path; a games directory setting comes with the frontend. The
+self-test gives each homebrew program a new empty folder in the system's
+temporary directory.
+
+| Command | Behaviour |
+|---------|-----------|
+| fsp-srv SetCurrentProcess (1) | needs the process ID |
+| fsp-srv OpenSdCardFileSystem (18) | the card's IFileSystem; with no folder, PortSdCardNoDevice 0xfa202 |
+| IFileSystem CreateFile (0), DeleteFile (1), CreateDirectory (2), DeleteDirectory (3), DeleteDirectoryRecursively (4), CleanDirectoryRecursively (13) | on the folder |
+| IFileSystem RenameFile (5), RenameDirectory (6) | the two paths in pointer buffers 0 and 1 |
+| IFileSystem GetEntryType (7) | 0 directory, 1 file |
+| IFileSystem OpenFile (8), OpenDirectory (9) | an IFile with its mode; an IDirectory with its filter |
+| IFileSystem Commit (10) | nothing to do |
+| IFileSystem GetFileTimeStampRaw (14) | all zero (no timestamps), so runs repeat |
+| IFile Read (0), Write (1), Flush (2), SetSize (3), GetSize (4) | through receive (B) and send (A) buffers |
+| IDirectory Read (0), GetEntryCount (1) | DirectoryEntry records |
+
+Paths are UTF-8 in a 0x301-byte pointer buffer and start with '/'.
+Kestrel checks them the same way on every host and never follows a host
+link, so no path leads outside the folder.
+
+Gaps:
+
+- Where Switchbrew lists a result but not when it applies, kestrel chose:
+  no NUL is TooLongPath; not UTF-8, a control character, one of
+  `\ : * ? " < > |`, a name ending in '.' or ' ', or a Windows device
+  name is InvalidCharacter; no leading '/' is InvalidPathFormat; an
+  empty, "." or ".." component is NotNormalized; a missing entry, the
+  wrong kind of entry or a path through a file is PathNotFound; an
+  existing one is PathAlreadyExists; deleting or renaming an open file,
+  or a directory with something open in it, is TargetLocked; a negative
+  offset is InvalidOffset and a negative size InvalidSize.
+- Kestrel's other choices: a host link, or a path through one, hides what
+  it points at (creating there is PathAlreadyExists, anything else
+  PathNotFound, listings leave it out); reading at or past the end reads
+  0 bytes; a directory lists in name order, read when it is opened;
+  GetEntryCount counts every entry, read or not; the archive bit is never
+  set; SetSize needs the write bit.
+- Stop, as Switchbrew gives no result for them: a command the open mode
+  does not allow (only the range 6200-6299, InvalidOperationForOpenMode,
+  is listed); deleting a directory that is not empty; renaming a
+  directory into itself; deleting the root. Also stop: OpenFile modes
+  other than read, write and append (append needs write), OpenDirectory
+  filters other than bits 0 and 1, CreateFile options (concatenation
+  files), and read or write options other than write's flush bit.
+- Not implemented: free and total space (11, 12), QueryEntry, OperateRange,
+  the other file systems (save data, RomFS, BIS), and every other fsp-srv
+  command. Host errors (a full disk, permissions) stop with the host's
+  message.
+- The SD card's FAT file system ignores case; Windows and macOS folders
+  do too, Linux folders do not, so a program that mixes cases can see a
+  difference there.
+- OpenSdCardFileSystem before SetCurrentProcess stops (kestrel's choice):
+  the file system does not know the process yet.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
@@ -581,17 +655,9 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. `fsp-srv` with the SD folder option: OpenSdCardFileSystem, files and
-   directories over a host folder, through A and B buffers. libnx's
-   `__appInit` calls fsInitialize right after the time service, then
-   fsdevMountSdmc.
-2. Power state and logging, then the unimplemented-call log.
-3. Host input into hid's shared memory, with the frontend (window and
+1. Power state and logging, then the unimplemented-call log.
+2. Host input into hid's shared memory, with the frontend (window and
    keyboard or gamepad), once there is one.
-
-Before starting fsp-srv, ask the owner how the SD folder is chosen (a
-command-line option, a default folder, or both) and whether writes reach
-the host folder or stay in memory.
 
 Each service so far followed the same steps; keep them:
 
