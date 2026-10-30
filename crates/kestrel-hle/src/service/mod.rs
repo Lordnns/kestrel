@@ -2267,6 +2267,11 @@ mod tests {
         put(&mut p, BUF, "/d");
         let (rc, _, objects) = call(&mut p, sdfs, 9, &3u64.to_le_bytes(), &x1, &[], &[], 0);
         assert_eq!(rc, 0);
+        // libnx sends the filter as a u32.
+        let (rc, _, libnx) = call(&mut p, sdfs, 9, &3u32.to_le_bytes(), &x1, &[], &[], 0);
+        assert_eq!((rc, libnx.len()), (0, 1));
+        let close = words(&[4, 8, 0, 0, 2, libnx[0], 0, 0]);
+        assert_eq!(send(&mut p, c, &close), Ok(0));
         let dir = objects[0];
         assert_eq!(
             call(&mut p, dir, 1, &[], &[], &[], &[], 8).1,

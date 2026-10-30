@@ -495,11 +495,13 @@ impl Process {
                 );
                 Ok(Out::object(Interface::File(id)))
             }
-            // OpenDirectory: a u64 filter, bit 0 directories, bit 1 files.
+            // OpenDirectory: a filter, bit 0 directories, bit 1 files.
+            // Switchbrew calls it a u64, but libnx's fsFsOpenDirectory sends
+            // a u32 and works on consoles, so only the low 32 bits count.
             // The entries are read when it opens, in name order (kestrel's
             // choice: host folders list in different orders).
             9 => {
-                let filter = call.u64(0)?;
+                let filter = u32::from_le_bytes(call.arg(0)?) as u64;
                 if filter == 0 || filter & !3 != 0 {
                     return Err(stop(format!(
                         "IFileSystem OpenDirectory with filter {filter:#x}"
