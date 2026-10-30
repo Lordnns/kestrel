@@ -39,8 +39,8 @@ qemu for Linux ARM64.
 | Task | Status | Evidence |
 |------|--------|----------|
 | 1A Scalar floating point | done, with the gaps below | `float.rs` (Arm pseudocode) + `interp/fp.rs`; 13 test groups in `interp/fp_tests.rs`; a compiler-generated FP smoke program matches x86 host results bit for bit |
-| 1B NEON | partial | only FMOV general, DUP/INS/UMOV, vector logic, MOVI/MVNI (`simd.rs`); first gaps `cmgt`, `ld4` (see probe above) |
-| 1C Phase 1 tests | not started | guests built with `-mgeneral-regs-only`; no FP or NEON test program |
+| 1B NEON | done, with the gaps below | `interp/neon/` (integer, floating point, permutes, structure loads and stores); 430 generated cases in `neon_vectors.rs`; every C test program built with NEON at `-O2` and `-O3` matches the expected output |
+| 1C Phase 1 tests | not started | committed guests still built with `-mgeneral-regs-only`; no FP or NEON test program in the suite |
 | 1D Real-hardware oracle | not started | no host build mode for `guest/src` |
 
 ### Phase 2: Homebrew: **not started**
@@ -118,7 +118,43 @@ Expected values: hand-worked from the Arm pseudocode (NaN rules, FZ, the
 estimates) or IEEE results from Python; a check against real ARM hardware
 is task 1D.
 
+### Phase 1B notes
+
+Implemented, vector and scalar forms: three same (integer, logic, floating
+point, pairwise), three same extra (SQRDMLAH, SQRDMLSH), two-register misc
+(integer and floating point, including FCVTN/FCVTL/FCVTXN, URECPE,
+URSQRTE), three different (long, wide, narrowing high half, doubling,
+PMULL 8-bit), across lanes, scalar pairwise, shift by immediate (including
+accumulate, rounding, insert, narrowing, widening and fixed-point
+conversion), by element (integer and floating point), copies (DUP, INS,
+UMOV, SMOV), permutes (UZP, TRN, ZIP), EXT, TBL/TBX, the whole
+modified-immediate group (MOVI, MVNI, ORR, BIC, FMOV), and LD1-LD4 /
+ST1-ST4 (multiple structures, single lane, replicate, both post-index
+forms). Saturation sets FPSR.QC. Floating-point lanes go through the same
+`float.rs` functions as the scalar instructions.
+
+Tests: `scripts/gen-neon-vectors.py` assembles each case with clang and
+computes the expected registers, QC and memory with its own Python models of
+the Arm ARM descriptions (exact fractions for floating point); CI checks the
+generated file is current. Independently of those models, the five C test
+programs built with NEON allowed (`-O2` and `-O3`, clang 21) give the
+expected output, using among others `cmgt`, `ld4`, `ushll`, `shll`, `xtn`,
+`uzp1`, `umaxv`, `dup` and `movi`. A check against real ARM hardware is task
+1D.
+
+Remaining gaps:
+
+- Half precision stops as `Exit::Unsupported` (per the plan's provision).
+- Not implemented, so they stop as undefined: the crypto extension (AES,
+  SHA, 64-bit PMULL; the plan adds them only when a program needs them),
+  DotProd (SDOT, UDOT; optional in Armv8.2), and the Armv8.3+ complex,
+  BFloat16 and Int8 matrix forms.
+- As for scalar FP: directed FPCR rounding for host-computed lanes is
+  reported as unsupported, and FPSR exception flags other than QC are not
+  set.
+
 ## Next task
 
-Phase 1B, NEON. First gaps hit by compiled code: `cmgt v3.2d` (`4ee63463`),
-`ld4 {v0.16b-v3.16b}` (`4c400100`), vector `fmov v1.2d, #imm` (`6f03f601`).
+Phase 1C, Phase 1 tests: build every C test program a second time with NEON
+enabled into the embedded suite, add a floating-point program that prints
+exact bit patterns, and a NEON intrinsics program.

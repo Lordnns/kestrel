@@ -1,5 +1,6 @@
 //! Loads and stores: single registers (all addressing modes), pairs,
 //! literals, exclusives/acquire-release, compare-and-swap and LSE atomics.
+//! Advanced SIMD structure loads and stores are in `neon/mem.rs`.
 
 use super::bits::*;
 use super::{Ctx, Flow, Step};
@@ -30,6 +31,8 @@ pub fn exec(c: &mut Ctx) -> Step {
                 Err(c.undef())
             }
         }
+        // Advanced SIMD structures: LD1-LD4, ST1-ST4, LD1R-LD4R.
+        0b001 if bit(i, 26) && !bit(i, 25) && !bit(i, 31) => super::neon::load_store(c),
         _ => Err(c.undef()),
     }
 }

@@ -290,29 +290,3 @@ fn fmov_general(c: &mut Ctx) -> Step {
     }
     Ok(Flow::Next)
 }
-
-/// Scalar forms of the reciprocal helpers in the Advanced SIMD scalar
-/// groups: FRECPE, FRSQRTE, FRECPX (two-register misc) and FRECPS, FRSQRTS
-/// (three same). Bits 31..30 = 0b01, bits 28..24 = 0b11110.
-#[inline(never)]
-pub fn scalar_simd(c: &mut Ctx) -> Step {
-    let i = c.insn;
-    let f = if bit(i, 22) { Fmt::D } else { Fmt::S };
-    let u = bit(i, 29);
-    let (x, fpcr) = (read(c, rn(c), f), fpcr(c));
-    let r = if field(i, 21, 17) == 0b10000 && field(i, 11, 10) == 0b10 && bit(i, 23) {
-        match (u, field(i, 16, 12)) {
-            (false, 0b11101) => float::recip_estimate(x, f, fpcr),
-            (true, 0b11101) => float::rsqrt_estimate(x, f, fpcr),
-            (false, 0b11111) => float::recpx(x, f, fpcr),
-            _ => return Err(c.undef()),
-        }
-    } else if bit(i, 21) && bit(i, 10) && field(i, 15, 11) == 0b11111 && !u {
-        let y = read(c, rm(c), f);
-        float::recip_step(x, y, f, fpcr, bit(i, 23)).map_err(|what| c.unsupported(what))?
-    } else {
-        return Err(c.undef());
-    };
-    write(c, rd(c), r);
-    Ok(Flow::Next)
-}

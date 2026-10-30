@@ -119,6 +119,8 @@ pub enum Rounding {
     NegInf,
     Zero,
     TieAway,
+    /// Round to odd (FCVTXN only; FPCR cannot select it).
+    ToOdd,
 }
 
 impl Rounding {
@@ -406,6 +408,38 @@ pub fn compare(a: u64, b: u64, f: Fmt, fpcr: Fpcr) -> u64 {
     nzcv << 28
 }
 
+/// FPCompareEQ, FPCompareGE and FPCompareGT: false whenever a NaN is involved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cmp {
+    Eq,
+    Ge,
+    Gt,
+}
+
+/// The vector compares (FCMEQ, FCMGE, FCMGT and their #0 and absolute forms).
+pub fn compare_cond(a: u64, b: u64, f: Fmt, fpcr: Fpcr, cmp: Cmp) -> bool {
+    let nzcv = compare(a, b, f, fpcr) >> 28;
+    match cmp {
+        Cmp::Eq => nzcv == 0b0110,
+        Cmp::Ge => nzcv == 0b0110 || nzcv == 0b0010,
+        Cmp::Gt => nzcv == 0b0010,
+    }
+}
+
+/// FPMulX (FMULX): FPMul, except that infinity times zero gives 2.0 with the
+/// sign of the product.
+pub fn mulx(a: u64, b: u64, f: Fmt, fpcr: Fpcr) -> Result<u64, Unsupported> {
+    let (ka, ua) = unpack(a, f, fpcr);
+    let (kb, ub) = unpack(b, f, fpcr);
+    if let Some(n) = process_nans(&[(ka, ua), (kb, ub)], f, fpcr) {
+        return Ok(n);
+    }
+    if (ka == Kind::Inf && kb == Kind::Zero) || (ka == Kind::Zero && kb == Kind::Inf) {
+        return Ok(((ua ^ ub) & f.sign()) | f.host_bits(2.0));
+    }
+    arith(Op2::Mul, a, b, f, fpcr)
+}
+
 /// A finite, non-zero value as (negative, significand, exponent), where the
 /// value is significand * 2^exponent.
 fn decompose(x: u64, f: Fmt) -> (bool, u64, i32) {
@@ -463,6 +497,8 @@ fn round_mag(int: u128, frac: Frac, neg: bool, rounding: Rounding) -> u128 {
         Rounding::Zero => false,
         Rounding::PosInf => frac != Frac::Zero && !neg,
         Rounding::NegInf => frac != Frac::Zero && neg,
+        // Jamming: an inexact result gets its last bit set, so it never carries.
+        Rounding::ToOdd => return int | (frac != Frac::Zero) as u128,
     };
     int + up as u128
 }
@@ -492,7 +528,7 @@ fn round(neg: bool, mant: u128, exp: i32, f: Fmt, rounding: Rounding, fz: bool) 
             Rounding::TieEven | Rounding::TieAway => true,
             Rounding::PosInf => !neg,
             Rounding::NegInf => neg,
-            Rounding::Zero => false,
+            Rounding::Zero | Rounding::ToOdd => false,
         };
         return if to_inf {
             f.inf(neg)
@@ -588,8 +624,13 @@ pub fn round_int(x: u64, f: Fmt, fpcr: Fpcr, rounding: Rounding) -> u64 {
     }
 }
 
-/// FPConvert between single and double precision.
+/// FPConvert between single and double precision, rounded by FPCR.
 pub fn convert(x: u64, from: Fmt, to: Fmt, fpcr: Fpcr) -> u64 {
+    convert_rounded(x, from, to, fpcr, fpcr.rmode)
+}
+
+/// FPConvert with an explicit rounding mode (FCVTXN rounds to odd).
+pub fn convert_rounded(x: u64, from: Fmt, to: Fmt, fpcr: Fpcr, rounding: Rounding) -> u64 {
     let (k, x) = unpack(x, from, fpcr);
     let neg = x & from.sign() != 0;
     match k {
@@ -609,7 +650,7 @@ pub fn convert(x: u64, from: Fmt, to: Fmt, fpcr: Fpcr) -> u64 {
         Kind::Zero => to.zero(neg),
         Kind::Finite => {
             let (_, m, e) = decompose(x, from);
-            round(neg, m as u128, e, to, fpcr.rmode, fpcr.fz)
+            round(neg, m as u128, e, to, rounding, fpcr.fz)
         }
     }
 }
@@ -665,6 +706,23 @@ fn rsqrt_estimate_int(a: u32) -> u32 {
     b.div_ceil(2) as u32
 }
 
+/// UnsignedRecipEstimate (URECPE): `x` is an unsigned fixed-point value in
+/// [0, 1) with 32 fraction bits.
+pub fn unsigned_recip_estimate(x: u32) -> u32 {
+    if x >> 31 == 0 {
+        return u32::MAX;
+    }
+    (recip_estimate_int(x >> 23) & 0x1ff) << 23
+}
+
+/// UnsignedRSqrtEstimate (URSQRTE).
+pub fn unsigned_rsqrt_estimate(x: u32) -> u32 {
+    if x >> 30 == 0 {
+        return u32::MAX;
+    }
+    (rsqrt_estimate_int(x >> 23) & 0x1ff) << 23
+}
+
 /// FPRecipEstimate (FRECPE).
 pub fn recip_estimate(x: u64, f: Fmt, fpcr: Fpcr) -> u64 {
     let (k, _) = unpack(x, f, fpcr);
@@ -686,7 +744,7 @@ pub fn recip_estimate(x: u64, f: Fmt, fpcr: Fpcr) -> u64 {
             Rounding::TieEven | Rounding::TieAway => true,
             Rounding::PosInf => !neg,
             Rounding::NegInf => neg,
-            Rounding::Zero => false,
+            Rounding::Zero | Rounding::ToOdd => false,
         };
         return if to_inf {
             f.inf(neg)

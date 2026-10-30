@@ -250,14 +250,14 @@ fn unsupported_system_instructions_are_reported() {
 
 #[test]
 fn unknown_encoding_is_reported() {
-    // add v0.4s, v1.4s, v2.4s (NEON integer arithmetic is not implemented yet)
-    let (mut s, mut m) = setup(&[0x4ea28420]);
+    // aese v0.16b, v1.16b (the crypto extension is not implemented)
+    let (mut s, mut m) = setup(&[0x4e284820]);
     let exit = Interpreter::new().run(&mut s, &mut m, 10);
     assert_eq!(
         exit,
         Exit::Undefined {
             pc: CODE,
-            insn: 0x4ea28420
+            insn: 0x4e284820
         }
     );
 }
