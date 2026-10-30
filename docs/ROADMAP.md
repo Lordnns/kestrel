@@ -53,7 +53,7 @@ qemu for Linux ARM64.
 | Memory SVCs | done, with the gaps below | `hle/memory.rs`: memory types per mapping, svcQueryMemory, svcSetHeapSize in place with its checks, svcSetMemoryPermission, svcSetMemoryAttribute, svcMapMemory/svcUnmapMemory, svcMapPhysicalMemory/svcUnmapPhysicalMemory; `Memory` range operations in `kestrel-core`; self-test program `hbmemory` |
 | Handle table and kernel objects | done, with the gaps below | `hle/kernel.rs`: per-process handle table, objects alive while a handle names them; svcCloseHandle, svcGetThreadId, svcGetProcessId, svcCreateEvent, svcSignalEvent, svcClearEvent, svcResetSignal; svcCreateTransferMemory in `hle/memory.rs`; the main thread has a real handle; self-test program `hbhandles` |
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
-| Synchronisation | not started | none |
+| Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | not started | none |
 | First services | not started | none |
 | SD folder option, unimplemented-call log | not started | unknown SVCs stop with their number; no service layer yet |
@@ -286,7 +286,6 @@ Gaps:
   attribute or outside the address space refused with 0xd401.
 - svcResetSignal on a process stops as unsupported: process state changes
   are not modelled.
-- Nothing waits on events yet (synchronisation is the next task).
 - Shared memory has no object yet. A program cannot create one itself
   (svcCreateSharedMemory is for system modules), so it arrives with the
   first service that hands one out (input), together with
@@ -351,23 +350,76 @@ Gaps:
   CNTPCT_EL0 directly, as official software does, is not supported yet.
 - No limit on the number of threads beyond the handle table.
 
+Synchronisation, from Switchbrew's "SVC" page (WaitSynchronization with
+its object types and result codes, CancelSynchronization, the argument
+lists of the arbitration calls, ArbitrationType and SignalType) and the
+protocol of libnx's open-source mutex and condition variable
+(`nx/source/kernel/mutex.c`, `condvar.c`), which runs on the console.
+The code is in `hle/sync.rs`; a waiting thread records what it waits for
+and an optional deadline on the process clock.
+
+| Call | Behaviour |
+|------|-----------|
+| svcWaitSynchronization | up to 0x40 readable events and threads (0xee01 beyond); unreadable list 0xe601; pseudo-handles and other kinds 0xe401; returns the first signaled index, TimedOut 0xea01, or Cancelled 0xec01; holds a reference to each object while waiting |
+| svcCancelSynchronization | ends the thread's wait with Cancelled, or makes its next wait return it |
+| svcArbitrateLock | waits while the mutex word reads owner handle \| 0x40000000, returns at once otherwise |
+| svcArbitrateUnlock | hands the mutex to the best waiter (priority, then longest waiting) with 0x40000000 if others remain, or writes 0 |
+| svcWaitProcessWideKeyAtomic | X0 = mutex word, X1 = condition variable (libnx's order); releases the mutex, waits; owns it again on success, not after TimedOut |
+| svcSignalProcessWideKey | wakes the best `count` waiters (all for count <= 0); each takes its mutex back or waits for it |
+| svcWaitForAddress | WaitIfLessThan, WaitIfEqual |
+| svcSignalToAddress | Signal, SignalAndIncrementIfEqual |
+
+svcSignalEvent and thread exit wake the threads waiting on them. When
+every thread waits with no deadline, the process stops with a deadlock
+report naming what each thread waits for, for example "thread 0x103 waits
+for the mutex at 0x80030c4 held by thread 0x100".
+
+Gaps:
+
+- Switchbrew labels svcWaitProcessWideKeyAtomic's X0 KeyAddress and X1
+  TagAddress; libnx passes the mutex in X0 and the condition variable in
+  X1, and kestrel follows libnx because it runs on the console.
+- Where the sources are silent, kestrel chose: the first signaled handle
+  in list order wins; a pending cancel is reported after the arguments
+  are checked and before signaled objects; timeout 0 returns TimedOut
+  without waiting (for the condition variable, after releasing the
+  mutex); unaligned words give InvalidAddress and words not mapped
+  read-write InvalidCurrentMemory; a signalled condition variable waiter
+  whose mutex word names no thread gets InvalidHandle; for address
+  arbitration, InvalidState when the condition does not hold and
+  InvalidEnumValue 0xf001 for unknown types; count <= 0 wakes every
+  waiter for svcSignalToAddress too.
+- Stop as unsupported: DecrementAndWaitIfLessThan (decrementing always
+  or only when waiting is not documented) and
+  SignalAndModifyBasedOnWaitingThreadCountIfEqual (no documented rule).
+- The condition variable word is never written; libnx never reads it.
+  Official software may, which phase 6 will show.
+- No priority inheritance for mutex owners.
+- A thread that exits holding a mutex leaves its waiters waiting; the
+  deadlock report names them.
+
 ## Next task
 
-Phase 2, synchronisation: a waiting state in the scheduler with
-timeouts on the process clock, and the calls built on it:
-svcWaitSynchronization on readable events and threads (signaled when
-they exit), svcCancelSynchronization, svcArbitrateLock and
-svcArbitrateUnlock, svcWaitProcessWideKeyAtomic and
-svcSignalProcessWideKey, svcWaitForAddress and svcSignalToAddress.
-svcSignalEvent wakes waiting threads. A process whose threads all wait
-with no timeout stops with a deadlock error naming what each waits on.
+Two tracks now run in parallel (`PLAN.md` phase 3 priority).
+
+Phase 2, IPC (on any machine): the standard message format in the
+thread local region (header, special header, copied and moved handles,
+the buffer descriptors, the raw data with its "SFCI"/"SFCO" magic), named
+ports through svcConnectToNamedPort, client sessions as kernel objects,
+svcSendSyncRequest dispatching to services written in Rust, and the
+service manager ("sm:") as the first service, with every unknown service
+and command reported by name and number. Domains come with the first
+service that needs them.
+
+Phase 3 on macOS (needs a session on the owner's Mac, since
+Hypervisor.framework is macOS-only): the memory arena refactor, the
+native backend, and the differential tester.
 
 ### Order after that
 
-1. Two tracks in parallel (`PLAN.md` phase 3 priority):
-   - Phase 2: IPC, first services, SD folder option, unimplemented-call log.
-   - Phase 3 on macOS: memory arena refactor, native backend,
-     differential tester.
+1. Phase 2: first services (settings, filesystem with the SD folder
+   option, input, minimal applet, time, power state, logging), then the
+   unimplemented-call log.
 2. Phase 2 acceptance (homebrew console examples on all five platforms),
    then phase 3 on Linux KVM and Windows.
 

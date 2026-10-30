@@ -107,6 +107,11 @@ method; the methods live next to the state they change:
 - `kestrel_hle::thread`: thread records and the scheduler. `Process::cpu`
   holds the running thread's registers; the others' are saved in their
   records.
+- `kestrel_hle::sync`: waiting on objects, mutex and condition variable
+  arbitration, address arbitration. A blocked thread records what it
+  waits for (`thread::Wait`) and an optional deadline; whatever ends the
+  wait (a signal, a hand-over, the deadline, a cancel) writes the result
+  into that thread's saved registers.
 
 ### Scheduling
 
@@ -120,9 +125,10 @@ Process::run
        ├─ Exit::Svc → svc::dispatch → schedule(rotate if the call yielded,
        │                                        slept or exited)
        └─ slice used up (19,200 instructions) → schedule(rotate)
-schedule: wake sleepers whose time came; pick the best ready thread of
-          this core (or of the next core with one, when rotating); if none
-          is ready, jump the clock to the next wake-up
+schedule: wake sleepers and time out waiters whose time came; pick the
+          best ready thread of this core (or of the next core with one,
+          when rotating); if none is ready, jump the clock to the next
+          deadline, or stop with a deadlock report if there is none
 ```
 
 `CpuState::retired` doubles as the process clock (one instruction per
@@ -131,9 +137,8 @@ thread and clears the outgoing thread's exclusive monitor. Idle jumps are
 counted separately, so `Process::instructions` reports only executed
 instructions.
 
-Planned, in order: synchronisation (a waiting state with timeouts), then
-IPC (sessions become kernel objects) and the system services, which will
-also create shared memory.
+Planned: IPC (sessions become kernel objects that threads can wait on)
+and the system services, which will also create shared memory.
 
 ## Graphics (planned)
 
