@@ -57,9 +57,12 @@ done
 PIE="--target=aarch64-none-elf -ffreestanding -nostdlib -fno-stack-protector \
      -fPIE -fvisibility=hidden ${GUEST_OPT:--O2} -Wall -Werror -mgeneral-regs-only"
 $CC --target=aarch64-none-elf -c "$src/nro/crt0.S" -o "$out/crt0.o"
-for f in "$src"/nro/*.c; do
+# guest/demo holds homebrew programs to try by hand (they do not exit on
+# their own, so the self-test does not run them); they share nro/'s
+# startup code and headers.
+for f in "$src"/nro/*.c "$root"/guest/demo/*.c; do
     name=$(basename "$f" .c)
-    $CC $PIE -c "$f" -o "$out/$name.o"
+    $CC $PIE -I"$src/nro" -c "$f" -o "$out/$name.o"
     $LD -pie --no-dynamic-linker -z text -T "$src/nro/nro.ld" \
         "$out/crt0.o" "$out/$name.o" -o "$out/$name.nro.elf"
     python3 "$root/scripts/make-nro.py" "$out/$name.nro.elf" "$out/$name.nro"
