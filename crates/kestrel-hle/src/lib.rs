@@ -9,6 +9,7 @@
 //! documentation and from observing homebrew, never from console firmware.
 
 pub mod homebrew;
+pub mod ipc;
 pub mod kernel;
 pub mod memory;
 pub mod svc;
