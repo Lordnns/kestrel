@@ -15,12 +15,8 @@ use crate::kernel::{Kind, Object, ObjectId};
 use crate::svc::result;
 use crate::Process;
 
-/// Results of the service manager (module 21), named as on Switchbrew's
-/// "Error codes" page.
-pub mod sm_result {
-    pub const INVALID_CLIENT: u32 = 0x415;
-    pub const INVALID_SERVICE_NAME: u32 = 0xc15;
-}
+pub mod set;
+pub mod sm;
 
 /// Longest port name read, with its NUL: kestrel's choice, as long as the
 /// longest name a service can have (8 bytes) with room to spare.
@@ -31,6 +27,8 @@ const PORT_NAME_MAX: u64 = 12;
 pub enum Service {
     /// "sm:", the service manager.
     Sm,
+    /// "set:sys", system settings.
+    SetSys,
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234. For unit tests of the session path.
     #[cfg(test)]
@@ -39,6 +37,7 @@ pub enum Service {
 
 /// The services sm: hands out by name.
 const SERVICES: &[Service] = &[
+    Service::SetSys,
     #[cfg(test)]
     Service::Test,
 ];
@@ -47,6 +46,7 @@ impl Service {
     pub fn name(self) -> &'static str {
         match self {
             Service::Sm => "sm:",
+            Service::SetSys => "set:sys",
             #[cfg(test)]
             Service::Test => "test",
         }
@@ -65,6 +65,7 @@ impl Service {
             (Service::Sm, 2) => Some("RegisterService"),
             (Service::Sm, 3) => Some("UnregisterService"),
             (Service::Sm, 4) => Some("DetachClient"),
+            (Service::SetSys, 3) => Some("GetFirmwareVersion, removed on Switch 2"),
             _ => None,
         }
     }
@@ -233,6 +234,7 @@ impl Process {
     ) -> Result<Reply, IpcError> {
         match self.session(id).service {
             Service::Sm => self.sm(id, n, req, args),
+            Service::SetSys => self.set_sys(n, req),
             #[cfg(test)]
             Service::Test => match n {
                 0 => Ok(Reply::ok(args.to_vec())),
@@ -241,49 +243,32 @@ impl Process {
             },
         }
     }
+}
 
-    /// The service manager. RegisterClient (0) takes the process ID
-    /// descriptor; GetServiceHandle (1) takes an 8-byte name and moves a
-    /// session handle back. Asking before RegisterClient is InvalidClient
-    /// (kestrel's choice: the "Error codes" name fits, and older libnx
-    /// probed for 0x415 before registering).
-    fn sm(&mut self, id: ObjectId, n: u32, req: &Request, args: &[u8]) -> Result<Reply, IpcError> {
-        match n {
-            0 => {
-                if !req.send_pid {
-                    return Err(IpcError::Stop(
-                        "sm: RegisterClient without the process ID descriptor it takes".into(),
-                    ));
-                }
-                self.session(id).registered = true;
-                Ok(Reply::ok(Vec::new()))
-            }
-            1 => {
-                if !self.session(id).registered {
-                    return Ok(Reply::error(sm_result::INVALID_CLIENT));
-                }
-                let Some(raw) = args.get(..8) else {
-                    return Err(IpcError::Stop(
-                        "sm: GetServiceHandle without the service name it takes".into(),
-                    ));
-                };
-                let Some(name) = service_name(raw) else {
-                    return Ok(Reply::error(sm_result::INVALID_SERVICE_NAME));
-                };
-                let Some(&service) = SERVICES.iter().find(|s| s.name() == name) else {
-                    return Err(IpcError::Stop(format!("unimplemented service \"{name}\"")));
-                };
-                let session = Object::Session(Session::new(service));
-                Ok(match self.handles.insert(session, &[Kind::ClientSession]) {
-                    Ok(hs) => Reply {
-                        move_handles: hs,
-                        ..Reply::ok(Vec::new())
-                    },
-                    Err(code) => Reply::error(code as u32),
-                })
-            }
-            _ => Err(unimplemented(Service::Sm, n)),
+impl Process {
+    /// Write `data` through the client's receive list entry `i` (a C
+    /// buffer), as the kernel copies a reply's pointer data back. A
+    /// missing or short entry stops: the client did not ask as the
+    /// command's documentation says.
+    fn write_receive(&mut self, req: &Request, i: usize, data: &[u8]) -> Result<(), IpcError> {
+        let Some(r) = req.receive_list.get(i) else {
+            return Err(IpcError::Stop(format!(
+                "a request without receive buffer {i} for its output"
+            )));
+        };
+        if r.size < data.len() as u64 {
+            return Err(IpcError::Stop(format!(
+                "receive buffer {i} holds {:#x} bytes; the output needs {:#x}",
+                r.size,
+                data.len()
+            )));
         }
+        self.mem.write_bytes(r.addr, data).map_err(|e| {
+            IpcError::Stop(format!(
+                "cannot write receive buffer {i} at {:#x}: {e}",
+                r.addr
+            ))
+        })
     }
 }
 
@@ -441,13 +426,13 @@ mod tests {
         let (_, h) = connect(&mut p, b"sm:\0").unwrap();
         let get = |n: &[u8]| cmif(4, false, 1, &name(n));
         assert_eq!(send(&mut p, h, &get(b"test")), Ok(0));
-        assert_eq!(reply(&p, true).0, sm_result::INVALID_CLIENT);
+        assert_eq!(reply(&p, true).0, sm::result::INVALID_CLIENT);
         let e = send(&mut p, h, &cmif(4, false, 0, &[0; 8])).unwrap_err();
         assert!(e.contains("process ID"), "{e}");
         let h = sm(&mut p);
         for bad in [&b""[..], b"a\0b"] {
             assert_eq!(send(&mut p, h, &get(bad)), Ok(0));
-            assert_eq!(reply(&p, true).0, sm_result::INVALID_SERVICE_NAME);
+            assert_eq!(reply(&p, true).0, sm::result::INVALID_SERVICE_NAME);
         }
         let e = send(&mut p, h, &get(b"nosuch")).unwrap_err();
         assert!(e.starts_with("unimplemented service \"nosuch\""), "{e}");
@@ -474,7 +459,7 @@ mod tests {
         let mut p = setup();
         let (_, h) = connect(&mut p, b"sm:\0").unwrap();
         assert_eq!(send(&mut p, h, &tipc(1, false, &name(b"test"))), Ok(0));
-        assert_eq!(reply(&p, false).0, sm_result::INVALID_CLIENT);
+        assert_eq!(reply(&p, false).0, sm::result::INVALID_CLIENT);
         assert_eq!(send(&mut p, h, &tipc(0, true, &[])), Ok(0));
         assert_eq!(reply(&p, false), (0, vec![], vec![]));
         assert_eq!(send(&mut p, h, &tipc(1, false, &name(b"test"))), Ok(0));
@@ -525,6 +510,56 @@ mod tests {
         assert!(e.contains("longer than"), "{e}");
         let pc = p.cpu.pc.wrapping_sub(4);
         assert!(e.ends_with(&format!("at pc {pc:#x}")), "{e}");
+    }
+
+    /// Add one receive list entry (a C buffer) after `msg`'s raw data, as
+    /// cmifRequestOutFixedPointer does. `msg` has no special header.
+    fn with_receive(mut msg: Vec<u8>, addr: u64, size: u64) -> Vec<u8> {
+        let w1 = u32::from_le_bytes(msg[4..8].try_into().unwrap());
+        msg[4..8].copy_from_slice(&(w1 | 3 << 10).to_le_bytes());
+        msg.resize(8 + (w1 & 0x3ff) as usize * 4, 0);
+        msg.extend(words(&[
+            addr as u32,
+            (addr >> 32) as u32 | (size as u32) << 16,
+        ]));
+        msg
+    }
+
+    /// A session to `service`, through a registered sm: session.
+    fn open(p: &mut Process, service: &[u8]) -> u64 {
+        let h = sm(p);
+        assert_eq!(send(p, h, &cmif(4, false, 1, &name(service))), Ok(0));
+        let (rc, moved, _) = reply(p, true);
+        assert_eq!((rc, moved.len()), (0, 1));
+        moved[0] as u64
+    }
+
+    #[test]
+    fn set_sys_writes_the_firmware_version_through_a_c_buffer() {
+        let mut p = setup();
+        let h = open(&mut p, b"set:sys");
+        let out = STRINGS + 0x100;
+        let get = |size| with_receive(cmif(4, false, 4, &[]), out, size);
+        assert_eq!(send(&mut p, h, &get(0x100)), Ok(0));
+        assert_eq!(reply(&p, true).0, 0);
+        let v = p.mem.read_vec(out, 0x100).unwrap();
+        assert_eq!(&v[..8], &[20, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&v[0x08..0x10], b"kestrel\0");
+        assert_eq!(&v[0x68..0x6f], b"20.0.0\0");
+        assert!(v[0x28..0x68].iter().all(|&b| b == 0));
+        let e = send(&mut p, h, &get(0x80)).unwrap_err();
+        assert!(
+            e.contains("holds 0x80 bytes; the output needs 0x100"),
+            "{e}"
+        );
+        let e = send(&mut p, h, &cmif(4, false, 4, &[])).unwrap_err();
+        assert!(e.contains("without receive buffer 0"), "{e}");
+        let old = with_receive(cmif(4, false, 3, &[]), out, 0x100);
+        let e = send(&mut p, h, &old).unwrap_err();
+        assert!(
+            e.contains("set:sys command 3 (GetFirmwareVersion, removed on Switch 2)"),
+            "{e}"
+        );
     }
 
     #[test]

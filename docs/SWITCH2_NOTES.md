@@ -59,6 +59,16 @@ the owner legally has) but never includes its code or data.
 - Used by: not implemented; kestrel's errors keep the session open, and
   requests it cannot answer stop the process.
 
+### set:sys GetFirmwareVersion removed
+
+- Kind: public source
+- Source: Switchbrew, "Settings services", set:sys GetFirmwareVersion
+  (command 3): "This was removed with S2".
+- Behaviour: on Switch 2, set:sys no longer has command 3;
+  GetFirmwareVersion2 (command 4) returns the same structure.
+- Used by: `hle/service/set.rs` answers command 4 and stops on command 3
+  with the note.
+
 ## Observations
 
 None yet.
