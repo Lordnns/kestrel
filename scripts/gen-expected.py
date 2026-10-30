@@ -408,6 +408,74 @@ def hbmemory():
     return "".join(line + "\n" for line in out)
 
 
+def hbhandles():
+    """guest/src/nro/hbhandles.c: handles and the first kernel objects as
+    Switchbrew documents them. Result codes are named on its "Error codes"
+    page: InvalidHandle 0xe401 for a closed handle, handle 0 or the wrong
+    kind ("SVC": SignalEvent takes only the writable side; ClearEvent and
+    GetThreadId the kinds they list), InvalidState 0xfa01 for ResetSignal
+    on an unsignaled event ("SVC", ResetSignal). CreateTransferMemory makes
+    the range take the given permission and attribute bit 0 (Locked) until
+    its handle closes; locked memory cannot be reprotected
+    (SetMemoryPermission: 0xd401) and the execute bit is refused. Results
+    where the page is silent are kestrel's documented choices
+    (docs/ROADMAP.md, phase 2 notes): 0xd801 for execute, 0xd401 for
+    memory already lent or without FlagCanTransfer (the stack), 0xca01 for
+    an unaligned size as in every memory call, and OutOfHandles 0xd201
+    when the table is full."""
+    ok, bad, unsignaled = hex64(0), hex64(0xE401), hex64(0xFA01)
+    busy, perm, size, full = hex64(0xD401), hex64(0xD801), hex64(0xCA01), hex64(0xD201)
+    normal = hex64(0x37EBD05)
+    out = [
+        "homebrew handle test",
+        "main thread handle is a real handle: yes",
+        f"thread id of the main thread handle: {ok}",
+        f"thread id of the current thread: {ok}",
+        "both name the same thread: yes",
+        f"process id of the current process: {ok}",
+        f"thread id of handle 0: {bad}",
+        f"close handle 0: {bad}",
+        f"create event: {ok}",
+        "two different handles: yes",
+        f"reset an unsignaled event: {unsignaled}",
+        f"signal through the readable side: {bad}",
+        f"signal: {ok}",
+        f"reset: {ok}",
+        f"reset again: {unsignaled}",
+        f"signal: {ok}",
+        f"clear through the readable side: {ok}",
+        f"reset after clearing: {unsignaled}",
+        f"clear a thread handle: {bad}",
+        f"close the writable side: {ok}",
+        f"signal through the closed handle: {bad}",
+        f"clear through the readable side: {ok}",
+        f"close the readable side: {ok}",
+        f"close it again: {bad}",
+        f"heap 2 MiB: {ok}",
+        f"lend 8 KiB read-only: {ok}",
+        f"lent: type {normal} attr 1 r--",
+        "lent block is 8 KiB: yes",
+        "still readable: yes",
+        f"reprotect lent memory: {busy}",
+        f"lend it again: {busy}",
+        f"lend with execute: {perm}",
+        f"lend an unaligned size: {size}",
+        f"lend the stack: {busy}",
+        f"close the transfer memory: {ok}",
+        f"returned: type {normal} attr 0 rw-",
+        "heap is one block again: yes",
+        "writable again: yes",
+        f"create events until the table is full: {full}",
+        "closed every event handle: yes",
+        f"create event after closing them: {ok}",
+        "old handles stay closed: yes",
+        f"close the main thread handle: {ok}",
+        f"thread id of the current thread: {ok}",
+        "unchanged: yes",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -420,6 +488,7 @@ PROGRAMS = {
     "hbtest": hbtest,
     "hblayout": hblayout,
     "hbmemory": hbmemory,
+    "hbhandles": hbhandles,
 }
 
 

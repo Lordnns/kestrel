@@ -105,6 +105,10 @@ pub const CASES: &[Case] = &[
     homebrew!("hbtest", "homebrew NRO: arguments, bss, relocations"),
     homebrew!("hblayout", "homebrew NRO: svcGetInfo process layout"),
     homebrew!("hbmemory", "homebrew NRO: memory system calls"),
+    homebrew!(
+        "hbhandles",
+        "homebrew NRO: handles, events, transfer memory"
+    ),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.

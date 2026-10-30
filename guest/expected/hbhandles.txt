@@ -1,0 +1,45 @@
+homebrew handle test
+main thread handle is a real handle: yes
+thread id of the main thread handle: 0x0000000000000000
+thread id of the current thread: 0x0000000000000000
+both name the same thread: yes
+process id of the current process: 0x0000000000000000
+thread id of handle 0: 0x000000000000e401
+close handle 0: 0x000000000000e401
+create event: 0x0000000000000000
+two different handles: yes
+reset an unsignaled event: 0x000000000000fa01
+signal through the readable side: 0x000000000000e401
+signal: 0x0000000000000000
+reset: 0x0000000000000000
+reset again: 0x000000000000fa01
+signal: 0x0000000000000000
+clear through the readable side: 0x0000000000000000
+reset after clearing: 0x000000000000fa01
+clear a thread handle: 0x000000000000e401
+close the writable side: 0x0000000000000000
+signal through the closed handle: 0x000000000000e401
+clear through the readable side: 0x0000000000000000
+close the readable side: 0x0000000000000000
+close it again: 0x000000000000e401
+heap 2 MiB: 0x0000000000000000
+lend 8 KiB read-only: 0x0000000000000000
+lent: type 0x00000000037ebd05 attr 1 r--
+lent block is 8 KiB: yes
+still readable: yes
+reprotect lent memory: 0x000000000000d401
+lend it again: 0x000000000000d401
+lend with execute: 0x000000000000d801
+lend an unaligned size: 0x000000000000ca01
+lend the stack: 0x000000000000d401
+close the transfer memory: 0x0000000000000000
+returned: type 0x00000000037ebd05 attr 0 rw-
+heap is one block again: yes
+writable again: yes
+create events until the table is full: 0x000000000000d201
+closed every event handle: yes
+create event after closing them: 0x0000000000000000
+old handles stay closed: yes
+close the main thread handle: 0x0000000000000000
+thread id of the current thread: 0x0000000000000000
+unchanged: yes
