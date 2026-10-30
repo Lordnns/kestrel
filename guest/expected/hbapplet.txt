@@ -1,0 +1,41 @@
+homebrew applet test
+sm: register: 0x0000000000000000
+set:sys GetFirmwareVersion2: 0x0000000000000000
+version: 20.0.0, display version 20.0.0
+close set:sys: 0x0000000000000000
+apm OpenSession: 0x0000000000000000
+it moved a session handle: yes
+apm GetPerformanceMode: 0x0000000000000000
+performance mode: 0x0000000000000001
+convert appletOE to a domain: 0x0000000000000000
+its result: 0x0000000000000000
+the object ID is not 0: yes
+OpenApplicationProxy: 0x0000000000000000
+a new domain object: yes
+eight getters gave eight new objects: yes
+GetAppletResourceUserId: 0x0000000000000000
+it is the process ID: yes
+GetAccumulatedSuspendedTickChangedEvent: 0x0000000000000000
+GetEventHandle: 0x0000000000000000
+two event handles: yes
+poll the message event: 0x000000000000ea01
+poll the suspended tick event: 0x000000000000ea01
+GetCurrentFocusState: 0x0000000000000000
+focus state: 0x0000000000000001
+ReceiveMessage: 0x0000000000000680
+AcquireForegroundRights: 0x0000000000000000
+SetFocusHandlingMode: 0x0000000000000000
+SetOutOfFocusSuspendingEnabled: 0x0000000000000000
+NotifyRunning: 0x0000000000000000
+GetOperationMode: 0x0000000000000000
+operation mode: 0x0000000000000001
+GetPerformanceMode: 0x0000000000000000
+performance mode: 0x0000000000000001
+SetOperationModeChangedNotification: 0x0000000000000000
+SetPerformanceModeChangedNotification: 0x0000000000000000
+closed the eight objects: yes
+close the event handles: 0x0000000000000000
+close appletOE: 0x0000000000000000
+close the apm session: 0x0000000000000000
+close apm: 0x0000000000000000
+close sm: 0x0000000000000000

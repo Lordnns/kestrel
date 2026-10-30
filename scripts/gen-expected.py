@@ -660,6 +660,70 @@ def hbipc():
     return "".join(line + "\n" for line in out)
 
 
+def hbapplet():
+    """guest/src/nro/hbapplet.c: the first services as libnx's startup
+    uses them. Switchbrew's "Settings services": set:sys GetFirmwareVersion2
+    (command 4) fills the 0x100-byte FirmwareVersion through a 0x1A buffer,
+    Major/Minor/Micro first and DisplayVersion at 0x68; the version is
+    20.0.0, the owner's choice. "Applet Manager services": apm OpenSession
+    returns an IApmSession; appletOE OpenApplicationProxy returns an
+    IApplicationProxy, whose getters (commands 0-4, 11, 20, 1000) each return
+    an interface; GetEventHandle and GetAccumulatedSuspendedTickChangedEvent
+    return events; ReceiveMessage gives 0x680 when no message is available;
+    FocusState 1 is InFocus, OperationMode 1 Console, PerformanceMode 1
+    Boost. "IPC Marshalling": after ConvertCurrentObjectToDomain, interfaces
+    come back as domain object IDs. Kestrel's documented choices
+    (docs/ROADMAP.md, phase 2 notes): the application is always in focus
+    with no messages, so both events stay unsignaled (polling them times
+    out, 0xea01); docked with Boost; the applet resource user ID is the
+    process ID; NotifyRunning succeeds."""
+    ok = hex64(0)
+    out = [
+        "homebrew applet test",
+        f"sm: register: {ok}",
+        f"set:sys GetFirmwareVersion2: {ok}",
+        "version: 20.0.0, display version 20.0.0",
+        f"close set:sys: {ok}",
+        f"apm OpenSession: {ok}",
+        "it moved a session handle: yes",
+        f"apm GetPerformanceMode: {ok}",
+        f"performance mode: {hex64(1)}",
+        f"convert appletOE to a domain: {ok}",
+        f"its result: {ok}",
+        "the object ID is not 0: yes",
+        f"OpenApplicationProxy: {ok}",
+        "a new domain object: yes",
+        "eight getters gave eight new objects: yes",
+        f"GetAppletResourceUserId: {ok}",
+        "it is the process ID: yes",
+        f"GetAccumulatedSuspendedTickChangedEvent: {ok}",
+        f"GetEventHandle: {ok}",
+        "two event handles: yes",
+        f"poll the message event: {hex64(0xEA01)}",
+        f"poll the suspended tick event: {hex64(0xEA01)}",
+        f"GetCurrentFocusState: {ok}",
+        f"focus state: {hex64(1)}",
+        f"ReceiveMessage: {hex64(0x680)}",
+        f"AcquireForegroundRights: {ok}",
+        f"SetFocusHandlingMode: {ok}",
+        f"SetOutOfFocusSuspendingEnabled: {ok}",
+        f"NotifyRunning: {ok}",
+        f"GetOperationMode: {ok}",
+        f"operation mode: {hex64(1)}",
+        f"GetPerformanceMode: {ok}",
+        f"performance mode: {hex64(1)}",
+        f"SetOperationModeChangedNotification: {ok}",
+        f"SetPerformanceModeChangedNotification: {ok}",
+        "closed the eight objects: yes",
+        f"close the event handles: {ok}",
+        f"close appletOE: {ok}",
+        f"close the apm session: {ok}",
+        f"close apm: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -676,6 +740,7 @@ PROGRAMS = {
     "hbthreads": hbthreads,
     "hbsync": hbsync,
     "hbipc": hbipc,
+    "hbapplet": hbapplet,
 }
 
 
