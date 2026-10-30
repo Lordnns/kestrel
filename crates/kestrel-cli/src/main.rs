@@ -2,6 +2,7 @@
 
 use kestrel_cpu::{create_backend, interp::Interpreter, BackendKind, CpuBackend};
 use kestrel_hle::{Process, Stop};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -27,6 +28,8 @@ RUN OPTIONS:
     --trace                              Print every executed instruction
     --regs                               Dump registers when the program stops
     --stats                              Print instruction count and speed
+    --sd <folder>                        The folder that is the SD card
+                                         (default: user/sdmc next to kestrel)
     -- args...                           Arguments for a homebrew NRO (argv[0]
                                          is its file name)
 ";
@@ -38,6 +41,7 @@ struct Opts {
     trace: bool,
     regs: bool,
     stats: bool,
+    sd: Option<PathBuf>,
     args: Vec<String>,
 }
 
@@ -51,6 +55,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         trace: false,
         regs: false,
         stats: false,
+        sd: None,
         args: Vec::new(),
     };
     while let Some(a) = it.next() {
@@ -67,6 +72,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--trace" => o.trace = true,
             "--regs" => o.regs = true,
             "--stats" => o.stats = true,
+            "--sd" => o.sd = Some(it.next().ok_or("--sd needs a folder")?.into()),
             "--" => {
                 o.args = it.by_ref().cloned().collect();
             }
@@ -160,6 +166,27 @@ fn extract(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The folder that is the SD card: `--sd`, or kestrel's portable folder,
+/// `user/sdmc` next to the executable (the owner's choice, as Dolphin's
+/// portable mode keeps its user folder). It is made when missing; if it
+/// cannot be, the program runs with no card inserted.
+fn sd_folder(chosen: Option<PathBuf>) -> Option<PathBuf> {
+    let dir = match chosen {
+        Some(dir) => dir,
+        None => {
+            let exe = std::env::current_exe().ok()?;
+            exe.parent()?.join("user").join("sdmc")
+        }
+    };
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            eprintln!("note: no SD card: cannot create {}: {e}", dir.display());
+            None
+        }
+    }
+}
+
 fn run(o: Opts) -> Result<ExitCode, String> {
     let file = std::fs::read(&o.path).map_err(|e| format!("cannot read {}: {e}", o.path))?;
     let name = std::path::Path::new(&o.path)
@@ -167,6 +194,7 @@ fn run(o: Opts) -> Result<ExitCode, String> {
         .map_or(o.path.clone(), |n| n.to_string_lossy().into_owned());
     let mut proc = Process::load(&file, &name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
     proc.echo = true;
+    proc.services.fs.sd = sd_folder(o.sd);
 
     let mut backend: Box<dyn CpuBackend> = if o.trace {
         if !matches!(o.backend, BackendKind::Auto | BackendKind::Interp) {
