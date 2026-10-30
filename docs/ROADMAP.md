@@ -840,7 +840,9 @@ Each service so far followed the same steps; keep them:
 4. Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets
    -- -D warnings` (on Windows also with `--no-default-features --target
    x86_64-unknown-linux-gnu`, which compiles the Unix-only tests),
-   `cargo test --workspace`,
+   `cargo check --workspace --all-targets --target <t>` for the other
+   desktop targets (`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+   `x86_64-pc-windows-msvc` off Windows), `cargo test --workspace`,
    `scripts/gen-expected.py --check`, `kestrel selftest`; the program
    built at `-O3 -march=armv8.2-a` (`GUEST_OUT`, `GUEST_OPT` for
    `scripts/build-guest.sh`) gives the same output; one deliberate bug in

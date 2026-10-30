@@ -100,6 +100,13 @@ Each is also recorded in the ROADMAP's phase notes.
 - on Windows also `cargo clippy --workspace --all-targets
   --no-default-features --target x86_64-unknown-linux-gnu -- -D warnings`:
   Windows never compiles the `#[cfg(unix)]` tests, which broke `v0.1.16`
+  (default features fail there: gilrs's `libudev-sys` needs Linux's
+  pkg-config)
+- `cargo check --workspace --all-targets` for every other desktop target
+  (`rustup target add` as needed): `--target aarch64-apple-darwin` and
+  `--target x86_64-apple-darwin` (all features pass from Windows), plus
+  `--target x86_64-pc-windows-msvc` when on Linux or macOS, so a change
+  is type-checked for every CI operating system before a tag
 - `cargo test --workspace`
 - `python3 scripts/gen-expected.py --check`
 - `cargo run --release -p kestrel-cli -- selftest`
