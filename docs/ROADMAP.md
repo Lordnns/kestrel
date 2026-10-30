@@ -55,7 +55,7 @@ qemu for Linux ARM64.
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
-| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; self-test programs `hbapplet`, `hbhid`. Not yet: time, fsp-srv, power state, logging |
+| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; self-test programs `hbapplet`, `hbhid`, `hbtime`. Not yet: fsp-srv, power state, logging |
 | SD folder option, unimplemented-call log | not started | unknown SVCs, ports, services and commands stop with their name and number |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
@@ -346,8 +346,9 @@ Gaps:
   alike and the affinity mask only constrains svcSetThreadCoreMask.
 - Undocumented values stop the process: svcSleepThread with other
   negative times, svcSetThreadCoreMask with a negative ideal core.
-- svcGetSystemTick and CNTVCT_EL0 read the process clock; reading
-  CNTPCT_EL0 directly, as official software does, is not supported yet.
+- svcGetSystemTick, CNTPCT_EL0 and CNTVCT_EL0 read the process clock
+  (CNTPCT_EL0 since the time service: libnx's armGetSystemTick reads
+  it).
 - No limit on the number of threads beyond the handle table.
 
 Synchronisation, from Switchbrew's "SVC" page (WaitSynchronization with
@@ -529,6 +530,49 @@ Gaps:
 - Every other hid command stops with its number, including vibration,
   six-axis sensors and the npad style-set update event.
 
+Time, from Switchbrew's "Glue services" (time:u, ISystemClock,
+ISteadyClock, ITimeZoneService and their structures) and the requests
+libnx's timeInitialize and __libnx_init_time send (`time.c`, `newlib.c`),
+in `hle/service/time.rs`. The owner chose what time it is
+(`hle::firmware`): the clocks start at 2025-06-05 00:00:00 UTC (POSIX
+1749081600, the Switch 2's launch day) and the time zone is UTC. The
+clocks run with the process clock, so every run sees the same times and
+a sleep moves them by its length.
+
+| Command | Behaviour |
+|---------|-----------|
+| time:u 0, 1, 4 | the user, network and local ISystemClock |
+| time:u 2, 3 | ISteadyClock, ITimeZoneService |
+| time:u GetSharedMemoryNativeHandle (20) | a copy handle to the one 0x1000-byte shared memory, mapped read-only |
+| ISystemClock GetCurrentTime (0), GetSystemClockContext (2) | the start time plus the steady clock; the context |
+| ISteadyClock GetCurrentTimePoint (0) | whole seconds of the process clock, and the source ID |
+| ITimeZoneService GetDeviceLocationName (0) | "UTC" |
+| ITimeZoneService ToCalendarTimeWithMyRule (101) | the UTC date, 0-based day of the week and year, "UTC", no DST, offset 0 |
+
+The CPU reads CNTPCT_EL0 as the process clock, as CNTVCT_EL0 (the
+virtual offset is 0): libnx reads the clocks from the shared memory with
+it.
+
+Gaps:
+
+- Switchbrew does not describe the shared memory; kestrel writes the
+  layout libnx reads: the steady clock (base time in nanoseconds, source
+  ID) at 0x00, the local system clock's context at 0x38 (libnx reads it
+  for the user clock too), the network clock's at 0x80, each a u32
+  counter, padding and two copies, the counter's low bit picking one.
+  Nothing changes them, so the counter stays 0.
+- Where the sources leave it to the console's state, kestrel chose: the
+  steady clock starts at 0 when the process starts; every system clock
+  has the same context (the start time at steady time 0), so the network
+  clock is always in step; the clock source ID is the text "kestrel"
+  padded with zeros; month and day count from 1 (Switchbrew calls only
+  the day of the week and of the year 0-based); a year CalendarTime's u16
+  cannot hold stops.
+- No time zone rules: LoadTimeZoneRule, ToCalendarTime with a rule,
+  ToPosixTime and the location name list stop, as do setting a clock or
+  the location, time:a, time:r and every other time command. A zone with
+  daylight saving time would need the TZif rule format and zone data.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
@@ -537,19 +581,17 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. Time (`time:u` or the service libnx picks for 20.0.0): the system
-   clocks and the time zone service libnx's startup reads
-   (`timeInitialize` and `__libnx_init_time`), with a documented choice
-   of what time it is (a fixed time keeps runs reproducible).
-2. `fsp-srv` with the SD folder option: OpenSdCardFileSystem, files and
-   directories over a host folder, through A and B buffers.
-3. Power state and logging, then the unimplemented-call log.
-4. Host input into hid's shared memory, with the frontend (window and
+1. `fsp-srv` with the SD folder option: OpenSdCardFileSystem, files and
+   directories over a host folder, through A and B buffers. libnx's
+   `__appInit` calls fsInitialize right after the time service, then
+   fsdevMountSdmc.
+2. Power state and logging, then the unimplemented-call log.
+3. Host input into hid's shared memory, with the frontend (window and
    keyboard or gamepad), once there is one.
 
-Before starting time, ask the owner which fixed date and time zone to
-report (the proposal: a fixed clock, so runs repeat). Record the answer
-in `hle::firmware` or next to it, as with the system version.
+Before starting fsp-srv, ask the owner how the SD folder is chosen (a
+command-line option, a default folder, or both) and whether writes reach
+the host folder or stay in memory.
 
 Each service so far followed the same steps; keep them:
 

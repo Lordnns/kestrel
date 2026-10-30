@@ -128,7 +128,8 @@ method; the methods live next to the state they change:
   service signals later are kernel objects it holds a reference to. A
   port, service or command kestrel does not implement stops the process
   with its name and number. `kestrel_hle::firmware` holds the system
-  version every service answers as.
+  version every service answers as, and the time the clocks start at and
+  the time zone.
 
 ### Scheduling
 

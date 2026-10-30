@@ -48,8 +48,9 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   with unknown services and commands reported by name.
 - **First services**, answering as system version 20.0.0: set:sys
   firmware version, apm, the applet manager commands an application
-  sends at startup, and hid's setup with its shared memory (no host input
-  yet).
+  sends at startup, hid's setup with its shared memory (no host input
+  yet), and the time service: clocks that start at 2025-06-05 00:00 UTC
+  and run with the guest's clock, in the UTC time zone.
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -100,6 +101,7 @@ built integer-only, and built with floating point and NEON allowed
 | `hbipc`      | a homebrew NRO talking to sm: over CMIF and TIPC, from two threads, with bad names, close requests and closed handles |
 | `hbapplet`   | a homebrew NRO sending libnx's startup requests: set:sys firmware version, apm, appletOE as a domain with its interfaces and events |
 | `hbhid`      | a homebrew NRO setting up input as libnx does: hid's applet resource and npad setup, and mapping its shared memory, with each kind of bad mapping |
+| `hbtime`     | a homebrew NRO starting the time service as libnx does: the clocks, reading them from shared memory with CNTPCT_EL0, calendar times in UTC, and the clocks moving with a sleep |
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 
