@@ -544,6 +544,66 @@ def hbthreads():
     return "".join(line + "\n" for line in out)
 
 
+def hbsync():
+    """guest/src/nro/hbsync.c: synchronisation as Switchbrew's "SVC" page
+    documents WaitSynchronization (at most 0x40 handles, else 0xee01; an
+    unreadable list is 0xe601; the pseudo-handles and objects that cannot
+    be waited on are InvalidHandle 0xe401; TimedOut 0xea01; Cancelled
+    0xec01; readable events signal while signaled and threads once they
+    exit; the index is the signaled handle's) and CancelSynchronization (it
+    ends a wait, or makes the next one return Cancelled). The mutex and
+    condition variable follow libnx's protocol, so locked increments from
+    four threads are never lost, the mutex word ends at 0, and a producer
+    and consumer pass every item; a condition variable wait that times out
+    returns 0xea01 with the mutex released. Address arbitration follows the
+    ArbitrationType and SignalType names: WaitIfLessThan waits only while
+    the word is less, SignalAndIncrementIfEqual adds 1 when the word
+    matches. Kestrel's documented choices (docs/ROADMAP.md, phase 2
+    notes): InvalidState 0xfa01 when an arbitration condition does not
+    hold, TimedOut at once for timeout 0, InvalidEnumValue 0xf001 for an
+    unknown type."""
+    ok = hex64(0)
+    out = [
+        "homebrew synchronisation test",
+        f"wait on 0x41 handles: {hex64(0xEE01)}",
+        f"wait with an unreadable list: {hex64(0xE601)}",
+        f"wait on the current thread pseudo-handle: {hex64(0xE401)}",
+        f"wait on the writable side: {hex64(0xE401)}",
+        f"poll an unsignaled event: {hex64(0xEA01)}",
+        f"wait 1 ms on it: {hex64(0xEA01)}",
+        "the tick advanced by at least 19200: yes",
+        f"wait on two, the second signaled: {ok}",
+        "index: 1",
+        f"again, it stays signaled: {ok}",
+        "the waiter is still waiting: yes",
+        f"wait for the waiter to exit: {ok}",
+        f"the waiter's result: {ok}",
+        "the waiter's index: 0",
+        f"cancel the current thread: {ok}",
+        f"its next wait: {hex64(0xEC01)}",
+        f"the wait after that: {hex64(0xEA01)}",
+        f"cancel the waiting thread: {ok}",
+        f"its wait ended with: {hex64(0xEC01)}",
+        f"counter after 4 threads x 2000 locked increments: {4 * 2000}",
+        f"mutex word afterwards: {ok}",
+        "items consumed: 100",
+        f"sum of the items: {sum(range(1, 101))}",
+        f"wait 1 ms on a condition variable: {hex64(0xEA01)}",
+        "the mutex was released: yes",
+        f"with timeout 0: {hex64(0xEA01)}",
+        "released again: yes",
+        f"wait while 0 < 0: {hex64(0xFA01)}",
+        f"wait while 0 < 1, no time: {hex64(0xEA01)}",
+        f"unknown arbitration type: {hex64(0xF001)}",
+        "the address waiter is still waiting: yes",
+        f"signal and increment if 5: {hex64(0xFA01)}",
+        f"signal and increment if 0: {ok}",
+        "the word now: 1",
+        f"the address waiter's result: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -558,6 +618,7 @@ PROGRAMS = {
     "hbmemory": hbmemory,
     "hbhandles": hbhandles,
     "hbthreads": hbthreads,
+    "hbsync": hbsync,
 }
 
 

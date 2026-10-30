@@ -1,0 +1,36 @@
+homebrew synchronisation test
+wait on 0x41 handles: 0x000000000000ee01
+wait with an unreadable list: 0x000000000000e601
+wait on the current thread pseudo-handle: 0x000000000000e401
+wait on the writable side: 0x000000000000e401
+poll an unsignaled event: 0x000000000000ea01
+wait 1 ms on it: 0x000000000000ea01
+the tick advanced by at least 19200: yes
+wait on two, the second signaled: 0x0000000000000000
+index: 1
+again, it stays signaled: 0x0000000000000000
+the waiter is still waiting: yes
+wait for the waiter to exit: 0x0000000000000000
+the waiter's result: 0x0000000000000000
+the waiter's index: 0
+cancel the current thread: 0x0000000000000000
+its next wait: 0x000000000000ec01
+the wait after that: 0x000000000000ea01
+cancel the waiting thread: 0x0000000000000000
+its wait ended with: 0x000000000000ec01
+counter after 4 threads x 2000 locked increments: 8000
+mutex word afterwards: 0x0000000000000000
+items consumed: 100
+sum of the items: 5050
+wait 1 ms on a condition variable: 0x000000000000ea01
+the mutex was released: yes
+with timeout 0: 0x000000000000ea01
+released again: yes
+wait while 0 < 0: 0x000000000000fa01
+wait while 0 < 1, no time: 0x000000000000ea01
+unknown arbitration type: 0x000000000000f001
+the address waiter is still waiting: yes
+signal and increment if 5: 0x000000000000fa01
+signal and increment if 0: 0x0000000000000000
+the word now: 1
+the address waiter's result: 0x0000000000000000

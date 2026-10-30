@@ -110,6 +110,10 @@ pub const CASES: &[Case] = &[
         "homebrew NRO: handles, events, transfer memory"
     ),
     homebrew!("hbthreads", "homebrew NRO: threads, priorities, cores"),
+    homebrew!(
+        "hbsync",
+        "homebrew NRO: waits, mutexes, condition variables"
+    ),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
