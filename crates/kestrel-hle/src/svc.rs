@@ -3,6 +3,7 @@
 //! Arguments arrive in X0..X7, results go back in W0 (result code) plus any
 //! output registers. A result code of 0 means success.
 
+use crate::sync::ArbitrationError;
 use crate::thread::{CoreMaskError, CORES, LOWEST_PRIORITY};
 use crate::{layout, memory, Process, Stop};
 use std::io::Write;
@@ -44,6 +45,8 @@ pub mod nr {
     pub const GET_INFO: u16 = 0x29;
     pub const MAP_PHYSICAL_MEMORY: u16 = 0x2c;
     pub const UNMAP_PHYSICAL_MEMORY: u16 = 0x2d;
+    pub const WAIT_FOR_ADDRESS: u16 = 0x34;
+    pub const SIGNAL_TO_ADDRESS: u16 = 0x35;
     pub const CREATE_EVENT: u16 = 0x45;
 }
 
@@ -67,6 +70,7 @@ pub mod result {
     pub const TIMED_OUT: u64 = 0xea01;
     pub const CANCELLED: u64 = 0xec01;
     pub const OUT_OF_RANGE: u64 = 0xee01;
+    pub const INVALID_ENUM_VALUE: u64 = 0xf001;
     pub const INVALID_STATE: u64 = 0xfa01;
 }
 
@@ -368,6 +372,29 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
         nr::SIGNAL_PROCESS_WIDE_KEY => {
             p.signal_process_wide_key(p.cpu.x[0], p.cpu.x[1] as i32);
             p.cpu.x[0] = result::SUCCESS;
+            None
+        }
+        nr::WAIT_FOR_ADDRESS | nr::SIGNAL_TO_ADDRESS => {
+            // X0 = address, W1 = type, W2 = value, X3 = timeout (wait) or
+            // W3 = count (signal).
+            let (addr, kind, value) = (p.cpu.x[0], p.cpu.x[1] as u32, p.cpu.x[2] as i32);
+            let r = if n == nr::WAIT_FOR_ADDRESS {
+                p.wait_for_address(addr, kind, value, p.cpu.x[3] as i64)
+            } else {
+                p.signal_to_address(addr, kind, value, p.cpu.x[3] as i32)
+                    .map(|()| false)
+            };
+            match r {
+                Ok(true) => {} // the wake-up writes the result
+                Ok(false) => p.cpu.x[0] = result::SUCCESS,
+                Err(ArbitrationError::Result(code)) => p.cpu.x[0] = code,
+                Err(ArbitrationError::Unsupported(what)) => {
+                    return Some(Stop::Error(format!(
+                        "unsupported: address arbitration type {what}, at pc {:#x}",
+                        p.cpu.pc.wrapping_sub(4)
+                    )))
+                }
+            }
             None
         }
         nr::CLOSE_HANDLE => {

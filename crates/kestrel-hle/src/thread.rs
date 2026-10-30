@@ -71,6 +71,8 @@ pub enum Wait {
     /// The condition variable at `key`, after releasing the mutex word at
     /// `mutex`, which it takes back with `tag` when signalled.
     CondVar { key: u64, mutex: u64, tag: u32 },
+    /// svcWaitForAddress on the word at `addr`.
+    Address { addr: u64 },
 }
 
 pub struct Thread {
@@ -136,6 +138,7 @@ impl Wait {
             Wait::CondVar { key, .. } => {
                 format!("waits on the condition variable at {key:#x}")
             }
+            Wait::Address { addr } => format!("waits for the address {addr:#x}"),
         }
     }
 }

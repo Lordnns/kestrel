@@ -29,6 +29,11 @@
 //!   mutex; once signalled, the thread holds the mutex again when the call
 //!   returns success. After TimedOut it does not, and libnx locks it
 //!   itself. SignalProcessWideKey(-1) wakes every waiter.
+//!
+//! Address arbitration (WaitForAddress, SignalToAddress) is documented by
+//! the names of its ArbitrationType and SignalType values only. Kestrel
+//! implements the types whose names leave one reading and stops on the
+//! others.
 
 use crate::kernel::{Kind, Object, ObjectId};
 use crate::svc::result;
@@ -40,6 +45,21 @@ use kestrel_core::Perm;
 pub const MAX_WAIT_OBJECTS: i32 = 0x40;
 /// Set in a mutex word while threads wait for it (libnx `HANDLE_WAIT_MASK`).
 pub const WAIT_MASK: u32 = 0x4000_0000;
+
+/// Why an address arbitration call failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ArbitrationError {
+    /// Return this result code.
+    Result(u64),
+    /// A type whose behaviour is not documented well enough to implement.
+    Unsupported(&'static str),
+}
+
+impl From<u64> for ArbitrationError {
+    fn from(code: u64) -> Self {
+        ArbitrationError::Result(code)
+    }
+}
 
 /// The clock reading at which a wait of `timeout` nanoseconds ends: never
 /// for a negative timeout.
@@ -268,6 +288,78 @@ impl Process {
         let t = &mut self.sched.threads[i];
         t.wait = Some(Wait::Lock { addr, owner, tag });
         t.state = State::Waiting { until: None };
+    }
+
+    /// svcWaitForAddress ("SVC", ArbitrationType): wait while the signed
+    /// word at `addr` is less than `value` (WaitIfLessThan, 0) or equal to
+    /// it (WaitIfEqual, 2). Returns whether the caller now waits. Kestrel's
+    /// choices: InvalidState when the condition does not hold, TimedOut at
+    /// once for timeout 0, InvalidEnumValue for an unknown type.
+    /// DecrementAndWaitIfLessThan (1) could decrement always or only when
+    /// waiting, so it stops the process.
+    pub fn wait_for_address(
+        &mut self,
+        addr: u64,
+        kind: u32,
+        value: i32,
+        timeout: i64,
+    ) -> Result<bool, ArbitrationError> {
+        self.check_word(addr)?;
+        let current = self.word(addr) as i32;
+        let wait = match kind {
+            0 => current < value,
+            2 => current == value,
+            1 => return Err(ArbitrationError::Unsupported("DecrementAndWaitIfLessThan")),
+            _ => return Err(result::INVALID_ENUM_VALUE.into()),
+        };
+        if !wait {
+            return Err(result::INVALID_STATE.into());
+        }
+        if timeout == 0 {
+            return Err(result::TIMED_OUT.into());
+        }
+        let until = deadline(self.cpu.retired, timeout);
+        self.block(Wait::Address { addr }, until);
+        Ok(true)
+    }
+
+    /// svcSignalToAddress ("SVC", SignalType): wake up to `count` threads
+    /// waiting for `addr`, best first (all for `count` <= 0, as for
+    /// svcSignalProcessWideKey). SignalAndIncrementIfEqual (1) first
+    /// requires the word to equal `value` (InvalidState otherwise, kestrel's
+    /// choice) and adds 1 to it. The type that modifies the word by the
+    /// number of waiters (2) has no documented rule, so it stops.
+    pub fn signal_to_address(
+        &mut self,
+        addr: u64,
+        kind: u32,
+        value: i32,
+        count: i32,
+    ) -> Result<(), ArbitrationError> {
+        self.check_word(addr)?;
+        match kind {
+            0 => {}
+            1 => {
+                if self.word(addr) as i32 != value {
+                    return Err(result::INVALID_STATE.into());
+                }
+                self.set_word(addr, value.wrapping_add(1) as u32);
+            }
+            2 => {
+                return Err(ArbitrationError::Unsupported(
+                    "SignalAndModifyBasedOnWaitingThreadCountIfEqual",
+                ))
+            }
+            _ => return Err(result::INVALID_ENUM_VALUE.into()),
+        }
+        let mut woken = self.waiters(|w| matches!(w, Wait::Address { addr: a } if *a == addr));
+        if count > 0 {
+            woken.truncate(count as usize);
+        }
+        for i in woken {
+            self.wake(i, result::SUCCESS, None);
+        }
+        Ok(())
     }
 
     /// svcCancelSynchronization: end the thread's svcWaitSynchronization
@@ -622,6 +714,96 @@ mod tests {
         // All the rest: -1.
         svc(&mut p, nr::SIGNAL_PROCESS_WIDE_KEY, &[K, -1i64 as u64]);
         assert_eq!(p.mem.read32(ma).unwrap(), a as u32);
+    }
+
+    /// svcWaitForAddress on M; returns W0 as the call left it.
+    fn wait_addr(p: &mut Process, kind: u64, value: i64, timeout: i64) -> u64 {
+        svc(
+            p,
+            nr::WAIT_FOR_ADDRESS,
+            &[M, kind, value as u64, timeout as u64],
+        )
+        .0
+    }
+
+    fn signal_addr(p: &mut Process, kind: u64, value: i64, count: i64) -> u64 {
+        svc(
+            p,
+            nr::SIGNAL_TO_ADDRESS,
+            &[M, kind, value as u64, count as u64],
+        )
+        .0
+    }
+
+    #[test]
+    fn address_waits_check_their_condition() {
+        let mut p = process();
+        words(&mut p);
+        p.mem.write32(M, -5i32 as u32).unwrap();
+        // WaitIfLessThan compares signed values.
+        assert_eq!(wait_addr(&mut p, 0, -5, 0), result::INVALID_STATE);
+        assert_eq!(wait_addr(&mut p, 0, -4, 0), result::TIMED_OUT);
+        assert_eq!(wait_addr(&mut p, 2, -4, 0), result::INVALID_STATE);
+        assert_eq!(wait_addr(&mut p, 2, -5, 0), result::TIMED_OUT);
+        assert_eq!(wait_addr(&mut p, 3, 0, 0), result::INVALID_ENUM_VALUE);
+        assert_eq!(signal_addr(&mut p, 3, 0, 1), result::INVALID_ENUM_VALUE);
+        let at = |p: &mut Process, addr: u64| svc(p, nr::WAIT_FOR_ADDRESS, &[addr, 2, 0, 0]).0;
+        assert_eq!(at(&mut p, M + 2), result::INVALID_ADDRESS);
+        assert_eq!(at(&mut p, 0x50_0000), result::INVALID_CURRENT_MEMORY);
+        // A timed wait ends on the clock.
+        wait_addr(&mut p, 2, -5, 1_000_000);
+        assert_eq!(p.cpu.x[0], result::TIMED_OUT);
+    }
+
+    #[test]
+    fn signalling_an_address_wakes_its_best_waiters() {
+        let mut p = process();
+        words(&mut p);
+        let (_, _) = two_workers(&mut p);
+        // b, then a, wait while the word is 0.
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x3000);
+        wait_addr(&mut p, 2, 0, -1);
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x2000);
+        wait_addr(&mut p, 2, 0, -1);
+        assert_eq!(running(&p), 0x1000);
+        // SignalAndIncrementIfEqual: only when the word equals the value.
+        assert_eq!(signal_addr(&mut p, 1, 7, 1), result::INVALID_STATE);
+        assert_eq!(signal_addr(&mut p, 1, 0, 1), 0);
+        assert_eq!(p.mem.read32(M).unwrap(), 1);
+        // b, the better priority, was woken; a still waits.
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!((running(&p), p.cpu.x[0]), (0x3000, 0));
+        svc(&mut p, nr::EXIT_THREAD, &[]);
+        assert_eq!(running(&p), 0x1000);
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!(running(&p), 0x1000, "a still waits");
+        // Signal with count 0 wakes the rest, word unchanged.
+        assert_eq!(signal_addr(&mut p, 0, 0, 0), 0);
+        assert_eq!(p.mem.read32(M).unwrap(), 1);
+        svc(&mut p, nr::SLEEP_THREAD, &[0]);
+        assert_eq!((running(&p), p.cpu.x[0]), (0x2000, 0));
+    }
+
+    #[test]
+    fn undocumented_arbitration_types_stop_the_process() {
+        let mut p = process();
+        words(&mut p);
+        for (n, kind, what) in [
+            (nr::WAIT_FOR_ADDRESS, 1, "DecrementAndWaitIfLessThan"),
+            (
+                nr::SIGNAL_TO_ADDRESS,
+                2,
+                "SignalAndModifyBasedOnWaitingThreadCountIfEqual",
+            ),
+        ] {
+            p.cpu.x[..4].copy_from_slice(&[M, kind, 0, 1]);
+            match dispatch(&mut p, n) {
+                Some(Stop::Error(e)) => assert!(e.contains(what), "{e}"),
+                other => panic!("expected a stop, got {other:?}"),
+            }
+        }
     }
 
     #[test]
