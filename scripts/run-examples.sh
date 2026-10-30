@@ -25,7 +25,7 @@ if [ ! -f "$font" ]; then
 fi
 
 # name and presses (each held 1 s): Plus ends each example; read-controls
-# first gets A.
+# first gets A, and Plus while A is still held, so its last frame shows A.
 run() {
     name=$1
     shift
@@ -36,7 +36,7 @@ run() {
     rm -rf "$sd"
 }
 run hello-world --press Plus@2
-run read-controls --press A@2 --press Plus@3.5
+run read-controls --press A@2 --press Plus@2.5
 run sdmc --press Plus@2
 run barrier --press Plus@2
 

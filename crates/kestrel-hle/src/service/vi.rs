@@ -540,7 +540,7 @@ impl Process {
                     Some(s) if s.state == SlotState::Dequeued => {
                         let buffer = s.buffer.clone();
                         self.present(&buffer)?;
-                        let release = (self.cpu.retired / VSYNC_PERIOD + 1) * VSYNC_PERIOD;
+                        let release = (self.now() / VSYNC_PERIOD + 1) * VSYNC_PERIOD;
                         let s = self.services.vi.slots[slot as usize]
                             .as_mut()
                             .expect("slot");
@@ -646,7 +646,7 @@ impl Process {
     /// Free the buffers whose vsync has come. Called from the run loop and
     /// the scheduler, which wakes for the next one.
     pub(crate) fn vsync_tick(&mut self) {
-        let now = self.cpu.retired;
+        let now = self.now();
         let due: Vec<usize> = (self.services.vi.slots.iter().enumerate())
             .filter(|(_, s)| {
                 matches!(s, Some(Slot { state: SlotState::Queued { release }, .. }) if *release <= now)

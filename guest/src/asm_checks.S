@@ -316,11 +316,16 @@ jt_done:
     mov     x5, #0x1234
     msr     tpidr_el0, x5
     mrs     x6, tpidr_el0
+    // A 19.2 MHz counter on a CPU of about 1 GHz rarely ticks between
+    // two close reads, so spin (at most 1000 times) until it moves.
     mrs     x7, cntvct_el0
-    nop
-    nop
-    mrs     x8, cntvct_el0
+    mov     x15, #1000
+1:  mrs     x8, cntvct_el0
     cmp     x8, x7
+    b.ne    2f
+    subs    x15, x15, #1
+    b.ne    1b
+2:  cmp     x8, x7
     cset    x9, hi
     mrs     x10, cntfrq_el0
     cmp     x10, #0

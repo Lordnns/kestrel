@@ -15,18 +15,19 @@ sessions learned. The plan and the status live elsewhere; read them first:
 
 - Phases 0, 1 and 2 are done. Phase 2 was accepted on `v0.1.17`: the four
   standard libnx examples (hello-world, read-controls, sdmc, barrier)
-  pass on all six native CI jobs. All work is pushed.
+  pass on all six native CI jobs.
+- The clock follows the owner's decision of 2026-10-30 (`PLAN.md`
+  section 3): the host's clock with a window, one tick every 52
+  instructions otherwise. It needs a release tag so CI checks it on
+  every platform.
 - The owner has not yet picked the next task. The candidates, from the
   ROADMAP's "Next task":
-  1. the clock rate (the owner's decision): kestrel counts one clock tick
-     per guest instruction, so programs see a CPU about 50 times slower
-     than a Switch's in guest time; explain this plainly, then ask;
-  2. phase 3 on Linux KVM and Windows (phase 3 on macOS needs a session
-     on the owner's Mac);
-  3. a licence-notices file in the release packages (they now bundle
+  1. phase 3 on Linux KVM and Windows (phase 3 on macOS needs a session
+     on the owner's Mac), designed for the real-time goal;
+  2. a licence-notices file in the release packages (they now bundle
      MIT/Apache crates: winit, softbuffer, gilrs and their dependencies);
-  4. more homebrew, fixing what `user/logs/unimplemented.log` names;
-  5. the later input tasks: other controller types (GameCube,
+  3. more homebrew, fixing what `user/logs/unimplemented.log` names;
+  4. the later input tasks: other controller types (GameCube,
      NES/SNES/N64/Genesis), several players, real Joy-Con motion, rumble
      and pairing.
 
@@ -52,6 +53,14 @@ sessions learned. The plan and the status live elsewhere; read them first:
 
 Each is also recorded in the ROADMAP's phase notes.
 
+- The product goal (`PLAN.md` section 1): behave like a real Switch 2 in
+  real time, 1:1 with wall-clock time, up to 120 fps, on the native and
+  recompiler backends. Weigh every design choice against it.
+- The clock (`PLAN.md` section 3): interactive runs read the host's
+  clock; the self-test, headless runs and the differential tester count
+  52 instructions a tick (998.4 MHz), so they repeat.
+- Six guest cores, each on its own host thread on the fast backends; the
+  interpreter's deterministic scheduler stays for tests.
 - System version 20.0.0; clock starts 2025-06-05 00:00 UTC, time zone
   UTC.
 - Portable, Dolphin-style: kestrel's `user/` folder next to the
@@ -67,8 +76,8 @@ Each is also recorded in the ROADMAP's phase notes.
   identifiers, and are appended to `user/logs/unimplemented.log`.
 - A window by default for homebrew (winit, softbuffer, gilrs; `--headless`
   to skip): one emulated controller (Pro Controller or handheld) mapped
-  from the keyboard and any gamepad. With a window the program runs in
-  real time with no instruction budget.
+  from the keyboard and any gamepad. With a window the program runs on
+  the host's clock with no instruction budget.
 - Console output is shown on the real screen path (vi, nvdrv, the buffer
   queue), not a text hook.
 - Docker Desktop on the owner's PC, with the same pinned devkitPro image

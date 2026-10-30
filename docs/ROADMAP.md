@@ -349,11 +349,15 @@ like the console where programs can tell and to repeat exactly:
   runs; equal priorities take turns only on yield, as the console does
   not time-slice them.
 - The cores take turns on one host thread: on yield, sleep and exit, and
-  after a slice of 19,200 instructions (1 ms of guest time), so a thread
-  spinning on one core cannot starve the others.
-- One clock for the process: an instruction is one tick of the 19.2 MHz
-  counter. When every thread sleeps, the clock jumps to the next wake-up
-  without counting instructions.
+  after a slice of 19,200 instructions (about 19 µs at 998.4 MHz), so a
+  thread spinning on one core cannot starve the others.
+- One clock for the process, the 19.2 MHz counter (`kestrel_cpu::Clock`,
+  the owner's decision of 2026-10-30, `PLAN.md` section 3). Counted, for
+  the self-test and headless runs: one tick every 52 instructions
+  (998.4 MHz), and when every thread sleeps the clock jumps to the next
+  wake-up. On the host clock, with a window: real time, and when every
+  thread sleeps the run loop waits on the host until the next wake-up
+  (`Scheduler::idle_until`), at most 10 ms at a time.
 - A thread switch clears the outgoing thread's exclusive monitor, so a
   store-exclusive another thread may have overtaken fails and retries.
   `hbthreads` fails without this (lost increments).
@@ -375,7 +379,14 @@ Gaps:
   negative times, svcSetThreadCoreMask with a negative ideal core.
 - svcGetSystemTick, CNTPCT_EL0 and CNTVCT_EL0 read the process clock
   (CNTPCT_EL0 since the time service: libnx's armGetSystemTick reads
-  it).
+  it). The counted clock's 52 instructions a tick assume one instruction
+  a cycle, kestrel's choice: no cache or pipeline timing is modelled.
+  `asm_checks` spins (at most 1000 times) until the counter moves, as
+  two close reads of a 19.2 MHz counter on a 1 GHz CPU usually match on
+  a console too.
+- On the host clock, runs do not repeat: when threads wake and which
+  core's slice an event lands in depend on host speed. Everything that
+  must repeat runs on the counted clock.
 - No limit on the number of threads beyond the handle table.
 
 Synchronisation, from Switchbrew's "SVC" page (WaitSynchronization with
@@ -777,14 +788,12 @@ How it works:
   slice (`Stop::Interrupted`). The window paints a dark grey background:
   graphics come in phase 5. Without a display, kestrel runs without a
   window and says so.
-- With a window the program runs in real time and without an
-  instruction budget (`--max-steps` still sets one). When every thread
-  sleeps, the clock still jumps, and the run loop then waits that time
-  out on the host (`Process::realtime`), so a program sleeping 16 ms per
-  frame takes 16 ms, not none. Found by the owner trying padview: it ran
-  its loop flat out and hit the 1e10 budget in about a minute. The
-  self-test and headless runs still skip idle time, so they repeat
-  exactly and finish fast.
+- With a window the program runs on the host's clock, in real time, and
+  without an instruction budget (`--max-steps` still sets one): a program
+  sleeping 16 ms per frame takes 16 ms, and one computing sees real time
+  pass (first found by the owner trying padview, which ran its loop flat
+  out). The self-test and headless runs count time instead, so they
+  repeat exactly and skip idle time.
 - `user/config/input.cfg` is written with the defaults when missing:
   `controller = pro` or `handheld`, each button's keys (`key:` and winit
   KeyCode names) and gamepad buttons (`pad:` and gilrs names, which go by
@@ -803,7 +812,7 @@ How it works:
 | Ring count | stops at 16, so the next entry written is never one a reader counts |
 | Gamepad dead zone | 10% of the stick's range |
 | Keys and gamepad | keys win over a gamepad stick; with several gamepads, the stick pushed furthest |
-| Realtime waits | at most 10 ms at a time, so closing the window stops the program soon; up to 20 ms of host oversleeping made up from later waits |
+| Host waits | at most 10 ms at a time, so closing the window stops the program soon; oversleeping needs no making up, as the clock is the host's |
 
 Gaps:
 
@@ -815,28 +824,29 @@ Gaps:
   platform on the next release.
 - Keyboard keys are matched by winit's KeyCode names, so a misspelt name
   in the settings file is not reported; it never matches.
-- Only sleeping is paced. The clock counts one tick per instruction, so
-  while a program computes, its clock runs faster than real time (about
-  seven times at the interpreter's speed). Pacing busy time too means
-  choosing how the clock relates to host time; that belongs with the
-  JIT and graphics, when real games set the pace.
+- On the host clock the interpreter is slower than a console: libnx's
+  console takes about 1.7 million instructions a frame, about 21 ms at
+  the interpreter's 80 MIPS, so a console program draws about 47 frames
+  a second instead of 60 (measured on the owner's PC with hello-world).
+  The fast backends of phases 3 and 4 close the gap.
 
 ## Next task
 
-Phase 2 is accepted (`v0.1.17`, 2026-10-30). Ask the owner which comes
-next; the candidates:
+Phase 2 is accepted (`v0.1.17`, 2026-10-30), and the clock follows the
+owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
+window, 52 instructions a tick otherwise). The first release with the
+new clock should be tagged so CI runs the self-test and the examples on
+every platform. Then ask the owner which comes next; the candidates:
 
-1. The clock rate (an owner decision, see "Phase 2 acceptance" below):
-   one tick per guest instruction makes programs see a CPU about 50 times
-   slower than a Switch's in guest time. Explain it plainly and ask.
-2. Phase 3 on Linux KVM and Windows (the native backend), now that
+1. Phase 3 on Linux KVM and Windows (the native backend), now that
    phase 2 is accepted; phase 3 on macOS needs a session on the owner's
-   Mac.
-3. A licence-notices file in the release packages, which now bundle
+   Mac. Design it for the real-time goal (`PLAN.md` section 1): guest
+   counter reads from kestrel's clock, one host thread per guest core.
+2. A licence-notices file in the release packages, which now bundle
    MIT/Apache crates (winit, softbuffer, gilrs and their dependencies).
-4. More homebrew: run other public homebrew in kestrel and fix what the
+3. More homebrew: run other public homebrew in kestrel and fix what the
    unimplemented-call log names (`user/logs/unimplemented.log`).
-5. Later input tasks the owner wants (2026-10-30): the other
+4. Later input tasks the owner wants (2026-10-30): the other
    NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
    players, and real Joy-Con motion, rumble and pairing over their own
    protocol. A Wii Remote is not a Switch controller type; it can only be
@@ -974,13 +984,16 @@ creating files beside it makes `/switch` in the card's folder; a real
 file at that path wins. A setting naming the library folder, to pick
 games from a list, comes with the frontend.
 
-A finding for later: kestrel's clock counts one tick per instruction, so
-programs see a CPU about 50 times slower than a Switch's in guest time.
-libnx's console takes about 90 ms of guest time a frame and 0.6 s for a
+A finding then: kestrel's clock counted one tick per instruction, so
+programs saw a CPU about 50 times slower than a Switch's in guest time.
+libnx's console took about 90 ms of guest time a frame and 0.6 s for a
 frame that clears the screen, so read-controls missed a 100 ms press;
-scripted presses now last 1 s. Choosing how many instructions make a
-tick (or following host time) changes every timing result and belongs
-with the faster CPU backends; it is the owner's decision.
+scripted presses now last 1 s. The owner decided the clock on
+2026-10-30 (`PLAN.md` section 3): 52 instructions a tick for headless
+runs, the host's clock with a window. A frame now takes a few
+milliseconds of guest time, so read-controls showed A released and then
+redrew its empty key list before a Plus at 3.5 s, as a console would;
+`run-examples.sh` now presses Plus at 2.5 s, while A is still held.
 
 How the display works (`hle/display.rs`, `hle/service/vi.rs`,
 `hle/service/nv.rs`):

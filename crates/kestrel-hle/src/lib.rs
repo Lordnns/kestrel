@@ -88,8 +88,8 @@ pub mod firmware {
     pub const HOS_VERSION: u64 = (MAJOR as u64) << 16 | (MINOR as u64) << 8 | MICRO as u64;
     /// The time the system clocks show when a process starts: 2025-06-05
     /// 00:00:00 UTC, the Switch 2's launch day, the owner's choice. The
-    /// clocks then run with the process clock (guest instructions as
-    /// 19.2 MHz ticks), so every run sees the same times.
+    /// clocks then run with the process clock (`Process::now`): real time
+    /// with a window, counted elsewhere, so tests see the same times.
     pub const BOOT_TIME: i64 = 1_749_081_600;
     /// The device's time zone, also the owner's choice: UTC, offset 0,
     /// no daylight saving time.
@@ -156,10 +156,6 @@ pub struct Process {
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Where the frames the program queues go: the window, or a test.
     pub screen: Option<Box<dyn display::Screen>>,
-    /// Set by the frontend when someone is using the program (its window
-    /// is open): the time every thread sleeps through also passes on the
-    /// host, instead of being skipped.
-    pub realtime: bool,
     pub svc_count: u64,
 }
 
@@ -204,7 +200,6 @@ impl Process {
             input: None,
             interrupt: None,
             screen: None,
-            realtime: false,
             svc_count: 0,
         };
         p.main_thread = p
@@ -248,14 +243,9 @@ impl Process {
 
     /// Run until the process stops or `max_steps` instructions retire.
     pub fn run(&mut self, backend: &mut dyn CpuBackend, max_steps: u64) -> Stop {
-        // A realtime run's host wait: skipped idle time not yet waited out,
-        // in nanoseconds, less what the host overslept. Kestrel's choices:
-        // waits of at most 10 ms, so a closed window stops the program
-        // soon, and at most 20 ms of oversleeping made up.
-        const MAX_WAIT_NS: i128 = 10_000_000;
-        const MAX_CREDIT_NS: i128 = 20_000_000;
-        let mut waited_idle = self.sched.idle;
-        let mut owed: i128 = 0;
+        // On the host clock, waits for a sleeping program last at most
+        // 10 ms, so a closed window stops it soon. Kestrel's choice.
+        const MAX_WAIT_NS: u64 = 10_000_000;
         let start = self.instructions();
         loop {
             let used = self.instructions() - start;
@@ -267,16 +257,18 @@ impl Process {
                     return Stop::Interrupted;
                 }
             }
-            if self.realtime {
-                owed += thread::nanoseconds(self.sched.idle - waited_idle) as i128;
-                waited_idle = self.sched.idle;
-                if owed > 0 {
-                    let wait = std::time::Duration::from_nanos(owed.min(MAX_WAIT_NS) as u64);
-                    let t = std::time::Instant::now();
-                    std::thread::sleep(wait);
-                    owed = (owed - t.elapsed().as_nanos() as i128).max(-MAX_CREDIT_NS);
+            if let Some(until) = self.sched.idle_until {
+                let now = self.now();
+                if now < until {
+                    let ns = thread::nanoseconds(until - now).clamp(1, MAX_WAIT_NS);
+                    std::thread::sleep(std::time::Duration::from_nanos(ns));
                     continue;
                 }
+                self.sched.idle_until = None;
+                if let Some(stop) = self.schedule(false) {
+                    return stop;
+                }
+                continue;
             }
             // After any wait, so the controller is read when the program
             // wakes.

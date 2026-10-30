@@ -125,7 +125,7 @@ impl Process {
         for &id in &objects {
             self.handles.retain(id);
         }
-        let until = deadline(self.cpu.retired, timeout);
+        let until = deadline(self.now(), timeout);
         self.block(Wait::Objects(objects), until);
         Ok(None)
     }
@@ -247,7 +247,7 @@ impl Process {
         if timeout == 0 {
             return Err(result::TIMED_OUT);
         }
-        let until = deadline(self.cpu.retired, timeout);
+        let until = deadline(self.now(), timeout);
         self.block(Wait::CondVar { key, mutex, tag }, until);
         Ok(())
     }
@@ -318,7 +318,7 @@ impl Process {
         if timeout == 0 {
             return Err(result::TIMED_OUT.into());
         }
-        let until = deadline(self.cpu.retired, timeout);
+        let until = deadline(self.now(), timeout);
         self.block(Wait::Address { addr }, until);
         Ok(true)
     }
@@ -473,9 +473,9 @@ mod tests {
     fn a_wait_times_out_on_the_process_clock() {
         let mut p = process();
         let (_, r) = event(&mut p);
-        let before = p.cpu.retired;
+        let before = p.now();
         wait(&mut p, &[r], 1_000_000);
-        assert_eq!(p.cpu.retired, before + 19_200);
+        assert_eq!(p.now(), before + 19_200);
         // X1 keeps the list address: the index is not updated.
         assert_eq!((p.cpu.x[0], p.cpu.x[1]), (result::TIMED_OUT, LIST));
         // No handles: only the timeout ends the wait.

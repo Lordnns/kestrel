@@ -216,10 +216,29 @@ fn system_registers() {
 }
 
 #[test]
-fn both_counters_read_the_instruction_clock() {
-    // mrs x0,cntpct_el0; nop; mrs x1,cntvct_el0; brk
-    let s = run(&[0xd53be020, 0xd503201f, 0xd53be041, 0xd4200000]);
-    assert_eq!(s.x[1], s.x[0] + 2);
+fn both_counters_read_the_counted_clock() {
+    // mrs x0,cntpct_el0; nop; mrs x1,cntvct_el0; mrs x2,cntfrq_el0; brk
+    let code = [0xd53be020, 0xd503201f, 0xd53be041, 0xd53be002, 0xd4200000];
+    // 51 instructions in, the first read is still in tick 0; two
+    // instructions later the next is in tick 1 (52 instructions a tick).
+    let s = run_with(&code, |s| {
+        s.retired = 51;
+        s.clock = crate::Clock::Counted { skipped: 1000 };
+    })
+    .0;
+    assert_eq!((s.x[0], s.x[1]), (1000, 1001));
+    assert_eq!(s.x[2], 19_200_000);
+}
+
+#[test]
+fn the_host_clock_follows_real_time() {
+    // mrs x0,cntpct_el0; brk, 20 ms after the clock started.
+    let s = run_with(&[0xd53be020, 0xd4200000], |s| {
+        s.clock = crate::Clock::host();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    })
+    .0;
+    assert!(s.x[0] >= 20 * 19_200, "{} ticks", s.x[0]);
 }
 
 #[test]

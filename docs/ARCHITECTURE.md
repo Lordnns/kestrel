@@ -168,9 +168,11 @@ method; the methods live next to the state they change:
 
 ### Scheduling
 
-Every thread runs on one host thread, so runs repeat exactly. Guest
-threads are spread over four virtual cores; each core runs its
-best-priority ready thread, and the cores take turns:
+Every thread runs on one host thread, so runs on the counted clock
+repeat exactly. Guest threads are spread over four virtual cores; each
+core runs its best-priority ready thread, and the cores take turns (the
+native and recompiler backends will run each core on its own host
+thread instead, `PLAN.md` section 3):
 
 ```
 Process::run
@@ -180,15 +182,22 @@ Process::run
        └─ slice used up (19,200 instructions) → schedule(rotate)
 schedule: wake sleepers and time out waiters whose time came; pick the
           best ready thread of this core (or of the next core with one,
-          when rotating); if none is ready, jump the clock to the next
-          deadline, or stop with a deadlock report if there is none
+          when rotating); if none is ready, jump a counted clock to
+          the next deadline (on the host clock, set idle_until and let
+          Process::run wait on the host), or stop with a deadlock report
+          if there is none
 ```
 
-`CpuState::retired` doubles as the process clock (one instruction per
-tick of the 19.2 MHz counter): a switch hands the clock to the incoming
-thread and clears the outgoing thread's exclusive monitor. Idle jumps are
-counted separately, so `Process::instructions` reports only executed
-instructions.
+The process clock is the 19.2 MHz system counter, `CpuState::counter`,
+which the interpreter's MRS CNTPCT_EL0 and the OS layer both read. Its
+source is `CpuState::clock` (the owner's decision, `PLAN.md` section 3):
+`Clock::Counted` gives one tick every 52 retired instructions (998.4 MHz)
+plus the ticks skipped while every thread slept, so the self-test and
+headless runs repeat; `Clock::Host` is the host's monotonic clock, set by
+`kestrel run` when it opens a window, so guest time is real time. A
+switch hands the instruction count and the clock to the incoming thread
+and clears the outgoing thread's exclusive monitor.
+`Process::instructions` counts only executed instructions.
 
 Planned: the remaining system services behind sm:, which will also
 bring buffer transfers and shared memory.

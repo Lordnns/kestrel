@@ -363,10 +363,13 @@ fn emulate(
     proc.echo = true;
     proc.services.fs.sd = sd;
     proc.services.fs.program = program;
-    // With a window someone is using the program: it runs in real time,
-    // for as long as they like.
+    // With a window someone is using the program: it runs on the host's
+    // clock, in real time, for as long as they like (the owner's decision
+    // of 2026-10-30). Without one, time is counted, so runs repeat.
     let windowed = window.is_some();
-    proc.realtime = windowed;
+    if windowed {
+        proc.cpu.clock = kestrel_cpu::Clock::host();
+    }
     if let Some((input, screen, interrupt)) = window {
         proc.input = Some(input);
         proc.screen = Some(screen);

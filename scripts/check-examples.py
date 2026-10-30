@@ -11,12 +11,13 @@ with what each example's source (switchbrew/switch-examples, public
 domain mark) prints:
 
 - hello-world: "Hello World!" at row 16, column 20 (its escape code).
-- read-controls, with A pressed, then Plus: on any key change its loop
-  clears the screen and prints a slightly different header ("stick", not
-  "joystick"), both sticks at 0000; 0000, then the key's state: "A down"
-  and "A held", "A held", or "A up", depending on the last change it saw
-  before Plus (it stops on Plus before printing again). Which one depends
-  on timing, so any of the three passes.
+- read-controls, with A pressed, then Plus while A is still held: on
+  any key change its loop clears the screen and prints a slightly
+  different header ("stick", not "joystick"), both sticks at 0000; 0000,
+  then the key's state: "A down" and "A held", then "A held" on the next
+  frame (it stops on Plus before printing again). A program slower than
+  a frame may still show the first, and "A up" is accepted too, so the
+  check does not depend on timing.
 - sdmc, run from sdmc:/switch on an empty card: the listing of its own
   folder, which holds only itself.
 - barrier: "Creating threads", then for each of its four threads

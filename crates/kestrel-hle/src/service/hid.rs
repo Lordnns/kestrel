@@ -161,13 +161,13 @@ impl Process {
     /// with at most a ring's worth of samples, as a console keeps sampling
     /// while a program sleeps.
     pub(crate) fn hid_tick(&mut self) {
-        let now = self.cpu.retired;
+        let now = self.now();
         let hid = &mut self.services.hid;
         let behind = layout::LIFO_ENTRIES as u64 * SAMPLE_PERIOD;
         if now >= hid.next_sample + behind {
             hid.next_sample = now - (behind - SAMPLE_PERIOD);
         }
-        while self.cpu.retired >= self.services.hid.next_sample {
+        while now >= self.services.hid.next_sample {
             self.services.hid.next_sample += SAMPLE_PERIOD;
             self.hid_sample();
         }

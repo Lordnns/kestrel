@@ -65,6 +65,52 @@ impl fmt::Debug for Flags {
     }
 }
 
+/// The guest's system counter frequency, reported through CNTFRQ_EL0:
+/// 19.2 MHz, the rate Switchbrew documents for GetSystemTick ("SVC").
+pub const COUNTER_HZ: u64 = 19_200_000;
+
+/// Guest instructions per counter tick on the counted clock: 52, so the
+/// guest CPU runs at 52 x 19.2 MHz = 998.4 MHz, the Switch 2's rate of
+/// about 1 GHz (the owner's decision of 2026-10-30; one instruction a
+/// cycle is kestrel's choice).
+pub const INSTRUCTIONS_PER_TICK: u64 = 52;
+
+/// Where the system counter (CNTPCT_EL0, GetSystemTick) gets its time.
+/// The owner's decision of 2026-10-30: a program someone is using runs in
+/// real time; tests and unattended runs count time, so they repeat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    /// Counted from the instructions retired, `INSTRUCTIONS_PER_TICK` to
+    /// a tick, plus the ticks skipped while every guest thread slept.
+    Counted { skipped: u64 },
+    /// The host's monotonic clock since `start`: guest time is real time.
+    Host { start: std::time::Instant },
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Clock::Counted { skipped: 0 }
+    }
+}
+
+impl Clock {
+    /// The host clock, starting at 0 now.
+    pub fn host() -> Self {
+        Clock::Host {
+            start: std::time::Instant::now(),
+        }
+    }
+
+    /// Move a counted clock on by `ticks`, for time no instruction runs
+    /// in. Real time cannot be skipped, so the host clock panics.
+    pub fn skip(&mut self, ticks: u64) {
+        match self {
+            Clock::Counted { skipped } => *skipped += ticks,
+            Clock::Host { .. } => panic!("the host clock cannot skip time"),
+        }
+    }
+}
+
 /// Register file and user-visible system state.
 #[derive(Clone, Default)]
 pub struct CpuState {
@@ -82,11 +128,22 @@ pub struct CpuState {
     pub tpidrro_el0: u64,
     /// Exclusive monitor for LDXR/STXR.
     pub exclusive_addr: Option<u64>,
-    /// Instructions retired, also used as the virtual counter.
+    /// Instructions retired.
     pub retired: u64,
+    /// The system counter's time source.
+    pub clock: Clock,
 }
 
 impl CpuState {
+    /// The system counter: ticks of the 19.2 MHz clock.
+    pub fn counter(&self) -> u64 {
+        match self.clock {
+            Clock::Counted { skipped } => self.retired / INSTRUCTIONS_PER_TICK + skipped,
+            // 19.2 MHz is 12 ticks every 625 ns.
+            Clock::Host { start } => (start.elapsed().as_nanos() * 12 / 625) as u64,
+        }
+    }
+
     /// Read Xn where 31 means XZR.
     #[inline(always)]
     pub fn xr(&self, n: u32) -> u64 {

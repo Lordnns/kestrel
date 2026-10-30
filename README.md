@@ -114,8 +114,11 @@ in the terminal. Close the window to stop.
 cargo run --release -p kestrel-cli -- run guest/bin/padview.nro
 ```
 
-With a window, programs run in real time: a program that sleeps waits
-for real, and there is no instruction budget. On Linux, gamepads need libudev (`libudev.so.1`, on every desktop
+With a window, programs run in real time: the guest's clock is the
+host's, a program that sleeps waits for real, and there is no instruction
+budget. Without one (`--headless`, the self-test) time is counted, one
+tick of the 19.2 MHz counter every 52 instructions (a 998.4 MHz CPU, as
+on a Switch 2), so every run repeats exactly. On Linux, gamepads need libudev (`libudev.so.1`, on every desktop
 distribution).
 
 ### The standard homebrew examples

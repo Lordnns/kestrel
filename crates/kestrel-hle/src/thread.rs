@@ -13,19 +13,21 @@
 //!   core with a ready thread when the running thread yields, sleeps or
 //!   exits, or has run for a slice of `SLICE` instructions, so a thread
 //!   spinning on one core cannot starve the others.
-//! - One process-wide clock counts guest instructions as ticks of the
-//!   documented 19.2 MHz counter ("SVC", GetSystemTick). When every live
-//!   thread sleeps, the clock jumps to the earliest wake-up, or to the
-//!   next vsync that frees a buffer the program queued. With
-//!   `Process::realtime` (a window is open) the run loop then waits that
-//!   time out on the host, so a sleeping program sleeps for real.
+//! - One process-wide clock, the documented 19.2 MHz counter ("SVC",
+//!   GetSystemTick), is either counted or the host's (`kestrel_cpu::Clock`,
+//!   the owner's decision of 2026-10-30). The counted clock ticks once
+//!   every 52 guest instructions (a 998.4 MHz CPU); when every live thread
+//!   sleeps, it jumps to the earliest wake-up, or to the next vsync that
+//!   frees a buffer the program queued, so every run repeats exactly. On
+//!   the host clock (a window is open) guest time is real time, and the run
+//!   loop waits on the host until that wake-up instead.
 
 use crate::kernel::{Kind, Object, ObjectId};
 use crate::memory::{state, tag};
 use crate::svc::{handle, result};
 use crate::{layout, Process, Stop};
 use kestrel_core::Perm;
-use kestrel_cpu::CpuState;
+use kestrel_cpu::{Clock, CpuState};
 
 /// Virtual cores; svcCreateThread takes ProcessorId 0 to 3 ("SVC").
 pub const CORES: u32 = 4;
@@ -36,8 +38,8 @@ pub const DEFAULT_CORE: u32 = 0;
 pub const MAIN_PRIORITY: u32 = 0x2c;
 /// The lowest priority; 0 is the highest ("SVC", SetThreadPriority).
 pub const LOWEST_PRIORITY: u32 = 0x3f;
-/// Instructions a core runs before the next core gets its turn: 1 ms of
-/// the 19.2 MHz clock. Kestrel's choice.
+/// Instructions a core runs before the next core gets its turn: about
+/// 19 µs of a 998.4 MHz CPU. Kestrel's choice.
 pub const SLICE: u64 = 19_200;
 /// The size of a thread local region ("Thread Local Region").
 pub const TLR_SIZE: u64 = 0x200;
@@ -114,8 +116,9 @@ pub struct Scheduler {
     tlrs: Vec<u64>,
     /// Pages of thread local regions mapped from `layout::TLS_BASE`.
     tls_pages: u64,
-    /// Clock ticks that passed with every thread asleep.
-    pub idle: u64,
+    /// On the host clock, every thread sleeps until this clock reading:
+    /// the run loop waits on the host, then schedules again.
+    pub(crate) idle_until: Option<u64>,
     /// Set by a call after which the next core should get its turn.
     pub(crate) rotate: bool,
     /// Instructions left in the running core's slice.
@@ -174,7 +177,12 @@ impl Process {
 
     /// Guest instructions retired by every thread together.
     pub fn instructions(&self) -> u64 {
-        self.cpu.retired - self.sched.idle
+        self.cpu.retired
+    }
+
+    /// The process clock: ticks of the 19.2 MHz system counter.
+    pub fn now(&self) -> u64 {
+        self.cpu.counter()
     }
 
     /// A zeroed thread local region, mapping a new page when the mapped
@@ -453,7 +461,7 @@ impl Process {
     /// the thread to sleep. Other negative values are not documented.
     pub fn sleep_thread(&mut self, ns: i64) -> Result<(), String> {
         let until = match ns {
-            1.. => Some(self.cpu.retired.saturating_add(ticks(ns as u64))),
+            1.. => Some(self.now().saturating_add(ticks(ns as u64))),
             -2..=0 => None,
             _ => return Err(format!("svcSleepThread with {ns} nanoseconds")),
         };
@@ -488,7 +496,8 @@ impl Process {
             return;
         }
         let mut incoming = std::mem::take(&mut s.threads[next].cpu);
-        incoming.retired = self.cpu.retired; // the clock is process-wide
+        // The instruction count and the clock are process-wide.
+        (incoming.retired, incoming.clock) = (self.cpu.retired, self.cpu.clock);
         let mut outgoing = std::mem::replace(&mut self.cpu, incoming);
         // A switch clears the exclusive monitor, so a store-exclusive that
         // another thread may have overtaken fails and is retried.
@@ -500,13 +509,15 @@ impl Process {
     /// Pick the thread to run after a system call: the best ready thread of
     /// the running thread's core, or, when `rotate` is set, of the next
     /// core with a ready thread. Wakes sleepers whose time has come and
-    /// skips idle time. Stops the process when no thread is left to run.
+    /// skips idle time on the counted clock; on the host clock, sets
+    /// `idle_until` for the run loop to wait. Stops the process when no
+    /// thread is left to run.
     pub(crate) fn schedule(&mut self, rotate: bool) -> Option<Stop> {
         loop {
             // The display frees queued buffers at vsync, which may wake
             // a thread waiting for one.
             self.vsync_tick();
-            let now = self.cpu.retired;
+            let now = self.now();
             for i in 0..self.sched.threads.len() {
                 match self.sched.threads[i].state {
                     State::Sleeping { until } if until <= now => {
@@ -552,10 +563,11 @@ impl Process {
                 .chain(self.services.vi.next_release())
                 .min();
             match wake {
-                Some(until) => {
-                    self.sched.idle += until - now;
-                    self.cpu.retired = until;
+                Some(until) if matches!(self.cpu.clock, Clock::Host { .. }) => {
+                    self.sched.idle_until = Some(until);
+                    return None;
                 }
+                Some(until) => self.cpu.clock.skip(until.saturating_sub(now)),
                 None if self.sched.threads.iter().all(|t| t.state == State::Exited) => {
                     return Some(Stop::Exited)
                 }
@@ -685,21 +697,23 @@ mod tests {
     #[test]
     fn sleeping_skips_idle_time_without_counting_instructions() {
         let mut p = process();
-        p.cpu.retired = 100;
+        p.cpu.retired = 100 * 52 + 51; // 100 ticks of 52 instructions
+        assert_eq!(p.now(), 100);
         svc(&mut p, nr::SLEEP_THREAD, &[1_000_000]); // 1 ms
         assert_eq!(running(&p), 0x1000);
-        assert_eq!(p.cpu.retired, 100 + 19_200);
-        assert_eq!(p.instructions(), 100);
+        assert_eq!(p.now(), 100 + 19_200);
+        assert_eq!(p.instructions(), 100 * 52 + 51);
         // A sleeping thread lets a lower-priority one run until it wakes.
         let h = spawn(&mut p, 0x2000, 0x3f, 0);
         svc(&mut p, nr::START_THREAD, &[h]);
         svc(&mut p, nr::SLEEP_THREAD, &[1_000_000]);
         assert_eq!(running(&p), 0x2000);
-        p.cpu.retired += 19_200; // the low-priority thread runs for 1 ms
+        // The low-priority thread runs for 1 ms: 998,400 instructions.
+        p.cpu.retired += 19_200 * 52;
         svc(&mut p, nr::GET_SYSTEM_TICK, &[]);
         assert_eq!(running(&p), 0x1000, "woken and preempting");
-        assert_eq!(p.cpu.retired, 100 + 2 * 19_200);
-        assert_eq!(p.instructions(), 100 + 19_200);
+        assert_eq!(p.now(), 100 + 2 * 19_200);
+        assert_eq!(p.instructions(), 100 * 52 + 51 + 998_400);
     }
 
     /// mov x0, #50000000 (50 ms); svc #0xb (SleepThread); svc #0x7
@@ -715,18 +729,33 @@ mod tests {
     }
 
     #[test]
-    fn a_realtime_run_waits_out_the_sleep_on_the_host() {
+    fn a_run_on_the_host_clock_waits_out_the_sleep_on_the_host() {
         let mut interp = kestrel_cpu::interp::Interpreter { trace: false };
+        // Counted: the sleep is skipped, and the clock lands on its end
+        // (3 instructions before it are tick 0).
         let mut p = sleeper();
         let t = std::time::Instant::now();
         assert_eq!(p.run(&mut interp, 100), Stop::Exited);
         assert!(t.elapsed().as_millis() < 50, "skipped: {:?}", t.elapsed());
+        assert_eq!(p.now(), ticks(50_000_000));
         let mut p = sleeper();
-        p.realtime = true;
+        p.cpu.clock = Clock::host();
         let t = std::time::Instant::now();
         assert_eq!(p.run(&mut interp, 100), Stop::Exited);
         assert!(t.elapsed().as_millis() >= 50, "waited: {:?}", t.elapsed());
-        assert_eq!(p.cpu.retired - p.instructions(), ticks(50_000_000));
+        assert!(p.now() >= ticks(50_000_000));
+        assert_eq!(p.instructions(), 4);
+    }
+
+    #[test]
+    fn the_clock_is_process_wide() {
+        let mut p = process();
+        p.cpu.retired = 52 * 7;
+        p.cpu.clock.skip(1000);
+        let h = spawn(&mut p, 0x2000, 0x20, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(running(&p), 0x2000);
+        assert_eq!(p.now(), 1007, "the new thread sees the same clock");
     }
 
     #[test]

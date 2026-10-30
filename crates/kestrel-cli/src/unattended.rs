@@ -11,11 +11,10 @@ use std::rc::Rc;
 /// hid samples the controller every 5 ms of guest time, 200 a second.
 const SAMPLES_PER_SECOND: f64 = 200.0;
 /// How long a scripted press holds its button: 200 samples, 1 s (kestrel's
-/// choice). kestrel's clock counts a tick per instruction, so a program
-/// drawing its screen in software runs slowly in guest time: libnx's
-/// console takes about 90 ms a frame, and 0.6 s for a frame that clears
-/// and redraws the screen. A press must outlast a frame to be seen by a
-/// program reading the controller once a frame.
+/// choice). A press must outlast a frame to be seen by a program reading
+/// the controller once a frame; at the counted clock's 998.4 MHz libnx's
+/// console draws a frame in a few milliseconds of guest time, so 1 s
+/// leaves room for programs far slower than that.
 const HOLD: u64 = 200;
 
 /// A press: `button` (a Switchbrew name) at `seconds` of the controller's

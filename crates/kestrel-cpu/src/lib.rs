@@ -17,7 +17,7 @@ pub mod interp;
 pub mod state;
 
 use kestrel_core::{MemFault, Memory};
-pub use state::{CpuState, Flags};
+pub use state::{Clock, CpuState, Flags};
 
 /// Why a backend stopped running guest code.
 #[derive(Clone, Debug, PartialEq, Eq)]

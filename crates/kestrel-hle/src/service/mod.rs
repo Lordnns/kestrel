@@ -1501,7 +1501,7 @@ mod tests {
             o => panic!("{o:?}"),
         }
         // Three seconds and a bit of the process clock later.
-        p.cpu.retired = 3 * 19_200_000 + 5;
+        p.cpu.clock.skip(3 * 19_200_000 + 5);
         let now = (crate::firmware::BOOT_TIME + 3).to_le_bytes();
         for clock in [user, network, local] {
             assert_eq!(send(&mut p, clock, &cmif(4, false, 0, &[])), Ok(0));
@@ -2000,7 +2000,7 @@ mod tests {
         // QUEUE_BUFFER: the slot and a QueueBufferInput of 0x54 bytes.
         let mut queue = words(&[0]);
         queue.extend(flattened(&[0; 0x54]));
-        p.cpu.retired = 1000;
+        p.cpu.clock.skip(1000);
         assert_eq!(
             u32s(&transact(&mut p, 7, &queue).unwrap()),
             [32, 8, 0, 1, 0]
@@ -2025,7 +2025,7 @@ mod tests {
         svc(&mut p, nr::WAIT_SYNCHRONIZATION, &wait);
         // The wake-up wrote the result and the index.
         assert_eq!((p.cpu.x[0], p.cpu.x[1]), (0, 0));
-        assert_eq!(p.cpu.retired, vi::VSYNC_PERIOD);
+        assert_eq!(p.now(), vi::VSYNC_PERIOD);
         assert_eq!(frames.borrow().len(), 2);
         // Freed oldest first; CANCEL_BUFFER frees a dequeued buffer.
         assert_eq!(dequeue(&mut p).unwrap()[0], 0);
@@ -2543,13 +2543,13 @@ mod tests {
             assert_eq!(send(p, hid, &request(true, &[], None, 100, &styles)), Ok(0));
         }
         // Sample next one period from now.
-        p.services.hid.next_sample = p.cpu.retired + hid::SAMPLE_PERIOD;
+        p.services.hid.next_sample = p.now() + hid::SAMPLE_PERIOD;
         p.handles.get(shm).unwrap().1
     }
 
     /// Advance the guest clock by one sampling period and let hid sample.
     fn sample(p: &mut Process) {
-        p.cpu.retired += hid::SAMPLE_PERIOD;
+        p.cpu.clock.skip(hid::SAMPLE_PERIOD);
         p.hid_tick();
     }
 
@@ -2628,7 +2628,7 @@ mod tests {
         assert_eq!(u64_at(&p, shm, lifo + 0x10), 3);
         assert_eq!(u64_at(&p, shm, lifo + LIFO_HEADER + 3 * LIFO_ENTRY), 20);
         // After a long sleep hid catches up with a ring's worth of samples.
-        p.cpu.retired += 40 * hid::SAMPLE_PERIOD;
+        p.cpu.clock.skip(40 * hid::SAMPLE_PERIOD);
         p.hid_tick();
         assert_eq!(p.services.hid.samples, 21 + 17);
         assert_eq!(u64_at(&p, shm, lifo + 0x18), 16);

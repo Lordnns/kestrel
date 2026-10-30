@@ -2,6 +2,7 @@
 
 use super::bits::*;
 use super::{Ctx, Flow, Step};
+use crate::state::COUNTER_HZ;
 use crate::Flags;
 
 /// Pack (op0, op1, CRn, CRm, op2) the way MRS/MSR encode it in bits 20..5.
@@ -19,10 +20,6 @@ const DCZID_EL0: u32 = sysreg(3, 3, 0, 0, 7);
 const CNTFRQ_EL0: u32 = sysreg(3, 3, 14, 0, 0);
 const CNTPCT_EL0: u32 = sysreg(3, 3, 14, 0, 1);
 const CNTVCT_EL0: u32 = sysreg(3, 3, 14, 0, 2);
-
-/// Guest timer frequency reported through CNTFRQ_EL0 (19.2 MHz, a common
-/// ARM SoC value; adjust once the real platform value is measured).
-pub const COUNTER_HZ: u64 = 19_200_000;
 
 pub fn exec(c: &mut Ctx) -> Step {
     let i = c.insn;
@@ -90,7 +87,7 @@ pub fn exec(c: &mut Ctx) -> Step {
             CNTFRQ_EL0 => COUNTER_HZ,
             // The virtual offset is 0, so both counters read the same clock;
             // libnx's armGetSystemTick reads CNTPCT_EL0.
-            CNTPCT_EL0 | CNTVCT_EL0 => c.s.retired,
+            CNTPCT_EL0 | CNTVCT_EL0 => c.s.counter(),
             _ => return Err(c.undef()),
         };
         c.s.set_xr(rt, v);

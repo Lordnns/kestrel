@@ -27,7 +27,7 @@ const LOCATION_NAME_SIZE: usize = 0x24;
 /// The steady clock's time point: whole seconds of the process clock. The
 /// steady clock starts at 0 when the process starts (kestrel's choice).
 fn steady_seconds(p: &Process) -> i64 {
-    (p.cpu.retired / TICKS_PER_SECOND) as i64
+    (p.now() / TICKS_PER_SECOND) as i64
 }
 
 /// A SystemClockContext: the clock's epoch, then the SteadyClockTimePoint

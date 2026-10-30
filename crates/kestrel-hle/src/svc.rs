@@ -470,7 +470,7 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
             None
         }
         nr::GET_SYSTEM_TICK => {
-            p.cpu.x[0] = p.cpu.retired;
+            p.cpu.x[0] = p.now();
             None
         }
         nr::BREAK => svc_break(p),
