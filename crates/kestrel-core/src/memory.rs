@@ -75,9 +75,27 @@ impl fmt::Display for MemFault {
 
 impl std::error::Error for MemFault {}
 
+/// What the OS layer records about a region (for the HLE kernel, the memory
+/// type and attribute). Opaque here: carried along when regions split.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tag {
+    pub state: u32,
+    pub attr: u32,
+}
+
+/// One mapped region, or a clipped part of one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Block {
+    pub base: u64,
+    pub size: u64,
+    pub perm: Perm,
+    pub tag: Tag,
+}
+
 struct Region {
     data: Vec<u8>,
     perm: Perm,
+    tag: Tag,
     name: String,
 }
 
@@ -96,25 +114,147 @@ impl Memory {
 
     /// Map `size` zeroed bytes at `base`. Both must be page aligned.
     pub fn map(&mut self, base: u64, size: u64, perm: Perm, name: &str) -> Result<(), MemFault> {
-        if base % PAGE_SIZE != 0 || size % PAGE_SIZE != 0 || size == 0 {
-            return Err(MemFault::Misaligned { addr: base });
-        }
-        let end = base
-            .checked_add(size)
-            .ok_or(MemFault::Overlap { addr: base })?;
-        if let Some((&b, r)) = self.regions.range(..end).next_back() {
-            if b + r.data.len() as u64 > base {
-                return Err(MemFault::Overlap { addr: base });
-            }
+        self.map_tagged(base, size, perm, Tag::default(), name)
+    }
+
+    /// Map `size` zeroed bytes at `base` with an OS tag.
+    pub fn map_tagged(
+        &mut self,
+        base: u64,
+        size: u64,
+        perm: Perm,
+        tag: Tag,
+        name: &str,
+    ) -> Result<(), MemFault> {
+        let end = Self::range_end(base, size)?;
+        if !self.is_free(base, end - base) {
+            return Err(MemFault::Overlap { addr: base });
         }
         self.regions.insert(
             base,
             Region {
                 data: vec![0; size as usize],
                 perm,
+                tag,
                 name: name.to_string(),
             },
         );
+        Ok(())
+    }
+
+    /// The end of a page-aligned, non-empty range that does not wrap.
+    fn range_end(base: u64, size: u64) -> Result<u64, MemFault> {
+        if base % PAGE_SIZE != 0 || size % PAGE_SIZE != 0 || size == 0 {
+            return Err(MemFault::Misaligned { addr: base });
+        }
+        base.checked_add(size)
+            .ok_or(MemFault::Overlap { addr: base })
+    }
+
+    /// Whether no region overlaps `[base, base + size)`.
+    pub fn is_free(&self, base: u64, size: u64) -> bool {
+        let end = base.saturating_add(size);
+        match self.regions.range(..end).next_back() {
+            Some((&b, r)) => b + r.data.len() as u64 <= base,
+            None => true,
+        }
+    }
+
+    /// The region containing `addr`.
+    pub fn region(&self, addr: u64) -> Option<Block> {
+        let base = self.find(addr)?;
+        let r = &self.regions[&base];
+        Some(Block {
+            base,
+            size: r.data.len() as u64,
+            perm: r.perm,
+            tag: r.tag,
+        })
+    }
+
+    /// The unmapped gap around an unmapped `addr`, as (start, end): start is
+    /// the end of the region below (or 0), end the start of the region
+    /// above (`None` when nothing is mapped above).
+    pub fn gap(&self, addr: u64) -> Option<(u64, Option<u64>)> {
+        if self.is_mapped(addr) {
+            return None;
+        }
+        let start = self
+            .regions
+            .range(..=addr)
+            .next_back()
+            .map_or(0, |(&b, r)| b + r.data.len() as u64);
+        let end = self.regions.range(addr..).next().map(|(&b, _)| b);
+        Some((start, end))
+    }
+
+    /// The regions covering `[base, base + size)`, clipped to it. Fails if
+    /// any page in the range is unmapped or the range is not page aligned.
+    pub fn range_regions(&self, base: u64, size: u64) -> Result<Vec<Block>, MemFault> {
+        let end = Self::range_end(base, size)?;
+        let mut out = Vec::new();
+        let mut at = base;
+        while at < end {
+            let b = self.region(at).ok_or(MemFault::Unmapped { addr: at })?;
+            let stop = (b.base + b.size).min(end);
+            out.push(Block {
+                base: at,
+                size: stop - at,
+                ..b
+            });
+            at = stop;
+        }
+        Ok(out)
+    }
+
+    /// Make `addr` a region boundary, splitting the region containing it.
+    fn split(&mut self, addr: u64) {
+        let Some(base) = self.find(addr) else { return };
+        if base == addr {
+            return;
+        }
+        self.last.set((0, 0));
+        let r = self.regions.get_mut(&base).expect("region from find");
+        let tail = Region {
+            data: r.data.split_off((addr - base) as usize),
+            perm: r.perm,
+            tag: r.tag,
+            name: r.name.clone(),
+        };
+        self.regions.insert(addr, tail);
+    }
+
+    /// Change the permission and tag of every page in `[base, base + size)`,
+    /// which must be fully mapped; regions are split at the range edges.
+    pub fn update_range(
+        &mut self,
+        base: u64,
+        size: u64,
+        mut f: impl FnMut(&mut Perm, &mut Tag),
+    ) -> Result<(), MemFault> {
+        self.range_regions(base, size)?;
+        self.split(base);
+        self.split(base + size);
+        for (_, r) in self.regions.range_mut(base..base + size) {
+            f(&mut r.perm, &mut r.tag);
+        }
+        Ok(())
+    }
+
+    /// Unmap every page in `[base, base + size)`, which must be fully mapped.
+    pub fn unmap_range(&mut self, base: u64, size: u64) -> Result<(), MemFault> {
+        self.range_regions(base, size)?;
+        self.split(base);
+        self.split(base + size);
+        self.last.set((0, 0));
+        let doomed: Vec<u64> = self
+            .regions
+            .range(base..base + size)
+            .map(|(&b, _)| b)
+            .collect();
+        for b in doomed {
+            self.regions.remove(&b);
+        }
         Ok(())
     }
 
@@ -278,6 +418,59 @@ rw_impl!(read128, write128, u128);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const T: Tag = Tag { state: 5, attr: 0 };
+
+    #[test]
+    fn update_range_splits_and_keeps_contents() {
+        let mut m = Memory::new();
+        m.map_tagged(0x10000, 0x4000, Perm::RW, T, "heap").unwrap();
+        m.write64(0x11ff8, 0x1122_3344_5566_7788).unwrap();
+        m.update_range(0x11000, 0x2000, |p, t| {
+            *p = Perm::R;
+            t.attr = 8;
+        })
+        .unwrap();
+        let blocks = m.range_regions(0x10000, 0x4000).unwrap();
+        let shape: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.base, b.size, b.perm, b.tag.attr))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0x10000, 0x1000, Perm::RW, 0),
+                (0x11000, 0x2000, Perm::R, 8),
+                (0x13000, 0x1000, Perm::RW, 0),
+            ]
+        );
+        // Contents survive the split; the read-only part rejects writes, and
+        // a read straddling two regions still works.
+        assert_eq!(m.read64(0x11ff8).unwrap(), 0x1122_3344_5566_7788);
+        assert!(m.write8(0x11000, 1).is_err());
+        m.write32(0x10ffc, 0xaabb_ccdd).unwrap();
+        assert_eq!(m.read64(0x10ffc).unwrap(), 0x0000_0000_aabb_ccdd);
+    }
+
+    #[test]
+    fn unmap_range_leaves_the_rest_and_reports_gaps() {
+        let mut m = Memory::new();
+        m.map_tagged(0x10000, 0x4000, Perm::RW, T, "heap").unwrap();
+        m.write8(0x13000, 9).unwrap();
+        m.unmap_range(0x11000, 0x1000).unwrap();
+        assert!(!m.is_mapped(0x11800));
+        assert_eq!(m.read8(0x13000).unwrap(), 9);
+        assert_eq!(m.gap(0x11800), Some((0x11000, Some(0x12000))));
+        assert_eq!(m.gap(0x20000), Some((0x14000, None)));
+        assert_eq!(m.gap(0x100), Some((0, Some(0x10000))));
+        assert_eq!(m.gap(0x10000), None);
+        assert!(m.is_free(0x11000, 0x1000));
+        assert!(!m.is_free(0x11000, 0x2000));
+        // Ranges must be fully mapped and page aligned.
+        assert!(m.unmap_range(0x10000, 0x3000).is_err());
+        assert!(m.update_range(0x10000, 0x800, |_, _| {}).is_err());
+        assert_eq!(m.region(0x10000).unwrap().size, 0x1000);
+    }
 
     #[test]
     fn map_read_write() {

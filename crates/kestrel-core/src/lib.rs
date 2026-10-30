@@ -5,7 +5,7 @@
 
 pub mod memory;
 
-pub use memory::{MemFault, Memory, Perm, PAGE_SIZE};
+pub use memory::{Block, MemFault, Memory, Perm, Tag, PAGE_SIZE};
 
 /// Host CPU architecture the emulator was compiled for.
 pub fn host_arch() -> &'static str {
