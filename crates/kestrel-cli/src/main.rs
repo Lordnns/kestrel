@@ -232,6 +232,19 @@ fn run(o: Opts) -> Result<ExitCode, String> {
             eprintln!("guest break at {pc:#x} (reason {reason:#x})");
             Ok(ExitCode::from(3))
         }
+        Stop::Abort { pc, reason, result } => {
+            let with = result.map_or(String::new(), |r| {
+                format!(": result {}", kestrel_hle::results::describe(r))
+            });
+            let what = kestrel_hle::svc::break_reason(reason);
+            eprintln!("guest aborted ({what}) at {pc:#x}{with}");
+            Ok(ExitCode::from(3))
+        }
+        Stop::Fatal { result } => {
+            let what = kestrel_hle::results::describe(result);
+            eprintln!("guest fatal error {what}");
+            Ok(ExitCode::from(3))
+        }
         Stop::StepLimit => {
             eprintln!("stopped: instruction budget exhausted");
             Ok(ExitCode::from(4))

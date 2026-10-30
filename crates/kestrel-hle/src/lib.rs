@@ -12,6 +12,7 @@ pub mod homebrew;
 pub mod ipc;
 pub mod kernel;
 pub mod memory;
+pub mod results;
 pub mod service;
 pub mod svc;
 pub mod sync;
@@ -94,8 +95,18 @@ pub mod firmware {
 pub enum Stop {
     /// Guest called ExitProcess.
     Exited,
-    /// Guest hit a BRK or svcBreak.
+    /// Guest hit a BRK instruction.
     Break { pc: u64, reason: u64 },
+    /// svcBreak without the notification-only flag: the console's crash
+    /// reporting (Switchbrew, "SVC"). The reason, and the result libnx's
+    /// diagAbortWithResult passes with it.
+    Abort {
+        pc: u64,
+        reason: u32,
+        result: Option<u32>,
+    },
+    /// fatal:u with an error screen: the program ends with this result.
+    Fatal { result: u32 },
     /// Something the emulator does not support yet, or a guest crash.
     Error(String),
     /// The step budget ran out.
@@ -122,8 +133,11 @@ pub struct Process {
     pub mapped_memory: Vec<(u64, u64, u64)>,
     /// Bytes the guest wrote through svcOutputDebugString.
     pub debug_output: Vec<u8>,
-    /// Echo debug output to stdout as it arrives.
+    /// Echo debug output to stdout as it arrives, and kestrel's notes to
+    /// stderr.
     pub echo: bool,
+    /// Kestrel's notes on what the program did that it should hear of.
+    pub log: Vec<String>,
     pub svc_count: u64,
 }
 
@@ -164,6 +178,7 @@ impl Process {
             mapped_memory: Vec::new(),
             debug_output: Vec::new(),
             echo: false,
+            log: Vec::new(),
             svc_count: 0,
         };
         p.main_thread = p
@@ -260,6 +275,14 @@ impl Process {
                 }
             }
         }
+    }
+
+    /// Add a note to the log, echoed to stderr when output is echoed.
+    pub fn note(&mut self, what: String) {
+        if self.echo {
+            eprintln!("kestrel: {what}");
+        }
+        self.log.push(what);
     }
 
     pub fn debug_output_str(&self) -> String {

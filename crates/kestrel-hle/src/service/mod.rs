@@ -16,8 +16,10 @@
 //! with its name and number, never with a made-up answer.
 
 pub mod am;
+pub mod fatal;
 pub mod fs;
 pub mod hid;
+pub mod psm;
 pub mod set;
 pub mod sm;
 pub mod time;
@@ -69,6 +71,11 @@ pub enum Interface {
     SdCard,
     File(u32),
     Directory(u32),
+    /// "psm" and its IPsmSession, power state.
+    Psm,
+    PsmSession,
+    /// "fatal:u", fatal errors.
+    FatalU,
     /// "test": command 0 echoes its arguments, command 1 fails with
     /// result 0x1234, command 2 hands out another test object. For unit
     /// tests of the session path.
@@ -84,6 +91,8 @@ const SERVICES: &[(&str, Interface)] = &[
     ("hid", Interface::Hid),
     ("time:u", Interface::TimeU),
     ("fsp-srv", Interface::FileSystemProxy),
+    ("psm", Interface::Psm),
+    ("fatal:u", Interface::FatalU),
     #[cfg(test)]
     ("test", Interface::Test),
 ];
@@ -118,6 +127,9 @@ impl Interface {
             SdCard => "IFileSystem",
             File(_) => "IFile",
             Directory(_) => "IDirectory",
+            Psm => "psm",
+            PsmSession => "IPsmSession",
+            FatalU => "fatal:u",
             #[cfg(test)]
             Test => "test",
         }
@@ -177,6 +189,8 @@ pub enum IpcError {
     Result(u64),
     /// Something kestrel does not implement or cannot read: stop.
     Stop(String),
+    /// The program threw a fatal error with an error screen: it ends.
+    Fatal(u32),
 }
 
 impl From<u64> for IpcError {
@@ -317,6 +331,8 @@ pub struct State {
     /// time: the shared memory the clocks are read from.
     pub time_shared_memory: Option<ObjectId>,
     pub fs: fs::State,
+    /// psm: the IPsmSession state-change event.
+    pub psm_state_event: Option<ObjectId>,
 }
 
 impl Process {
@@ -556,6 +572,8 @@ impl Process {
             Hid | AppletResource => self.hid(call),
             TimeU | SystemClock | SteadyClock | TimeZoneService => self.time(call),
             FileSystemProxy | SdCard | File(_) | Directory(_) => self.fs(call),
+            Psm | PsmSession => self.psm(call),
+            FatalU => self.fatal(call),
             #[cfg(test)]
             Test => match call.n {
                 0 => Ok(Out::ok(call.args.to_vec())),
@@ -1687,6 +1705,101 @@ mod tests {
         );
         assert_eq!(send(&mut p, h, &request(false, &[], None, 18, &[])), Ok(0));
         assert_eq!(answer(&p, false, 0).0, fs::result::PORT_SD_CARD_NO_DEVICE);
+    }
+
+    #[test]
+    fn psm_reports_a_docked_console_on_its_charger() {
+        let mut p = setup();
+        let psm = open(&mut p, b"psm");
+        let mut get = |n: u32, size: usize| {
+            assert_eq!(send(&mut p, psm, &cmif(4, false, n, &[])), Ok(0));
+            let (rc, _, _, data, _) = answer(&p, false, size);
+            assert_eq!(rc, 0);
+            data
+        };
+        assert_eq!(get(0, 4), 100u32.to_le_bytes());
+        assert_eq!(get(1, 4), 1u32.to_le_bytes());
+        assert_eq!(get(4, 1), [1]);
+        assert_eq!(get(12, 4), 3u32.to_le_bytes());
+        assert_eq!(get(13, 8), 100f64.to_le_bytes());
+        assert_eq!(get(14, 1), [1]);
+        assert_eq!(get(15, 8), 100f64.to_le_bytes());
+        assert_eq!(send(&mut p, psm, &cmif(4, false, 7, &[])), Ok(0));
+        let session = answer(&p, false, 0).2[0] as u64;
+        assert_eq!(send(&mut p, session, &cmif(4, false, 0, &[])), Ok(0));
+        let (rc, copied, _, _, _) = answer(&p, false, 0);
+        assert_eq!((rc, copied.len()), (0, 1));
+        assert_eq!(
+            p.handles.get(copied[0]).map(|(k, _)| k),
+            Some(Kind::ReadableEvent)
+        );
+        for n in [2, 3, 4] {
+            assert_eq!(send(&mut p, session, &cmif(4, false, n, &[1])), Ok(0));
+            assert_eq!(answer(&p, false, 0).0, 0);
+        }
+        assert_eq!(send(&mut p, session, &cmif(4, false, 1, &[])), Ok(0));
+        let e = send(&mut p, psm, &cmif(4, false, 2, &[])).unwrap_err();
+        assert!(e.starts_with("unimplemented: psm command 2"), "{e}");
+    }
+
+    #[test]
+    fn fatal_errors_are_reported_or_end_the_program() {
+        let mut p = setup();
+        let fatal = open(&mut p, b"fatal:u");
+        // libnx's MAKERESULT(Module_Libnx, LibnxError_InitFail_FS).
+        let throw = |policy: u32| {
+            let mut args = (345u32 | 33 << 9).to_le_bytes().to_vec();
+            args.extend(policy.to_le_bytes());
+            args.extend([0; 8]);
+            request(true, &[], None, 1, &args)
+        };
+        assert_eq!(send(&mut p, fatal, &throw(1)), Ok(0));
+        assert_eq!(answer(&p, false, 0).0, 0);
+        assert_eq!(p.log, ["fatal error report 2345-0033 (Libnx: InitFail_FS)"]);
+        let tlr = p.current_thread().tlr;
+        p.mem.write_bytes(tlr, &throw(2)).unwrap();
+        p.cpu.x[0] = fatal;
+        assert_eq!(
+            dispatch(&mut p, nr::SEND_SYNC_REQUEST),
+            Some(Stop::Fatal {
+                result: 345 | 33 << 9
+            })
+        );
+    }
+
+    #[test]
+    fn svc_break_notifies_or_aborts_with_libnx_result() {
+        let mut p = setup();
+        p.mem.write_bytes(STRINGS, &0x202u32.to_le_bytes()).unwrap();
+        // Panic with the notification-only flag: noted, returns 0.
+        p.cpu.x[..3].copy_from_slice(&[0x8000_0000, STRINGS, 4]);
+        assert_eq!(dispatch(&mut p, nr::BREAK), None);
+        assert_eq!(p.cpu.x[0], 0);
+        assert_eq!(
+            p.log,
+            ["svcBreak notification (Panic), result 2002-0001 (Fs)"]
+        );
+        // diagAbortWithResult: Panic, the result's address and size.
+        p.cpu.x[..3].copy_from_slice(&[0, STRINGS, 4]);
+        let pc = p.cpu.pc - 4;
+        assert_eq!(
+            dispatch(&mut p, nr::BREAK),
+            Some(Stop::Abort {
+                pc,
+                reason: 0,
+                result: Some(0x202)
+            })
+        );
+        // Any other size passes no result.
+        p.cpu.x[..3].copy_from_slice(&[2, STRINGS, 8]);
+        assert!(matches!(
+            dispatch(&mut p, nr::BREAK),
+            Some(Stop::Abort {
+                reason: 2,
+                result: None,
+                ..
+            })
+        ));
     }
 
     #[test]

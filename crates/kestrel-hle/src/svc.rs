@@ -465,10 +465,7 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
             p.cpu.x[0] = p.cpu.retired;
             None
         }
-        nr::BREAK => Some(Stop::Break {
-            pc: p.cpu.pc - 4,
-            reason: p.cpu.x[0],
-        }),
+        nr::BREAK => svc_break(p),
         nr::OUTPUT_DEBUG_STRING => {
             let (addr, len) = (p.cpu.x[0], p.cpu.x[1]);
             match read_guest(p, addr, len) {
@@ -509,6 +506,48 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
     }
 }
 
+/// The BreakReason names (libnx, `kernel/svc.h`).
+pub fn break_reason(reason: u32) -> &'static str {
+    match reason {
+        0 => "Panic",
+        1 => "Assert",
+        2 => "User",
+        3 => "PreLoadDll",
+        4 => "PostLoadDll",
+        5 => "PreUnloadDll",
+        6 => "PostUnloadDll",
+        7 => "CppException",
+        _ => "unknown reason",
+    }
+}
+
+/// svcBreak (Switchbrew, "SVC"): with bit 31 of the reason set it only
+/// notifies a debugger and returns 0; otherwise the console reports a crash
+/// and ends the process. libnx passes the address and size of a result
+/// (`diagAbortWithResult`: the result, 4 bytes), which kestrel reads when
+/// the size is 4.
+fn svc_break(p: &mut Process) -> Option<Stop> {
+    let (reason, addr, size) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2]);
+    let result = (size == 4)
+        .then(|| p.mem.read_vec(addr, 4).ok())
+        .flatten()
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let what = break_reason(reason as u32 & 0x7fff_ffff);
+    let with_result = result.map_or(String::new(), |r| {
+        format!(", result {}", crate::results::describe(r))
+    });
+    if reason & 0x8000_0000 != 0 {
+        p.note(format!("svcBreak notification ({what}){with_result}"));
+        p.cpu.x[0] = result::SUCCESS;
+        return None;
+    }
+    Some(Stop::Abort {
+        pc: p.cpu.pc - 4,
+        reason: reason as u32,
+        result,
+    })
+}
+
 /// Return an IPC call's result code, or stop.
 fn ipc_error(p: &mut Process, e: IpcError) -> Option<Stop> {
     match e {
@@ -520,6 +559,7 @@ fn ipc_error(p: &mut Process, e: IpcError) -> Option<Stop> {
             "{what}, at pc {:#x}",
             p.cpu.pc.wrapping_sub(4)
         ))),
+        IpcError::Fatal(result) => Some(Stop::Fatal { result }),
     }
 }
 

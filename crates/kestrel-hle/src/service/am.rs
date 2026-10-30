@@ -23,7 +23,7 @@ pub const NO_MESSAGE: u32 = 0x680;
 
 impl Process {
     /// A copy handle to the event `slot` holds, made on first use.
-    fn event_handle(&mut self, slot: fn(&mut State) -> &mut Option<ObjectId>) -> Out {
+    pub(super) fn event_handle(&mut self, slot: fn(&mut State) -> &mut Option<ObjectId>) -> Out {
         let id = match *slot(&mut self.services) {
             Some(id) => id,
             None => {
