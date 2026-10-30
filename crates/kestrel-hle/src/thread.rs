@@ -96,6 +96,15 @@ impl Scheduler {
     }
 }
 
+/// Why svcSetThreadCoreMask failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CoreMaskError {
+    /// Return this result code.
+    Result(u64),
+    /// An undocumented negative ideal core.
+    Unsupported(i32),
+}
+
 /// The clock ticks in `ns` nanoseconds at 19.2 MHz, rounded up.
 pub fn ticks(ns: u64) -> u64 {
     // 19.2 MHz is 12 ticks every 625 ns; the result always fits.
@@ -271,6 +280,60 @@ impl Process {
         let t = &mut self.sched.threads[i];
         t.state = State::Ready;
         t.turn = turn;
+        Ok(())
+    }
+
+    /// svcGetThreadPriority ("SVC").
+    pub fn thread_priority(&self, h: u64) -> Result<u32, u64> {
+        Ok(self.sched.threads[self.thread_index(h)?].priority)
+    }
+
+    /// svcSetThreadPriority: 0 to 0x3F. The thread goes behind the others
+    /// of its new priority, and its core picks its best thread again.
+    pub fn set_thread_priority(&mut self, h: u64, priority: i32) -> Result<(), u64> {
+        let i = self.thread_index(h)?;
+        if !(0..=LOWEST_PRIORITY as i32).contains(&priority) {
+            return Err(result::INVALID_PRIORITY);
+        }
+        let turn = self.sched.take_turn();
+        let t = &mut self.sched.threads[i];
+        t.priority = priority as u32;
+        t.turn = turn;
+        Ok(())
+    }
+
+    /// svcGetThreadCoreMask: the ideal core and the affinity mask.
+    pub fn thread_core_mask(&self, h: u64) -> Result<(u32, u64), u64> {
+        let t = &self.sched.threads[self.thread_index(h)?];
+        Ok((t.core, t.affinity))
+    }
+
+    /// svcSetThreadCoreMask. Switchbrew documents only the arguments, so
+    /// the checks are kestrel's: the ideal core must be 0 to 3 and the mask
+    /// a non-empty set of cores 0 to 3 (InvalidCoreId otherwise), holding
+    /// the ideal core (InvalidCombination otherwise). The thread moves to
+    /// its new ideal core. Negative ideal cores have undocumented meanings,
+    /// so they stop the process.
+    pub fn set_thread_core_mask(
+        &mut self,
+        h: u64,
+        core: i32,
+        mask: u64,
+    ) -> Result<(), CoreMaskError> {
+        let i = self.thread_index(h).map_err(CoreMaskError::Result)?;
+        if core < 0 {
+            return Err(CoreMaskError::Unsupported(core));
+        }
+        let all = (1 << CORES) - 1;
+        if core >= CORES as i32 || mask == 0 || mask & !all != 0 {
+            return Err(CoreMaskError::Result(result::INVALID_CORE_ID));
+        }
+        if mask & 1 << core == 0 {
+            return Err(CoreMaskError::Result(result::INVALID_COMBINATION));
+        }
+        let turn = self.sched.take_turn();
+        let t = &mut self.sched.threads[i];
+        (t.core, t.affinity, t.turn) = (core as u32, mask, turn);
         Ok(())
     }
 
@@ -590,6 +653,63 @@ mod tests {
         p.exit_thread();
         match p.schedule(true) {
             Some(Stop::Error(e)) => assert!(e.contains("never started"), "{e}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn priorities_can_be_read_and_changed() {
+        let mut p = process();
+        let cur = handle::CURRENT_THREAD;
+        assert_eq!(svc(&mut p, nr::GET_THREAD_PRIORITY, &[0, cur]), (0, 0x2c));
+        let h = spawn(&mut p, 0x2000, 0x30, 0);
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(svc(&mut p, nr::GET_THREAD_PRIORITY, &[0, h]), (0, 0x30));
+        let bad = result::INVALID_PRIORITY;
+        assert_eq!(svc(&mut p, nr::SET_THREAD_PRIORITY, &[h, 0x40]).0, bad);
+        assert_eq!(svc(&mut p, nr::SET_THREAD_PRIORITY, &[h, u64::MAX]).0, bad);
+        assert_eq!(running(&p), 0x1000);
+        // Raising it above the main thread's takes core 0 at once.
+        assert_eq!(svc(&mut p, nr::SET_THREAD_PRIORITY, &[h, 0x10]).0, 0);
+        assert_eq!(running(&p), 0x2000);
+        assert_eq!(svc(&mut p, nr::GET_THREAD_PRIORITY, &[0, cur]), (0, 0x10));
+        // Lowering itself below the main thread gives core 0 back.
+        assert_eq!(svc(&mut p, nr::SET_THREAD_PRIORITY, &[cur, 0x3f]).0, 0);
+        assert_eq!(running(&p), 0x1000);
+        let closed = result::INVALID_HANDLE;
+        assert_eq!(svc(&mut p, nr::GET_THREAD_PRIORITY, &[0, 0]).0, closed);
+    }
+
+    #[test]
+    fn a_thread_moves_to_its_new_ideal_core() {
+        let mut p = process();
+        let cur = handle::CURRENT_THREAD;
+        assert_eq!(svc(&mut p, nr::GET_CURRENT_PROCESSOR_NUMBER, &[]).0, 0);
+        let (rc, core) = svc(&mut p, nr::GET_THREAD_CORE_MASK, &[0, 0, cur]);
+        assert_eq!((rc, core, p.cpu.x[2]), (0, 0, 0b1));
+        let h = spawn(&mut p, 0x2000, 0x10, 2);
+        let (_, core) = svc(&mut p, nr::GET_THREAD_CORE_MASK, &[0, 0, h]);
+        assert_eq!((core, p.cpu.x[2]), (2, 0b100));
+        svc(&mut p, nr::START_THREAD, &[h]);
+        assert_eq!(running(&p), 0x1000, "another core");
+        // Checks: core range, mask range, ideal core inside the mask.
+        let set = |p: &mut Process, core: u64, mask: u64| {
+            svc(p, nr::SET_THREAD_CORE_MASK, &[h, core, mask]).0
+        };
+        assert_eq!(set(&mut p, 4, 0b1111), result::INVALID_CORE_ID);
+        assert_eq!(set(&mut p, 0, 0), result::INVALID_CORE_ID);
+        assert_eq!(set(&mut p, 0, 0b1_0001), result::INVALID_CORE_ID);
+        assert_eq!(set(&mut p, 0, 0b0110), result::INVALID_COMBINATION);
+        // Moving the higher-priority thread to core 0 preempts the main thread.
+        assert_eq!(set(&mut p, 0, 0b0011), 0);
+        assert_eq!(running(&p), 0x2000);
+        assert_eq!(svc(&mut p, nr::GET_CURRENT_PROCESSOR_NUMBER, &[]).0, 0);
+        let (_, core) = svc(&mut p, nr::GET_THREAD_CORE_MASK, &[0, 0, cur]);
+        assert_eq!((core, p.cpu.x[2]), (0, 0b0011));
+        // Negative ideal cores are undocumented.
+        p.cpu.x[..3].copy_from_slice(&[h, -1i64 as u64, 1]);
+        match dispatch(&mut p, nr::SET_THREAD_CORE_MASK) {
+            Some(Stop::Error(e)) => assert!(e.contains("ideal core -1"), "{e}"),
             other => panic!("expected a stop, got {other:?}"),
         }
     }

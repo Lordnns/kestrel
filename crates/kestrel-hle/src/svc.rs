@@ -3,6 +3,7 @@
 //! Arguments arrive in X0..X7, results go back in W0 (result code) plus any
 //! output registers. A result code of 0 means success.
 
+use crate::thread::{CoreMaskError, CORES, LOWEST_PRIORITY};
 use crate::{layout, memory, Process, Stop};
 use std::io::Write;
 
@@ -19,6 +20,11 @@ pub mod nr {
     pub const START_THREAD: u16 = 0x09;
     pub const EXIT_THREAD: u16 = 0x0a;
     pub const SLEEP_THREAD: u16 = 0x0b;
+    pub const GET_THREAD_PRIORITY: u16 = 0x0c;
+    pub const SET_THREAD_PRIORITY: u16 = 0x0d;
+    pub const GET_THREAD_CORE_MASK: u16 = 0x0e;
+    pub const SET_THREAD_CORE_MASK: u16 = 0x0f;
+    pub const GET_CURRENT_PROCESSOR_NUMBER: u16 = 0x10;
     pub const SIGNAL_EVENT: u16 = 0x11;
     pub const CLEAR_EVENT: u16 = 0x12;
     pub const CREATE_TRANSFER_MEMORY: u16 = 0x15;
@@ -110,8 +116,9 @@ fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> 
         16 | 17 => process(0), // system resource size: none reserved
         18 => process(PROGRAM_ID),
         23 => process(1), // IsApplication, as the AppletType entry says
-        0 => Err(Unimplemented("CoreMask")),
-        1 => Err(Unimplemented("PriorityMask")),
+        // The cores and priorities threads may use: all of them.
+        0 => process((1 << CORES) - 1),
+        1 => process(u64::MAX >> (63 - LOWEST_PRIORITY)),
         9 => Err(Unimplemented("ResourceLimit")),
         10 => Err(Unimplemented("IdleTickCount")),
         19 => Err(Unimplemented("InitialProcessIdRange")),
@@ -226,6 +233,52 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 }
                 Err(code) => p.cpu.x[0] = code,
             }
+            None
+        }
+        nr::GET_THREAD_PRIORITY => {
+            // W1 = handle; W1 = priority.
+            match p.thread_priority(p.cpu.x[1]) {
+                Ok(prio) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = prio as u64;
+                }
+                Err(code) => p.cpu.x[0] = code,
+            }
+            None
+        }
+        nr::SET_THREAD_PRIORITY => {
+            let (h, prio) = (p.cpu.x[0], p.cpu.x[1] as i32);
+            p.cpu.x[0] = code(p.set_thread_priority(h, prio));
+            None
+        }
+        nr::GET_THREAD_CORE_MASK => {
+            // W2 = handle; W1 = ideal core, X2 = affinity mask.
+            match p.thread_core_mask(p.cpu.x[2]) {
+                Ok((core, mask)) => {
+                    p.cpu.x[0] = result::SUCCESS;
+                    p.cpu.x[1] = core as u64;
+                    p.cpu.x[2] = mask;
+                }
+                Err(code) => p.cpu.x[0] = code,
+            }
+            None
+        }
+        nr::SET_THREAD_CORE_MASK => {
+            let (h, core, mask) = (p.cpu.x[0], p.cpu.x[1] as i32, p.cpu.x[2]);
+            match p.set_thread_core_mask(h, core, mask) {
+                Ok(()) => p.cpu.x[0] = result::SUCCESS,
+                Err(CoreMaskError::Result(code)) => p.cpu.x[0] = code,
+                Err(CoreMaskError::Unsupported(core)) => {
+                    return Some(Stop::Error(format!(
+                        "unsupported: svcSetThreadCoreMask with ideal core {core}, at pc {:#x}",
+                        p.cpu.pc.wrapping_sub(4)
+                    )))
+                }
+            }
+            None
+        }
+        nr::GET_CURRENT_PROCESSOR_NUMBER => {
+            p.cpu.x[0] = p.current_thread().core as u64;
             None
         }
         nr::CREATE_EVENT => {
@@ -490,11 +543,19 @@ mod tests {
     }
 
     #[test]
+    fn every_core_and_priority_is_allowed() {
+        let mut p = process();
+        let cur = handle::CURRENT_PROCESS;
+        assert_eq!(info(&mut p, 0, cur, 0), Ok(0b1111));
+        assert_eq!(info(&mut p, 1, cur, 0), Ok(u64::MAX));
+    }
+
+    #[test]
     fn unanswered_info_types_stop_with_their_name() {
         let mut p = process();
-        (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3]) = (0, handle::CURRENT_PROCESS, 0);
+        (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3]) = (9, handle::CURRENT_PROCESS, 0);
         match dispatch(&mut p, nr::GET_INFO) {
-            Some(Stop::Error(e)) => assert!(e.contains("type 0 (CoreMask)"), "{e}"),
+            Some(Stop::Error(e)) => assert!(e.contains("type 9 (ResourceLimit)"), "{e}"),
             other => panic!("expected a stop, got {other:?}"),
         }
     }
