@@ -82,6 +82,31 @@ files. `--sd <folder>` uses another folder instead. A program can never
 reach outside the folder: `..`, host links and names some systems read
 differently are refused. Games can be run from any folder.
 
+### The window and controls
+
+A homebrew program opens a window (`--headless` runs it without one).
+There are no graphics yet, so the window stays a plain dark grey; its
+job is to take your keyboard and gamepads and give them to the program
+as a Switch controller. Text output still goes to the terminal.
+
+kestrel emulates one controller, a Pro Controller by default. Which keys
+and gamepad buttons press what is set in `user/config/input.cfg` next to
+the executable, written with defaults on first run:
+
+| Switch | Keyboard | Gamepad |
+|--------|----------|---------|
+| A, B, X, Y | X, Z, C, V | right, bottom, top, left face buttons |
+| L, R, ZL, ZR | Q, E, 1, 3 | bumpers, triggers |
+| Plus, Minus | Enter, Backspace | Start, Select |
+| D-pad | arrow keys | D-pad |
+| Left stick, right stick | W A S D, I J K L (click: F, H) | the sticks |
+
+Set `controller = handheld` in that file for the Joy-Con attached to the
+console instead. To see what kestrel makes of your keys and pads, run
+`kestrel run guest/bin/padview.nro` and press away; close the window to
+stop. On Linux, gamepads need libudev (`libudev.so.1`, on every desktop
+distribution).
+
 ### What kestrel does not do yet
 
 When a program uses a system call, service or command kestrel does not
@@ -107,7 +132,7 @@ cargo run --release -p kestrel-cli -- selftest
 
 ## Self-test and test programs
 
-`kestrel selftest` runs twenty ARM64 programs compiled into the binary and
+`kestrel selftest` runs twenty-one ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
 by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
 nothing but the executable. Each integer C program is in the suite twice:
@@ -134,6 +159,7 @@ built integer-only, and built with floating point and NEON allowed
 | `hbapplet`   | a homebrew NRO sending libnx's startup requests: set:sys firmware version, apm, appletOE as a domain with its interfaces and events |
 | `hbhid`      | a homebrew NRO setting up input as libnx does: hid's applet resource and npad setup, and mapping its shared memory, with each kind of bad mapping |
 | `hbfs`       | a homebrew NRO using the file system as libnx does: fsp-srv as a domain with cloned sessions, then creating, writing, reading, listing, renaming and deleting on an empty SD card, with bad paths and locked files |
+| `hbinput`    | a homebrew NRO reading player 1 as libnx's padUpdate does, while the self-test plays a scripted Pro Controller |
 | `hbpower`    | a homebrew NRO reading the battery and charger state through psm, then sending a debugger-only svcBreak and a report-only fatal error, after which it carries on |
 | `hbtime`     | a homebrew NRO starting the time service as libnx does: the clocks, reading them from shared memory with CNTPCT_EL0, calendar times in UTC, and the clocks moving with a sleep |
 

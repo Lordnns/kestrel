@@ -55,7 +55,7 @@ qemu for Linux ARM64.
 | Threads | done, with the gaps below | `hle/thread.rs`: thread records, a deterministic scheduler over four virtual cores with slices of 19,200 instructions, a process-wide 19.2 MHz clock, thread local regions; svcCreateThread, svcStartThread, svcExitThread, svcSleepThread (sleep and yield), svcGet/SetThreadPriority, svcGet/SetThreadCoreMask, svcGetCurrentProcessorNumber, svcGetInfo CoreMask and PriorityMask; self-test program `hbthreads` |
 | Synchronisation | done, with the gaps below | `hle/sync.rs`: a waiting state with deadlines on the process clock; svcWaitSynchronization, svcCancelSynchronization, svcArbitrateLock/Unlock, svcWaitProcessWideKeyAtomic, svcSignalProcessWideKey, svcWaitForAddress, svcSignalToAddress; deadlock report; self-test program `hbsync` |
 | IPC | done, with the gaps below | `hle/ipc.rs`: the message format (header, special header, handles, X/A/B/W descriptors, raw data, receive list) and CMIF and TIPC replies; `hle/service.rs`: client sessions as kernel objects, svcConnectToNamedPort, svcSendSyncRequest, the service manager sm: (RegisterClient, GetServiceHandle over CMIF and TIPC); unknown ports, services and commands stop by name and number; self-test program `hbipc` |
-| First services | in progress | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; psm; fatal:u, svcBreak and result names; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`, `hbpower`. Not yet: host input |
+| First services | done, with the gaps below | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; psm; fatal:u, svcBreak and result names; controller input in hid's shared memory, from a window (winit, softbuffer, gilrs) mapping keyboard and gamepads; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`, `hbpower`, `hbinput` |
 | SD folder option, unimplemented-call log | done | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, svcGetInfo types, named ports, services, commands and CMIF control commands stop as `Stop::Unimplemented` with their identifiers, and `kestrel run` appends each to `user/logs/unimplemented.log` |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
@@ -526,10 +526,9 @@ lists and revisions Switchbrew does not allow.
 
 Gaps:
 
-- No host input yet: the shared memory stays zeroed, so every ring
-  buffer is empty and no controller is connected. libnx reads that as no
-  input, and programs waiting for a button wait forever. The kept style
-  set, IDs and revision will shape the shared memory once input exists.
+- Without an input source (the self-test, `--headless`) the shared
+  memory stays zeroed: no controller is connected, which libnx reads as
+  no input. With one, see "Host input" below.
 - Every other hid command stops with its number, including vibration,
   six-axis sensors and the npad style-set update event.
 
@@ -718,6 +717,71 @@ Gaps:
   errors, not in the log: they are CPU or format gaps, not calls.
 - The log grows without limit; it is a plain text file to read or delete.
 
+Host input, from Switchbrew's "HID services" (SharedMemoryFormat,
+NpadSharedMemoryEntry, NpadInternalState, the RingLifo and
+NpadFullKeyState layouts, NpadButton, NpadAttribute, DeviceType,
+NpadSystemProperties, AppletFooterUiType, ColorAttribute) and the way
+libnx's padUpdate and hidGetNpadStates read them (`pad.c`, `hid.c`), in
+`hle/input.rs` and `hle/service/hid.rs`; the window is in kestrel-cli.
+
+The owner's decisions (2026-10-30):
+- winit for the window and keyboard, softbuffer to paint it, gilrs for
+  gamepads, only in kestrel-cli and behind its default `window` feature
+  (`--no-default-features` builds a terminal-only kestrel);
+- a homebrew NRO opens a window unless `--headless` (ELF test programs
+  never do);
+- one emulated controller for now: a Pro Controller as player 1, or the
+  Joy-Con attached to the console (handheld), chosen in the settings
+  file; the keyboard and every gamepad drive it.
+
+How it works:
+- A `kestrel_hle::input::Source` gives hid the controller's state. Every
+  5 ms of guest time (kestrel's choice) hid writes a sample into the npad
+  entry: on the first, the style, Dual assignment, colours, DeviceType,
+  system properties and footer type; on each, a ring entry with the next
+  sampling number, the buttons, the sticks and the connected attributes.
+  libnx's reader needs consecutive sampling numbers. When the clock jumps
+  because every thread slept, hid catches up with at most a ring's worth
+  of samples.
+- The controller connects once the program has activated npads and
+  accepts its style and NpadIdType (padConfigureInput does both);
+  otherwise kestrel notes it once.
+- The window's event loop owns the main thread (macOS requires it); the
+  program runs on a worker thread, where its Process is made. Closing the
+  window sets `Process::interrupt`, and the program stops at its next
+  slice (`Stop::Interrupted`). The window paints a dark grey background:
+  graphics come in phase 5. Without a display, kestrel runs without a
+  window and says so.
+- `user/config/input.cfg` is written with the defaults when missing:
+  `controller = pro` or `handheld`, each button's keys (`key:` and winit
+  KeyCode names) and gamepad buttons (`pad:` and gilrs names, which go by
+  position: Switch A is East), each stick's gamepad stick and direction
+  keys. A line kestrel cannot read stops the run with its line number.
+- `guest/demo/padview.c` prints the controller as it changes, to try the
+  mapping by hand: `kestrel run guest/bin/padview.nro`.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Pro Controller | player 1 (NpadIdType No1), wireless (IsConnected), DeviceType FullKey, footer SwitchProController |
+| Handheld | NpadIdType Handheld, wired Joy-Con (all six attribute bits), DeviceType HandheldLeft and HandheldRight, footer HandheldJoyConLeftJoyConRight |
+| System properties | IsAbxyButtonOriented, IsPlusAvailable, IsMinusAvailable, IsDirectionalButtonsAvailable |
+| Colours | a dark grey body (0xff2d2d2d) and light grey buttons (0xffe6e6e6); the other colour block NoController |
+| Stick direction buttons | pressed past half the stick's range |
+| Ring count | stops at 16, so the next entry written is never one a reader counts |
+| Gamepad dead zone | 10% of the stick's range |
+| Keys and gamepad | keys win over a gamepad stick; with several gamepads, the stick pushed furthest |
+
+Gaps:
+
+- One controller; no other NpadStyleTag, no second player, no six-axis
+  sensors, vibration, or Joy-Con colours from real hardware. Later tasks.
+- Linux builds need libudev for gilrs (`libudev-dev` to build,
+  `libudev.so.1` to run, on every desktop distribution).
+- The window has only been run on Windows so far; CI builds it on every
+  platform on the next release.
+- Keyboard keys are matched by winit's KeyCode names, so a misspelt name
+  in the settings file is not reported; it never matches.
+
 ## Next task
 
 Two tracks now run in parallel (`PLAN.md` phase 3 priority).
@@ -726,40 +790,16 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. Host input with a window, in progress. The owner's decisions
-   (2026-10-30):
-   - dependencies: winit, softbuffer and gilrs, in kestrel-cli only;
-   - the window opens by default for an NRO, `--headless` skips it;
-   - this task covers one emulated controller, a Pro Controller as player
-     1 or the handheld Joy-Con, chosen in a settings file;
-   - keyboard and any gamepad map onto it.
-
-   Later tasks: the other NpadStyleTag controllers (GameCube,
-   NES/SNES/N64/Genesis), several players, and real Joy-Con motion,
-   rumble and pairing. A Wii Remote is not a Switch controller type; it
-   can only be mapped as a host gamepad.
-
-   Done: hid samples a `kestrel_hle::input::Source` into its shared memory
-   (90c5b80); `hbinput` and ScriptedPad (4d59739).
-
-   Left:
-   - `window.rs` in kestrel-cli behind a default `window` feature. The
-     winit event loop runs on the main thread; the Process is created and
-     run on a worker thread (it is not Send). An `Arc<Mutex<Pad>>` feeds a
-     Source. Closing the window sets `Process::interrupt`. softbuffer
-     paints a plain background. gilrs is polled about every 4 ms.
-   - `user/config/input.cfg`, written with defaults when missing:
-     `controller = pro|handheld`, and per button `key:<winit KeyCode
-     name>` and `pad:<gilrs Button name>` lists. The gamepad sticks map to
-     the two sticks.
-   - CI and release: `libudev-dev` (and pkg-config) on the Linux jobs.
-     The cross + qemu job builds with `--no-default-features`.
-   - Docs: these phase 2 notes, README (window, mapping), ARCHITECTURE.
-2. Phase 2 acceptance (`PLAN.md`): the standard homebrew examples (hello
+1. Phase 2 acceptance (`PLAN.md`): the standard homebrew examples (hello
    world, input, file I/O, threads) built from source with the public
    libnx toolchain in CI, run on all five platforms. Building them shows
    what real libnx startup still needs; the unimplemented-call log names
-   it.
+   it. Ask the owner first how the libnx toolchain gets into CI.
+2. Later input tasks the owner wants (2026-10-30): the other
+   NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
+   players, and real Joy-Con motion, rumble and pairing over their own
+   protocol. A Wii Remote is not a Switch controller type; it can only be
+   mapped as a host gamepad.
 
 Each service so far followed the same steps; keep them:
 

@@ -138,6 +138,14 @@ method; the methods live next to the state they change:
   console's "2345-0033" form with its module's name. A program that aborts
   (svcBreak) or throws a fatal error with an error screen stops with
   `Stop::Abort` or `Stop::Fatal`.
+- Controller input: `kestrel_hle::input::Source` gives hid one
+  controller's state; hid writes it into its shared memory every 5 ms of
+  guest time (`hid_tick`, called from the run loop). The front end's
+  window (`kestrel-cli/src/window.rs`, winit, softbuffer, gilrs, behind
+  the default `window` feature) runs the event loop on the main thread
+  and the program on a worker thread, and maps keys and gamepads as
+  `user/config/input.cfg` says (`input_config.rs`). The self-test uses a
+  scripted Source instead.
 - Whatever kestrel does not implement (an SVC, a named port, a service,
   a command or a CMIF control command) stops the program with
   `Stop::Unimplemented`, which names it with its identifiers; services
