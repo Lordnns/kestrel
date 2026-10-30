@@ -41,7 +41,7 @@ qemu for Linux ARM64.
 | 1A Scalar floating point | done, with the gaps below | `float.rs` (Arm pseudocode) + `interp/fp.rs`; 13 test groups in `interp/fp_tests.rs`; a compiler-generated FP smoke program matches x86 host results bit for bit |
 | 1B NEON | done, with the gaps below | `interp/neon/` (integer, floating point, permutes, structure loads and stores); 430 generated cases in `neon_vectors.rs`; every C test program built with NEON at `-O2` and `-O3` matches the expected output |
 | 1C Phase 1 tests | done | NEON unit vectors (430 cases); every integer C program also built with NEON (`name-neon.elf`, same expected output); `fp.c` (127 scalar FP results as bit patterns, modelled by `scripts/armfp.py`); `intrinsics.c` (168 NEON intrinsics, modelled by the `gen-neon-vectors.py` lane models); 30 NaN, subnormal, flush-to-zero and saturation checks in `asm_checks.S`; `kestrel selftest` runs 13 programs |
-| 1D Real-hardware oracle | not started | no host build mode for `guest/src` |
+| 1D Real-hardware oracle | done, awaiting first CI run | `rt.h` host mode (`KESTREL_HOST`) sends the three console calls to the C library; `scripts/check-host.sh` builds every C program natively (integer-only and NEON, 12 builds) and compares its output with `guest/expected`; CI job `hardware-oracle` runs it on `ubuntu-24.04-arm` and `macos-14`. Not covered: `asm_checks.S`, which is console-only assembly |
 
 ### Phase 2: Homebrew: **not started**
 
@@ -115,8 +115,8 @@ IDC) are never set. FRINT32*/FRINT64* (Armv8.5) decode as undefined, as on
 the Armv8.2 target CPU.
 
 Expected values: hand-worked from the Arm pseudocode (NaN rules, FZ, the
-estimates) or IEEE results from Python; a check against real ARM hardware
-is task 1D.
+estimates) or IEEE results from Python. `fp.c` is also run natively on real
+ARM CPUs by `scripts/check-host.sh` (task 1D).
 
 ### Phase 1B notes
 
@@ -139,8 +139,8 @@ the Arm ARM descriptions (exact fractions for floating point); CI checks the
 generated file is current. Independently of those models, the five C test
 programs built with NEON allowed (`-O2` and `-O3`, clang 21) give the
 expected output, using among others `cmgt`, `ld4`, `ushll`, `shll`, `xtn`,
-`uzp1`, `umaxv`, `dup` and `movi`. A check against real ARM hardware is task
-1D.
+`uzp1`, `umaxv`, `dup` and `movi`. `intrinsics.c` and the NEON builds are
+also run natively on real ARM CPUs by `scripts/check-host.sh` (task 1D).
 
 Remaining gaps:
 
@@ -155,8 +155,8 @@ Remaining gaps:
 
 ## Next task
 
-Phase 1D, real-hardware oracle: a host build mode for the C test programs
-and a CI job that runs them natively on the macOS ARM and Linux ARM runners
-against the expected files. The Python models (`armfp.py`, the NEON lane
-models) and kestrel were written by the same hands, so this is the check
-that a real ARM CPU agrees with both.
+Phase 1 sign-off: confirm the `hardware-oracle` job passes on both ARM
+runners, then check the remaining acceptance point, an aggressively optimised
+NEON build of the test programs hitting no unsupported instruction (so far
+checked by hand at `-O3`). After that, Phase 2 starts with the homebrew
+executable loader.

@@ -112,7 +112,9 @@ run the workflow by hand from the Actions tab to get the packages as
 artifacts without making a release.
 
 Rebuilding the guest test programs needs `clang` and `ld.lld` (they
-cross-compile, so any host works): `./scripts/build-guest.sh`.
+cross-compile, so any host works): `./scripts/build-guest.sh`. On an ARM64
+Linux or macOS machine, `./scripts/check-host.sh` builds the C programs
+natively and checks that the real CPU prints exactly the expected output.
 
 ## How it runs on both architectures
 

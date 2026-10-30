@@ -1,5 +1,8 @@
 // Tiny freestanding runtime for kestrel test programs.
 // Talks to the emulator only through documented supervisor calls.
+//
+// With KESTREL_HOST defined (scripts/check-host.sh), the same calls go to the
+// C library instead, so the programs run natively on a real ARM machine.
 #pragma once
 
 typedef unsigned long u64;
@@ -8,6 +11,26 @@ typedef unsigned char u8;
 typedef long i64;
 typedef u64 size_t;
 
+#ifdef KESTREL_HOST
+long write(int fd, const void *buf, size_t len);
+void *calloc(size_t n, size_t size);
+__attribute__((noreturn)) void exit(int status);
+
+static inline u64 svc_output_debug_string(const char *s, u64 len) {
+    while (len) {
+        long n = write(1, s, len);
+        if (n <= 0) exit(2);
+        s += n;
+        len -= (u64)n;
+    }
+    return 0;
+}
+
+__attribute__((noreturn)) static inline void svc_exit_process(void) { exit(0); }
+
+// The console heap starts zeroed, so this does too.
+static inline void *svc_set_heap_size(u64 size) { return calloc(size, 1); }
+#else
 static inline u64 svc_output_debug_string(const char *s, u64 len) {
     register u64 x0 __asm__("x0") = (u64)s;
     register u64 x1 __asm__("x1") = len;
@@ -26,6 +49,7 @@ static inline void *svc_set_heap_size(u64 size) {
     __asm__ volatile("svc #0x01" : "=r"(x0), "+r"(x1) : : "memory");
     return x0 == 0 ? (void *)x1 : (void *)0;
 }
+#endif
 
 static inline u64 strlen_(const char *s) {
     u64 n = 0;

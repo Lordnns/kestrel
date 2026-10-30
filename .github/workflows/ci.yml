@@ -69,3 +69,21 @@ jobs:
         run: python3 scripts/gen-neon-vectors.py --check
       - run: bash scripts/build-guest.sh
       - run: cargo run -q --release -p kestrel-cli -- selftest
+
+  # Real-hardware oracle: the C test programs run natively on a real ARM CPU
+  # must print exactly guest/expected, which kestrel is tested against.
+  hardware-oracle:
+    name: Real ARM CPU agrees (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux aarch64", os: ubuntu-24.04-arm }
+          - { name: "macOS aarch64", os: macos-14 }
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - run: clang --version
+      - run: sh scripts/check-host.sh
