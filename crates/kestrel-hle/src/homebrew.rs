@@ -91,8 +91,25 @@ impl Process {
         self.mem
             .write_bytes(base, &bytes)
             .map_err(|e| e.to_string())?;
+        // The loader's return address in LR ("Homebrew ABI"). libnx's exit
+        // jumps there; a console's launcher would load the next program.
+        // kestrel has none to load, so the code there ends the process
+        // with svcExitProcess (`svc #0x7`, 0xd40000e1, from clang).
+        self.mem
+            .map_tagged(
+                layout::LOADER_RETURN,
+                PAGE_SIZE,
+                Perm::RX,
+                crate::memory::tag(crate::memory::state::CODE),
+                "loader-return",
+            )
+            .map_err(|e| e.to_string())?;
+        self.mem
+            .poke_bytes(layout::LOADER_RETURN, &0xd400_00e1u32.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         self.cpu.x[0] = entries_at;
         self.cpu.x[1] = u64::MAX;
+        self.cpu.x[30] = layout::LOADER_RETURN;
         Ok(())
     }
 }
@@ -125,6 +142,9 @@ mod tests {
         p.start_homebrew(&strings(&["hb.nro", "x y"])).unwrap();
         assert_eq!(p.cpu.x[1], u64::MAX);
         assert_eq!(p.cpu.pc, 0x800_0000);
+        // Returning to the loader ends the process: svc #0x7.
+        assert_eq!(p.cpu.x[30], layout::LOADER_RETURN);
+        assert_eq!(p.mem.read32(layout::LOADER_RETURN), Ok(0xd400_00e1));
         // Walk the list as a homebrew program would.
         let mut at = p.cpu.x[0];
         let mut seen = Vec::new();

@@ -57,6 +57,9 @@ pub mod layout {
     pub const NRO_BASE: u64 = ADDRESS_SPACE_BASE;
     /// The homebrew loader config entries and their strings.
     pub const HOMEBREW_CONFIG: u64 = 0x7d_0000_0000;
+    /// The loader's return address, where a homebrew program goes when it
+    /// returns: a page of code that ends the process.
+    pub const LOADER_RETURN: u64 = 0x7c_0000_0000;
 
     /// Memory the process may use (svcGetInfo TotalMemorySize). Kept
     /// small while guest memory is backed by ordinary host allocations.
