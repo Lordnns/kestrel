@@ -1,0 +1,41 @@
+homebrew thread test
+create with priority 0x40: 0x000000000000e001
+create with priority -1: 0x000000000000e001
+create on processor 4: 0x000000000000e201
+create on processor -1: 0x000000000000e201
+create a worker on core 1: 0x0000000000000000
+not running before it is started: yes
+start it: 0x0000000000000000
+start it again: 0x000000000000fa01
+worker got its argument: yes
+worker started on its stack: yes
+worker has its own thread local region: yes
+its thread local region started zeroed: yes
+worker's processor: 1
+thread id of the exited worker: 0x0000000000000000
+matches what the worker saw: yes
+differs from the main thread's: yes
+close the worker: 0x0000000000000000
+main thread's processor: 0
+create a higher priority thread on this core: 0x0000000000000000
+create a lower priority thread on this core: 0x0000000000000000
+run order: HMMYLS
+create a thread on core 3: 0x0000000000000000
+get priority: 0x0000000000000000
+priority: 0x0000000000000030
+set priority 0x3f: 0x0000000000000000
+priority now: 0x000000000000003f
+set priority 0x40: 0x000000000000e001
+get core mask: 0x0000000000000000
+ideal core: 3
+affinity mask: 0x0000000000000008
+set core 2 in mask 0b0110: 0x0000000000000000
+ideal core now: 2
+affinity mask now: 0x0000000000000006
+set core 1 in mask 0b0100: 0x000000000000e801
+set core 4: 0x000000000000e201
+close it unstarted: 0x0000000000000000
+create a spinner on core 2: 0x0000000000000000
+main and spinner both ran without yielding: yes
+atomic counter from two threads: 40000
+sleeping 1 ms advanced the tick by at least 19200: yes

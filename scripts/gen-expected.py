@@ -476,6 +476,74 @@ def hbhandles():
     return "".join(line + "\n" for line in out)
 
 
+def hbthreads():
+    """guest/src/nro/hbthreads.c: threads as Switchbrew's "SVC" page and
+    the scheduling rules every multi-core console honours describe them.
+    Result codes are named on the "Error codes" page: InvalidPriority 0xe001
+    outside 0 to 0x3F (SetThreadPriority), InvalidCoreId 0xe201 for a
+    processor other than 0 to 3 or -2 (CreateThread). A thread starts with
+    its argument in X0, SP at its stack top and its own thread local region,
+    which the kernel hands out zeroed ("Thread Local Region"). On one core a
+    higher priority runs at once and a lower one only when the higher one
+    sleeps; yielding (SleepThread 0) only lets equal priorities run. Two
+    threads on different cores run side by side, so neither spinning nor
+    atomic updates lose progress. The tick runs at 19.2 MHz (GetSystemTick).
+    Kestrel's documented choices (docs/ROADMAP.md, phase 2 notes): the main
+    thread runs on core 0, which ProcessorId -2 also picks; starting a
+    thread twice is InvalidState 0xfa01; SetThreadCoreMask gives
+    InvalidCombination 0xe801 for an ideal core outside the mask and
+    InvalidCoreId for a core above 3."""
+    ok = hex64(0)
+    prio, core_id = hex64(0xE001), hex64(0xE201)
+    state, combination = hex64(0xFA01), hex64(0xE801)
+    out = [
+        "homebrew thread test",
+        f"create with priority 0x40: {prio}",
+        f"create with priority -1: {prio}",
+        f"create on processor 4: {core_id}",
+        f"create on processor -1: {core_id}",
+        f"create a worker on core 1: {ok}",
+        "not running before it is started: yes",
+        f"start it: {ok}",
+        f"start it again: {state}",
+        "worker got its argument: yes",
+        "worker started on its stack: yes",
+        "worker has its own thread local region: yes",
+        "its thread local region started zeroed: yes",
+        "worker's processor: 1",
+        f"thread id of the exited worker: {ok}",
+        "matches what the worker saw: yes",
+        "differs from the main thread's: yes",
+        f"close the worker: {ok}",
+        "main thread's processor: 0",
+        f"create a higher priority thread on this core: {ok}",
+        f"create a lower priority thread on this core: {ok}",
+        # H runs before StartThread returns; L waits through the yield (Y)
+        # and runs while the main thread sleeps (before S).
+        "run order: HMMYLS",
+        f"create a thread on core 3: {ok}",
+        f"get priority: {ok}",
+        f"priority: {hex64(0x30)}",
+        f"set priority 0x3f: {ok}",
+        f"priority now: {hex64(0x3F)}",
+        f"set priority 0x40: {prio}",
+        f"get core mask: {ok}",
+        "ideal core: 3",
+        f"affinity mask: {hex64(0b1000)}",
+        f"set core 2 in mask 0b0110: {ok}",
+        "ideal core now: 2",
+        f"affinity mask now: {hex64(0b0110)}",
+        f"set core 1 in mask 0b0100: {combination}",
+        f"set core 4: {core_id}",
+        f"close it unstarted: {ok}",
+        f"create a spinner on core 2: {ok}",
+        "main and spinner both ran without yielding: yes",
+        f"atomic counter from two threads: {2 * 20000}",
+        "sleeping 1 ms advanced the tick by at least 19200: yes",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -489,6 +557,7 @@ PROGRAMS = {
     "hblayout": hblayout,
     "hbmemory": hbmemory,
     "hbhandles": hbhandles,
+    "hbthreads": hbthreads,
 }
 
 
