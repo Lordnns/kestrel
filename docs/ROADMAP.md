@@ -51,13 +51,13 @@ qemu for Linux ARM64.
 | Homebrew executable loader | done, with the gaps below | `kestrel-loader/src/nro.rs` (segments, zeroed BSS, ASET icon/NACP/RomFS ranges) and `kestrel-hle/src/homebrew.rs` (loader config entries, argument string, X0/X1); `kestrel run x.nro -- args`; self-test program `hbtest` (own startup code, self-relocation) |
 | Process layout reporting | done, with the gaps below | `hle::layout` is one documented 39-bit layout; svcGetInfo (`svc.rs`) answers types 2-8, 11-18, 21-23; self-test program `hblayout` checks the layout's documented properties |
 | Memory SVCs | done, with the gaps below | `hle/memory.rs`: memory types per mapping, svcQueryMemory, svcSetHeapSize in place with its checks, svcSetMemoryPermission, svcSetMemoryAttribute, svcMapMemory/svcUnmapMemory, svcMapPhysicalMemory/svcUnmapPhysicalMemory; `Memory` range operations in `kestrel-core`; self-test program `hbmemory` |
-| Handle table and kernel objects | not started | none |
+| Handle table and kernel objects | done, with the gaps below | `hle/kernel.rs`: per-process handle table, objects alive while a handle names them; svcCloseHandle, svcGetThreadId, svcGetProcessId, svcCreateEvent, svcSignalEvent, svcClearEvent, svcResetSignal; svcCreateTransferMemory in `hle/memory.rs`; the main thread has a real handle; self-test program `hbhandles` |
 | Threads | not started | one thread; SleepThread returns at once |
 | Synchronisation | not started | none |
 | IPC | not started | none |
 | First services | not started | none |
 | SD folder option, unimplemented-call log | not started | unknown SVCs stop with their number; no service layer yet |
-| `docs/SWITCH2_NOTES.md` | not started | file missing |
+| `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 
 ### Phase 3: Native execution on ARM hosts: **not started**
 
@@ -185,7 +185,7 @@ loader config list and X1 = all ones. The list holds:
 
 | Key | Entry | Value |
 |-----|-------|-------|
-| 1 | MainThreadHandle | the current-thread pseudo-handle 0xffff8000, until a handle table exists |
+| 1 | MainThreadHandle | a real handle to the main thread |
 | 7 | AppletType | Application (0), no flags |
 | 5 | Argv | argv[0] is the file name, then the arguments; empty arguments and arguments with spaces are double-quoted |
 | 14 | RandomSeed | a fixed value, so runs are reproducible |
@@ -258,20 +258,63 @@ Gaps:
 - Memory is not shared yet (IPC and shared memory come later), so the
   reference counts in MemoryInfo are always 0.
 
+Handles and kernel objects, from Switchbrew's "SVC" page (CloseHandle,
+GetThreadId, GetProcessId, CreateEvent, SignalEvent, ClearEvent,
+ResetSignal, CreateTransferMemory, MemoryState) and its "Error codes" page
+(result names and values). Objects live in a per-process handle table
+(`hle/kernel.rs`) for as long as a handle names them.
+
+| Object | Handles | Behaviour |
+|--------|---------|-----------|
+| Thread | one per thread; the main thread's is MainThreadHandle | svcGetThreadId |
+| Event | a writable and a readable side | the writable side signals; either side clears; svcResetSignal takes the readable side, 0xfa01 when unsignaled |
+| TransferMemory | one | the range takes the given permission and Locked until the handle closes, then gets each block's old permission back |
+
+The pseudo-handles name the caller: 0xffff8000 the current thread
+(svcGetThreadId) and 0xffff8001 the current process (svcGetProcessId,
+svcGetInfo). Wrong kinds, closed handles and handle 0 give InvalidHandle
+0xe401.
+
+Gaps:
+
+- Where Switchbrew is silent, kestrel chose: the handle format (15-bit slot
+  index, 15-bit counter so a closed handle stays invalid), 1024 handles per
+  process (OutOfHandles 0xd201 when full), process ID 0x80 and main thread
+  ID 0x100, InvalidHandle for closing a pseudo-handle, and for
+  svcCreateTransferMemory: write-only refused with 0xd801, memory with an
+  attribute or outside the address space refused with 0xd401.
+- svcResetSignal on a process stops as unsupported: process state changes
+  are not modelled.
+- Nothing waits on events yet (synchronisation comes with threads).
+- Shared memory has no object yet. A program cannot create one itself
+  (svcCreateSharedMemory is for system modules), so it arrives with the
+  first service that hands one out (input), together with
+  svcMapSharedMemory and svcUnmapSharedMemory.
+- No process handles; svcGetProcessId accepts only the pseudo-handle.
+- The receiving side of transfer memory (svcMapTransferMemory) belongs to
+  services and comes with them.
+
+Fixed while doing this: the InvalidCombination constant held 0xf601
+(SessionClosed); it is 0xe801. The kernel result constants now carry the
+names of Switchbrew's error table (0xd401 InvalidCurrentMemory, 0xd801
+InvalidNewMemoryPermission, 0xdc01 InvalidMemoryRegion, 0xfa01
+InvalidState).
+
 ## Next task
 
-Phase 2, handle table and kernel objects: a per-process handle table with
-the current-thread and current-process pseudo-handles, svcCloseHandle,
-and the first kernel objects (threads, events, shared and transfer
-memory), with the main thread getting a real handle.
-
-Create `docs/SWITCH2_NOTES.md` alongside it (phase 2 task, required by
-`PLAN.md` section 2 before any behaviour learned by observation is
-implemented), with a short header explaining its purpose and format.
+Phase 2, threads: svcCreateThread, svcStartThread, svcExitThread, a real
+svcSleepThread (sleep and the yield variants), svcGetThreadPriority and
+svcSetThreadPriority, the core mask calls and svcGetCurrentProcessorNumber,
+with a thread-local storage page per thread. Threads run on a cooperative
+scheduler on one host thread (`PLAN.md` phase 2 provision), switching on
+sleep, yield and exit; preemption by instruction budget comes after.
+Each thread is a kernel object in the handle table.
 
 ### Order after that
 
-1. Phase 2: threads, then synchronisation.
+1. Phase 2: synchronisation (svcWaitSynchronization on threads and
+   events, svcCancelSynchronization, mutex arbitration, condition
+   variables, address-based wait and signal).
 2. Then two tracks in parallel (`PLAN.md` phase 3 priority):
    - Phase 2: IPC, first services, SD folder option, unimplemented-call log.
    - Phase 3 on macOS: memory arena refactor, native backend,

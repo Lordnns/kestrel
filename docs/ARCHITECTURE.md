@@ -93,11 +93,22 @@ kestrel does not, so runs are reproducible. Behaviour learned by observation
 rather than documentation is described in `docs/SWITCH2_NOTES.md` before it
 is implemented.
 
-Today the process has one thread and no handles beyond the current-thread
-pseudo-handle; memory calls live in `kestrel_hle::memory`. Planned, in
-order: a per-process handle table with kernel objects (threads, events,
-shared and transfer memory, later sessions), a cooperative scheduler on one
-host thread, synchronisation, then IPC and the system services.
+`kestrel_hle::svc` decodes each SVC's registers and calls a `Process`
+method; the methods live next to the state they change:
+
+- `kestrel_hle::memory`: memory types and attributes per mapping, the
+  memory calls, and transfer memory.
+- `kestrel_hle::kernel`: the handle table and kernel objects (threads,
+  events, transfer memory). An object lives while a handle names it;
+  closing the last handle hands the object back so its owner can release
+  what it holds (transfer memory gets its permissions back). The
+  pseudo-handles 0xffff8000 and 0xffff8001 name the current thread and
+  process without occupying a slot.
+
+Today the process has one thread. Planned, in order: threads on a
+cooperative scheduler on one host thread, synchronisation, then IPC
+(sessions become kernel objects) and the system services, which will also
+create shared memory.
 
 ## Graphics (planned)
 

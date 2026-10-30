@@ -23,7 +23,8 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   sleep, tick, debug output, svcGetInfo for the process layout, memory
   sizes, entropy and program identity, and the memory calls (heap,
   svcQueryMemory with memory types, permissions, attributes, svcMapMemory,
-  physical memory).
+  physical memory), a handle table with thread, event and transfer-memory
+  objects, and the thread and process ID calls.
 - **Backend selection** that reports which fast path the host will get.
 
 ```
@@ -145,8 +146,8 @@ The plan of record, with its rules and acceptance criteria, is
 [PLAN.md](PLAN.md); progress against it is tracked in
 [docs/ROADMAP.md](docs/ROADMAP.md). In short:
 
-1. Homebrew (in progress: the NRO loader, process layout and memory calls
-   are done): handles, threads and synchronisation, then IPC and the first
+1. Homebrew (in progress: the NRO loader, process layout, memory calls and
+   handle table are done): threads and synchronisation, then IPC and the first
    OS services, from public documentation.
 2. `native` backend on aarch64 hosts, starting on macOS, developed alongside
    the OS services; then a `jit` backend on x86_64.
