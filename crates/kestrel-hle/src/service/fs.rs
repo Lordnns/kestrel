@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(at(&["link"]), Found::Link);
         assert_eq!(at(&["link", "secret"]), Found::Link);
         assert_eq!(at(&["file"]), Found::Link);
-        assert!(list(&root, 3).ok().unwrap().is_empty());
+        assert!(list(&root, 3, None).ok().unwrap().is_empty());
         fs::remove_dir_all(&base).unwrap();
     }
 }
