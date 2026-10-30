@@ -81,6 +81,8 @@ pub struct Process {
     pub heap_size: u64,
     /// Size of the loaded image, for svcGetInfo UsedMemorySize.
     pub image_size: u64,
+    /// Live svcMapMemory mappings as (destination, source, size).
+    pub mapped_memory: Vec<(u64, u64, u64)>,
     /// Bytes the guest wrote through svcOutputDebugString.
     pub debug_output: Vec<u8>,
     /// Echo debug output to stdout as it arrives.
@@ -131,6 +133,7 @@ impl Process {
             cpu,
             heap_size: 0,
             image_size: image.image_end - image.image_start,
+            mapped_memory: Vec::new(),
             debug_output: Vec::new(),
             echo: false,
             svc_count: 0,

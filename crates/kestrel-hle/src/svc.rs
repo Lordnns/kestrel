@@ -11,6 +11,8 @@ pub mod nr {
     pub const SET_HEAP_SIZE: u16 = 0x01;
     pub const SET_MEMORY_PERMISSION: u16 = 0x02;
     pub const SET_MEMORY_ATTRIBUTE: u16 = 0x03;
+    pub const MAP_MEMORY: u16 = 0x04;
+    pub const UNMAP_MEMORY: u16 = 0x05;
     pub const QUERY_MEMORY: u16 = 0x06;
     pub const EXIT_PROCESS: u16 = 0x07;
     pub const SLEEP_THREAD: u16 = 0x0b;
@@ -130,6 +132,15 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
             let (addr, size) = (p.cpu.x[0], p.cpu.x[1]);
             let (mask, value) = (p.cpu.x[2] as u32, p.cpu.x[3] as u32);
             p.cpu.x[0] = code(p.set_memory_attribute(addr, size, mask, value));
+            None
+        }
+        nr::MAP_MEMORY | nr::UNMAP_MEMORY => {
+            let (dst, src, size) = (p.cpu.x[0], p.cpu.x[1], p.cpu.x[2]);
+            p.cpu.x[0] = code(if n == nr::MAP_MEMORY {
+                p.map_memory(dst, src, size)
+            } else {
+                p.unmap_memory(dst, src, size)
+            });
             None
         }
         nr::QUERY_MEMORY => {

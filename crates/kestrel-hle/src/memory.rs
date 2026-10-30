@@ -191,6 +191,87 @@ impl Process {
             .map_err(|_| result::INVALID_STATE)
     }
 
+    /// svcMapMemory (Switchbrew, "SVC"): make `size` bytes of read-write
+    /// heap at `src` appear at `dst` in the stack region, as Stack memory.
+    /// The source becomes inaccessible and Locked until unmapped. Its bytes
+    /// move to the destination, which is equivalent while it is locked.
+    pub fn map_memory(&mut self, dst: u64, src: u64, size: u64) -> Result<(), u64> {
+        let dst_end = checked_range(dst, size)?.ok_or(result::INVALID_MEMORY_RANGE)?;
+        checked_range(src, size)?.ok_or(result::INVALID_STATE)?;
+        if !within(layout::STACK_REGION, dst, dst_end) {
+            return Err(result::INVALID_MEMORY_RANGE);
+        }
+        if !self.mem.is_free(dst, size) {
+            return Err(result::INVALID_STATE);
+        }
+        let blocks = self
+            .mem
+            .range_regions(src, size)
+            .map_err(|_| result::INVALID_STATE)?;
+        if blocks
+            .iter()
+            .any(|b| b.tag != tag(state::NORMAL) || b.perm != Perm::RW)
+        {
+            return Err(result::INVALID_STATE);
+        }
+        let bytes = self
+            .mem
+            .read_vec(src, size as usize)
+            .map_err(|_| result::INVALID_STATE)?;
+        let stack = tag(state::STACK);
+        self.mem
+            .map_tagged(dst, size, Perm::RW, stack, "mapped-memory")
+            .and_then(|_| self.mem.poke_bytes(dst, &bytes))
+            .and_then(|_| {
+                self.mem.update_range(src, size, |p, t| {
+                    *p = Perm::NONE;
+                    t.attr |= attr::LOCKED;
+                })
+            })
+            .map_err(|_| result::INVALID_STATE)?;
+        self.mapped_memory.push((dst, src, size));
+        Ok(())
+    }
+
+    /// svcUnmapMemory: undo all or part of an svcMapMemory with the same
+    /// source and destination, moving the bytes back to the source.
+    pub fn unmap_memory(&mut self, dst: u64, src: u64, size: u64) -> Result<(), u64> {
+        let dst_end = checked_range(dst, size)?.ok_or(result::INVALID_MEMORY_RANGE)?;
+        checked_range(src, size)?.ok_or(result::INVALID_STATE)?;
+        if !within(layout::STACK_REGION, dst, dst_end) {
+            return Err(result::INVALID_MEMORY_RANGE);
+        }
+        let i = self
+            .mapped_memory
+            .iter()
+            .position(|&(d, s, n)| d <= dst && dst_end <= d + n && dst - d == src.wrapping_sub(s))
+            .ok_or(result::INVALID_STATE)?;
+        let bytes = self
+            .mem
+            .read_vec(dst, size as usize)
+            .map_err(|_| result::INVALID_STATE)?;
+        self.mem
+            .unmap_range(dst, size)
+            .and_then(|_| self.mem.poke_bytes(src, &bytes))
+            .and_then(|_| {
+                self.mem.update_range(src, size, |p, t| {
+                    *p = Perm::RW;
+                    t.attr &= !attr::LOCKED;
+                })
+            })
+            .map_err(|_| result::INVALID_STATE)?;
+        // Keep whatever is left of the mapping on either side.
+        let (d, s, n) = self.mapped_memory.remove(i);
+        if dst > d {
+            self.mapped_memory.push((d, s, dst - d));
+        }
+        if dst_end < d + n {
+            let off = dst_end - d;
+            self.mapped_memory.push((dst_end, s + off, n - off));
+        }
+        Ok(())
+    }
+
     /// Memory counted against TotalMemorySize: the image, the main stack
     /// and the heap (Switchbrew, "SVC", svcGetInfo UsedMemorySize).
     pub fn used_memory(&self) -> u64 {
@@ -341,6 +422,89 @@ mod tests {
             p.set_memory_attribute(base, 0x1000, 0, 8),
             Err(result::INVALID_COMBINATION)
         );
+    }
+
+    #[test]
+    fn mapped_memory_moves_to_the_stack_region_and_back() {
+        let mut p = process();
+        let heap = p.set_heap_size(MB2).unwrap();
+        let dst = layout::STACK_REGION.0;
+        p.mem.write64(heap + 0x1000, 0xabcd).unwrap();
+        assert_eq!(p.map_memory(dst, heap, 0x3000), Ok(()));
+        // The destination is Stack memory with the source's bytes; the
+        // source is locked and inaccessible.
+        assert_eq!(p.mem.read64(dst + 0x1000).unwrap(), 0xabcd);
+        let d = query(&p.mem, dst);
+        assert_eq!(
+            (d.base, d.size, d.state, d.perm),
+            (dst, 0x3000, state::STACK, 3)
+        );
+        let s = query(&p.mem, heap);
+        assert_eq!(
+            (s.size, s.state, s.attr, s.perm),
+            (0x3000, state::NORMAL, attr::LOCKED, 0)
+        );
+        assert!(p.mem.read8(heap).is_err());
+        // A locked heap page cannot be released or reprotected.
+        assert_eq!(p.set_heap_size(0), Err(result::INVALID_STATE));
+        assert_eq!(
+            p.set_memory_permission(heap, 0x1000, 1),
+            Err(result::INVALID_STATE)
+        );
+        // Unmap the middle page, then the rest; writes come back.
+        p.mem.write64(dst + 0x1000, 0x5555).unwrap();
+        assert_eq!(p.unmap_memory(dst + 0x1000, heap + 0x1000, 0x1000), Ok(()));
+        assert_eq!(p.mem.read64(heap + 0x1000).unwrap(), 0x5555);
+        assert!(!p.mem.is_mapped(dst + 0x1000));
+        assert!(p.mem.read8(heap).is_err(), "the outer pages stay mapped");
+        assert_eq!(p.unmap_memory(dst, heap, 0x1000), Ok(()));
+        assert_eq!(p.unmap_memory(dst + 0x2000, heap + 0x2000, 0x1000), Ok(()));
+        assert!(p.mapped_memory.is_empty());
+        let s = query(&p.mem, heap);
+        assert_eq!((s.size, s.attr, s.perm), (MB2, 0, 3));
+        assert_eq!(p.set_heap_size(0), Ok(heap));
+    }
+
+    #[test]
+    fn map_memory_is_checked_as_documented() {
+        let mut p = process();
+        let heap = p.set_heap_size(MB2).unwrap();
+        let dst = layout::STACK_REGION.0;
+        assert_eq!(
+            p.map_memory(dst + 4, heap, 0x1000),
+            Err(result::INVALID_ADDRESS)
+        );
+        assert_eq!(p.map_memory(dst, heap, 0), Err(result::INVALID_SIZE));
+        // Only into the stack region, only over free pages, only from heap.
+        let alias = layout::ALIAS_REGION.0;
+        assert_eq!(
+            p.map_memory(alias, heap, 0x1000),
+            Err(result::INVALID_MEMORY_RANGE)
+        );
+        let main_stack = layout::STACK_TOP - layout::STACK_SIZE;
+        assert_eq!(
+            p.map_memory(main_stack, heap, 0x1000),
+            Err(result::INVALID_STATE)
+        );
+        assert_eq!(
+            p.map_memory(dst, main_stack, 0x1000),
+            Err(result::INVALID_STATE)
+        );
+        assert_eq!(
+            p.map_memory(dst, heap + MB2, 0x1000),
+            Err(result::INVALID_STATE)
+        );
+        // Unmapping needs the pairing that was mapped.
+        assert_eq!(p.map_memory(dst, heap, 0x2000), Ok(()));
+        assert_eq!(
+            p.unmap_memory(dst, heap + 0x1000, 0x1000),
+            Err(result::INVALID_STATE)
+        );
+        assert_eq!(
+            p.unmap_memory(dst, heap, 0x3000),
+            Err(result::INVALID_STATE)
+        );
+        assert_eq!(p.unmap_memory(dst, heap, 0x2000), Ok(()));
     }
 
     #[test]
