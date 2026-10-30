@@ -2,7 +2,7 @@
 
 use kestrel_cpu::{create_backend, interp::Interpreter, BackendKind, CpuBackend};
 use kestrel_hle::{Process, Stop};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -166,6 +166,47 @@ fn extract(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// kestrel's portable user folder: `user` next to the executable.
+fn user_folder() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("user"))
+}
+
+/// A time as "2026-10-30 15:04:05", UTC, for the log.
+fn utc(secs: u64) -> String {
+    let (days, s) = ((secs / 86400) as i64, secs % 86400);
+    // Days since 1970-01-01 to a date (proleptic Gregorian, eras of 400
+    // years from March 1).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + (month <= 2) as i64;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        s / 3600,
+        s / 60 % 60,
+        s % 60
+    )
+}
+
+/// Add `line` to the log of unimplemented calls at `path`, making its
+/// folder when missing.
+fn log_unimplemented(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{line}")
+}
+
 /// The folder that is the SD card: `--sd`, or kestrel's portable folder,
 /// `user/sdmc` next to the executable (the owner's choice, as Dolphin's
 /// portable mode keeps its user folder). It is made when missing; if it
@@ -173,10 +214,7 @@ fn extract(args: &[String]) -> Result<ExitCode, String> {
 fn sd_folder(chosen: Option<PathBuf>) -> Option<PathBuf> {
     let dir = match chosen {
         Some(dir) => dir,
-        None => {
-            let exe = std::env::current_exe().ok()?;
-            exe.parent()?.join("user").join("sdmc")
-        }
+        None => user_folder()?.join("sdmc"),
     };
     match std::fs::create_dir_all(&dir) {
         Ok(()) => Some(dir),
@@ -249,6 +287,22 @@ fn run(o: Opts) -> Result<ExitCode, String> {
             eprintln!("stopped: instruction budget exhausted");
             Ok(ExitCode::from(4))
         }
+        Stop::Unimplemented { what, pc } => {
+            eprintln!("unimplemented: {what}, at pc {pc:#x}");
+            // Every run that reaches something kestrel lacks adds a line,
+            // so the log lists what programs need next.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let line = format!("{} UTC  kestrel {VERSION}  {name}  {what}", utc(now));
+            if let Some(path) = user_folder().map(|u| u.join("logs").join("unimplemented.log")) {
+                match log_unimplemented(&path, &line) {
+                    Ok(()) => eprintln!("recorded in {}", path.display()),
+                    Err(e) => eprintln!("note: cannot write {}: {e}", path.display()),
+                }
+            }
+            Ok(ExitCode::from(5))
+        }
         Stop::Error(e) => Err(e),
     }
 }
@@ -275,5 +329,30 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_times_are_utc_dates() {
+        // Python: datetime.fromtimestamp(t, timezone.utc).
+        assert_eq!(utc(0), "1970-01-01 00:00:00");
+        assert_eq!(utc(1_749_081_600), "2025-06-05 00:00:00");
+        assert_eq!(utc(951_825_845), "2000-02-29 12:04:05");
+        assert_eq!(utc(4_102_444_799), "2099-12-31 23:59:59");
+    }
+
+    #[test]
+    fn the_log_gains_a_line_per_entry() {
+        let dir = std::env::temp_dir().join(format!("kestrel-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("logs").join("unimplemented.log");
+        log_unimplemented(&path, "first").unwrap();
+        log_unimplemented(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

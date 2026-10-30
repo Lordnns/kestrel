@@ -37,7 +37,7 @@ impl Process {
                 };
                 match SERVICES.iter().find(|(n, _)| *n == name) {
                     Some(&(_, interface)) => Ok(Out::object(interface)),
-                    None => Err(IpcError::Stop(format!("unimplemented service \"{name}\""))),
+                    None => Err(IpcError::Unimplemented(format!("service \"{name}\""))),
                 }
             }
             _ => Err(call.unimplemented()),

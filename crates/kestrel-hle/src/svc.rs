@@ -491,18 +491,21 @@ pub fn dispatch(p: &mut Process, n: u16) -> Option<Stop> {
                 }
                 Err(InfoError::Result(code)) => p.cpu.x[0] = code,
                 Err(InfoError::Unimplemented(name)) => {
-                    return Some(Stop::Error(format!(
-                    "unimplemented svcGetInfo type {kind} ({name}), subtype {sub:#x}, at pc {:#x}",
-                    p.cpu.pc.wrapping_sub(4)
-                )))
+                    return Some(Stop::Unimplemented {
+                        what: format!("svcGetInfo type {kind} ({name}), subtype {sub:#x}"),
+                        pc: p.cpu.pc.wrapping_sub(4),
+                    })
                 }
             }
             None
         }
-        other => Some(Stop::Error(format!(
-            "unimplemented SVC {other:#04x} at pc {:#x}",
-            p.cpu.pc - 4
-        ))),
+        other => Some(Stop::Unimplemented {
+            what: match crate::svc_names::svc_name(other) {
+                Some(name) => format!("SVC {other:#04x} ({name})"),
+                None => format!("SVC {other:#04x}"),
+            },
+            pc: p.cpu.pc.wrapping_sub(4),
+        }),
     }
 }
 
@@ -560,6 +563,10 @@ fn ipc_error(p: &mut Process, e: IpcError) -> Option<Stop> {
             p.cpu.pc.wrapping_sub(4)
         ))),
         IpcError::Fatal(result) => Some(Stop::Fatal { result }),
+        IpcError::Unimplemented(what) => Some(Stop::Unimplemented {
+            what,
+            pc: p.cpu.pc.wrapping_sub(4),
+        }),
     }
 }
 
@@ -737,8 +744,25 @@ mod tests {
         let mut p = process();
         (p.cpu.x[1], p.cpu.x[2], p.cpu.x[3]) = (9, handle::CURRENT_PROCESS, 0);
         match dispatch(&mut p, nr::GET_INFO) {
-            Some(Stop::Error(e)) => assert!(e.contains("type 9 (ResourceLimit)"), "{e}"),
+            Some(Stop::Unimplemented { what, .. }) => {
+                assert_eq!(what, "svcGetInfo type 9 (ResourceLimit), subtype 0x0")
+            }
             other => panic!("expected a stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unimplemented_svcs_stop_with_switchbrews_name() {
+        let mut p = process();
+        let pc = p.cpu.pc.wrapping_sub(4);
+        for (n, what) in [(0x7f, "SVC 0x7f (CallSecureMonitor)"), (0xff, "SVC 0xff")] {
+            assert_eq!(
+                dispatch(&mut p, n),
+                Some(Stop::Unimplemented {
+                    what: what.into(),
+                    pc
+                })
+            );
         }
     }
 

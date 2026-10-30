@@ -15,6 +15,7 @@ pub mod memory;
 pub mod results;
 pub mod service;
 pub mod svc;
+pub mod svc_names;
 pub mod sync;
 #[cfg(test)]
 mod testutil;
@@ -107,6 +108,10 @@ pub enum Stop {
     },
     /// fatal:u with an error screen: the program ends with this result.
     Fatal { result: u32 },
+    /// The program used something kestrel does not implement: an SVC, a
+    /// named port, a service, a command or a CMIF control command, named
+    /// with its identifiers. The frontend records it in its log.
+    Unimplemented { what: String, pc: u64 },
     /// Something the emulator does not support yet, or a guest crash.
     Error(String),
     /// The step budget ran out.

@@ -191,6 +191,9 @@ pub enum IpcError {
     Stop(String),
     /// The program threw a fatal error with an error screen: it ends.
     Fatal(u32),
+    /// Something kestrel does not implement, named with its identifiers:
+    /// stop, and the frontend logs it.
+    Unimplemented(String),
 }
 
 impl From<u64> for IpcError {
@@ -289,11 +292,7 @@ impl Call<'_> {
             .command_name(self.n)
             .map(|s| format!(" ({s})"))
             .unwrap_or_default();
-        IpcError::Stop(format!(
-            "unimplemented: {} command {}{name}",
-            self.object.name(),
-            self.n
-        ))
+        IpcError::Unimplemented(format!("{} command {}{name}", self.object.name(), self.n))
     }
 }
 
@@ -352,8 +351,8 @@ impl Process {
             }
         }
         if bytes != b"sm:" {
-            return Err(IpcError::Stop(format!(
-                "unsupported: named port \"{}\" (kestrel has only \"sm:\")",
+            return Err(IpcError::Unimplemented(format!(
+                "named port \"{}\" (kestrel has only \"sm:\")",
                 bytes.escape_ascii()
             )));
         }
@@ -449,16 +448,15 @@ impl Process {
                         ..Reply::ok(Vec::new())
                     };
                     ipc::cmif_reply(&reply, None).map_err(stop)?
-                } else if n != 0 || session.domain.is_some() {
-                    return Err(stop(format!(
-                        "unsupported: CMIF control command {n} ({}){}",
-                        control_name(n),
-                        if session.domain.is_some() {
-                            " on a domain"
-                        } else {
-                            ""
-                        }
+                } else if n != 0 {
+                    return Err(IpcError::Unimplemented(format!(
+                        "CMIF control command {n} ({}), sent to {name}",
+                        control_name(n)
                     )));
+                } else if session.domain.is_some() {
+                    return Err(stop(
+                        "unsupported: ConvertCurrentObjectToDomain on a domain".into(),
+                    ));
                 } else {
                     // ConvertCurrentObjectToDomain: the session's object
                     // becomes object 1, kestrel's choice of ID.
@@ -731,6 +729,7 @@ mod tests {
         match dispatch(p, nr::SEND_SYNC_REQUEST) {
             None => Ok(p.cpu.x[0]),
             Some(Stop::Error(e)) => Err(e),
+            Some(Stop::Unimplemented { what, .. }) => Err(format!("unimplemented: {what}")),
             Some(other) => panic!("{other:?}"),
         }
     }
@@ -773,6 +772,7 @@ mod tests {
         match dispatch(p, nr::CONNECT_TO_NAMED_PORT) {
             None => Ok((p.cpu.x[0], p.cpu.x[1])),
             Some(Stop::Error(e)) => Err(e),
+            Some(Stop::Unimplemented { what, .. }) => Err(format!("unimplemented: {what}")),
             Some(other) => panic!("{other:?}"),
         }
     }
@@ -834,7 +834,7 @@ mod tests {
             assert_eq!(reply(&p, true).0, sm::result::INVALID_SERVICE_NAME);
         }
         let e = send(&mut p, h, &get(b"nosuch")).unwrap_err();
-        assert!(e.starts_with("unimplemented service \"nosuch\""), "{e}");
+        assert!(e.starts_with("unimplemented: service \"nosuch\""), "{e}");
         // A session to the test service, used through its handle.
         assert_eq!(send(&mut p, h, &get(b"test")), Ok(0));
         let (rc, moved, _) = reply(&p, true);
@@ -884,6 +884,53 @@ mod tests {
         assert_eq!(dispatch(&mut p, nr::CLOSE_HANDLE), None);
         assert_eq!(p.cpu.x[0], 0);
         assert_eq!(send(&mut p, h, &close), Ok(result::INVALID_HANDLE));
+    }
+
+    /// Send `msg` over `h` and return the stop it causes.
+    fn stop_from(p: &mut Process, h: u64, msg: &[u8]) -> Option<Stop> {
+        let tlr = p.current_thread().tlr;
+        p.mem.write_bytes(tlr, msg).unwrap();
+        p.cpu.x[0] = h;
+        dispatch(p, nr::SEND_SYNC_REQUEST)
+    }
+
+    #[test]
+    fn what_kestrel_lacks_stops_as_unimplemented_with_its_identifiers() {
+        let mut p = setup();
+        let pc = p.cpu.pc.wrapping_sub(4);
+        let unimplemented = |what: &str| {
+            Some(Stop::Unimplemented {
+                what: what.into(),
+                pc,
+            })
+        };
+        let h = sm(&mut p);
+        let get = cmif(4, false, 1, &name(b"nosuch"));
+        assert_eq!(
+            stop_from(&mut p, h, &get),
+            unimplemented("service \"nosuch\"")
+        );
+        let t = open(&mut p, b"test");
+        assert_eq!(
+            stop_from(&mut p, t, &cmif(4, false, 7, &[])),
+            unimplemented("test command 7")
+        );
+        assert_eq!(
+            stop_from(&mut p, t, &cmif(5, false, 3, &[])),
+            unimplemented("CMIF control command 3 (QueryPointerBufferSize), sent to test")
+        );
+        // Inside a domain too.
+        assert_eq!(convert(&mut p, t), Ok(1));
+        assert_eq!(
+            stop_from(&mut p, t, &request(false, &[], Some(1), 7, &[])),
+            unimplemented("test command 7")
+        );
+        p.mem.write_bytes(STRINGS, b"nope\0").unwrap();
+        p.cpu.x[1] = STRINGS;
+        assert_eq!(
+            dispatch(&mut p, nr::CONNECT_TO_NAMED_PORT),
+            unimplemented("named port \"nope\" (kestrel has only \"sm:\")")
+        );
     }
 
     #[test]
@@ -1067,7 +1114,7 @@ mod tests {
         assert_eq!(answer(&p, true, 0).4, vec![2]);
         let e = convert(&mut p, h).unwrap_err();
         assert!(
-            e.contains("control command 0 (ConvertCurrentObjectToDomain) on a domain"),
+            e.contains("ConvertCurrentObjectToDomain on a domain, sent to test"),
             "{e}"
         );
         // Outside a domain, a new object is a new session.
