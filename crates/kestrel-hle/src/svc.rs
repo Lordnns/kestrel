@@ -136,6 +136,9 @@ fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> 
         16 | 17 => process(0), // system resource size: none reserved
         18 => process(PROGRAM_ID),
         23 => process(1), // IsApplication, as the AppletType entry says
+        // AliasRegionExtraSize [18.0.0+]: kestrel's alias region has no
+        // extra part; libnx subtracts this from the region's end.
+        28 => process(0),
         // The cores and priorities threads may use: all of them.
         0 => process((1 << CORES) - 1),
         1 => process(u64::MAX >> (63 - LOWEST_PRIORITY)),
@@ -146,6 +149,11 @@ fn get_info(p: &Process, kind: u32, h: u64, sub: u64) -> Result<u64, InfoError> 
         24 => Err(Unimplemented("FreeThreadCount")),
         25 => Err(Unimplemented("ThreadTickCount")),
         26 => Err(Unimplemented("IsSvcPermitted")),
+        27 => Err(Unimplemented("IoRegionHint")),
+        29..=33 => Err(Unimplemented("a Switch 2 info type")),
+        34 => Err(Unimplemented("TransferMemoryHint")),
+        36 => Err(Unimplemented("AddressSpaceSize")),
+        37 => Err(Unimplemented("ShadowStackRegionAddress")),
         _ => Err(Unimplemented("unknown info type")),
     }
 }
@@ -729,6 +737,15 @@ mod tests {
         assert_eq!(info(&mut p, 11, 0, 4), Err(result::INVALID_COMBINATION));
         // Only the low 32 bits of the handle register count.
         assert!(info(&mut p, 18, 0xdead_0000_ffff_8001, 0).is_ok());
+    }
+
+    #[test]
+    fn the_alias_region_has_no_extra_size() {
+        // AliasRegionExtraSize (28), which libnx 4.12 asks for on 18.0.0+.
+        let mut p = process();
+        let cur = handle::CURRENT_PROCESS;
+        assert_eq!(info(&mut p, 28, cur, 0), Ok(0));
+        assert_eq!(info(&mut p, 28, 0, 0), Err(result::INVALID_HANDLE));
     }
 
     #[test]
