@@ -260,6 +260,40 @@ fn sd_folder(chosen: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
+/// Where a homebrew program is on the SD card, as argv[0] tells it (the
+/// homebrew menu passes the program's path there, and libnx starts in its
+/// folder and finds the files bundled in it from it). A program inside the
+/// card's folder is at its real place. One elsewhere, in the owner's game
+/// library anywhere on the host, shows read-only at
+/// `sdmc:/switch/<name>`, where the homebrew menu keeps programs (the
+/// owner's choice); what it writes still goes to the card's folder.
+fn card_place(
+    program: &Path,
+    sd: Option<&Path>,
+    name: &str,
+) -> (String, Option<kestrel_hle::service::fs::Program>) {
+    let inside = sd.and_then(|sd| {
+        let rel = program.canonicalize().ok()?;
+        let rel = rel.strip_prefix(sd.canonicalize().ok()?).ok()?;
+        let parts: Option<Vec<&str>> = rel.iter().map(|c| c.to_str()).collect();
+        let path = format!("/{}", parts?.join("/"));
+        let mut raw = path.clone().into_bytes();
+        raw.push(0);
+        kestrel_hle::service::fs::parse_path(&raw).ok()?;
+        Some(path)
+    });
+    match inside {
+        Some(path) => (format!("sdmc:{path}"), None),
+        None => (
+            format!("sdmc:/switch/{name}"),
+            Some(kestrel_hle::service::fs::Program {
+                parts: vec!["switch".into(), name.into()],
+                host: program.to_path_buf(),
+            }),
+        ),
+    }
+}
+
 /// The input settings: `user/config/input.cfg`, written with the defaults
 /// when missing.
 #[cfg(feature = "window")]
@@ -319,9 +353,16 @@ fn emulate(
     name: &str,
     window: Option<Windowed>,
 ) -> Result<ExitCode, String> {
-    let mut proc = Process::load(file, name, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
+    let sd = sd_folder(o.sd.clone());
+    let (argv0, program) = if kestrel_loader::is_nro(file) {
+        card_place(Path::new(&o.path), sd.as_deref(), name)
+    } else {
+        (name.to_string(), None)
+    };
+    let mut proc = Process::load(file, &argv0, &o.args).map_err(|e| format!("{}: {e}", o.path))?;
     proc.echo = true;
-    proc.services.fs.sd = sd_folder(o.sd.clone());
+    proc.services.fs.sd = sd;
+    proc.services.fs.program = program;
     // With a window someone is using the program: it runs in real time,
     // for as long as they like.
     let windowed = window.is_some();
@@ -465,6 +506,36 @@ mod tests {
         assert_eq!(utc(1_749_081_600), "2025-06-05 00:00:00");
         assert_eq!(utc(951_825_845), "2000-02-29 12:04:05");
         assert_eq!(utc(4_102_444_799), "2099-12-31 23:59:59");
+    }
+
+    #[test]
+    fn programs_are_placed_on_the_card() {
+        let dir = std::env::temp_dir().join(format!("kestrel-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sd, library) = (dir.join("sdmc"), dir.join("games"));
+        std::fs::create_dir_all(sd.join("switch").join("tools")).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        let inside = sd.join("switch").join("tools").join("a.nro");
+        let outside = library.join("b.nro");
+        std::fs::write(&inside, b"").unwrap();
+        std::fs::write(&outside, b"").unwrap();
+        assert_eq!(
+            card_place(&inside, Some(&sd), "a.nro"),
+            ("sdmc:/switch/tools/a.nro".to_string(), None)
+        );
+        let (argv0, program) = card_place(&outside, Some(&sd), "b.nro");
+        assert_eq!(argv0, "sdmc:/switch/b.nro");
+        let program = program.unwrap();
+        assert_eq!(
+            (program.parts, program.host),
+            (
+                vec!["switch".to_string(), "b.nro".to_string()],
+                outside.clone()
+            )
+        );
+        // With no card, the program still shows where the menu keeps it.
+        assert_eq!(card_place(&outside, None, "b.nro").0, "sdmc:/switch/b.nro");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

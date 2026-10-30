@@ -2068,6 +2068,138 @@ mod tests {
         assert_eq!(u32s(&r), [0x14, 0x10, 0, 0x24, 1280, 720, 0, 0, 0]);
     }
 
+    #[test]
+    fn a_programs_own_file_shows_read_only_on_the_card() {
+        // The program lives in a library folder outside the card's folder,
+        // and shows at /switch/game.nro.
+        let mut p = setup();
+        let sd = sd_folder("fs-program");
+        let library = sd_folder("fs-program-library");
+        std::fs::write(library.join("game.nro"), b"NRO0 bytes").unwrap();
+        p.services.fs.sd = Some(sd.clone());
+        p.services.fs.program = Some(fs::Program {
+            parts: vec!["switch".into(), "game.nro".into()],
+            host: library.join("game.nro"),
+        });
+        const BUF: u64 = 0x20_0000;
+        p.mem.map(BUF, 0x4000, Perm::RW, "fs").unwrap();
+        let put = |p: &mut Process, at: u64, s: &str| {
+            let mut b = s.as_bytes().to_vec();
+            b.resize(0x301, 0);
+            p.mem.write_bytes(at, &b).unwrap();
+        };
+        let x1 = [(BUF, 0x301)];
+        let x2 = [(BUF, 0x301), (BUF + 0x400, 0x301)];
+        let h = open(&mut p, b"fsp-srv");
+        assert_eq!(convert(&mut p, h), Ok(1));
+        let set = request(true, &[], Some(1), 1, &[0; 8]);
+        assert_eq!(send(&mut p, h, &set), Ok(0));
+        let sd_open = request(false, &[], Some(1), 18, &[]);
+        assert_eq!(send(&mut p, h, &sd_open), Ok(0));
+        let sdfs = answer(&p, true, 0).4[0];
+        let call =
+            |p: &mut Process, object, n, args: &[u8], x: &[(u64, u64)], b: &[(u64, u64)], size| {
+                assert_eq!(send(p, h, &buffers(object, n, args, x, &[], b)), Ok(0));
+                let (rc, _, _, data, objects) = answer(p, true, size);
+                (rc, data, objects)
+            };
+        let read_dir = |p: &mut Process, path: &str| {
+            put(p, BUF, path);
+            let (rc, _, objects) = call(p, sdfs, 9, &3u32.to_le_bytes(), &x1, &[], 0);
+            assert_eq!(rc, 0, "{path}");
+            let b = [(BUF + 0x1000, 3 * fs::ENTRY_SIZE as u64)];
+            let (_, n, _) = call(p, objects[0], 0, &[], &[], &b, 8);
+            let n = u64::from_le_bytes(n.try_into().unwrap()) as usize;
+            let raw = p.mem.read_vec(BUF + 0x1000, n * fs::ENTRY_SIZE).unwrap();
+            let close = words(&[4, 8, 0, 0, 2, objects[0], 0, 0]);
+            assert_eq!(send(p, h, &close), Ok(0));
+            raw.chunks(fs::ENTRY_SIZE)
+                .map(|e| {
+                    let len = e.iter().position(|&b| b == 0).unwrap();
+                    let size = u64::from_le_bytes(e[0x308..].try_into().unwrap());
+                    (
+                        String::from_utf8(e[..len].to_vec()).unwrap(),
+                        e[0x304],
+                        size,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // The card's root shows /switch, and /switch the program.
+        assert_eq!(read_dir(&mut p, "/"), [("switch".into(), 0, 0)]);
+        assert_eq!(read_dir(&mut p, "/switch/"), [("game.nro".into(), 1, 10)]);
+        for (path, kind) in [("/switch", 0u32), ("/switch/game.nro", 1)] {
+            put(&mut p, BUF, path);
+            assert_eq!(
+                call(&mut p, sdfs, 7, &[], &x1, &[], 4).1,
+                kind.to_le_bytes()
+            );
+        }
+        // It opens for reading; writing it is refused.
+        put(&mut p, BUF, "/switch/game.nro");
+        let (rc, _, file) = call(&mut p, sdfs, 8, &1u32.to_le_bytes(), &x1, &[], 0);
+        assert_eq!(rc, 0);
+        let mut read = vec![0u8; 24];
+        read[16..].copy_from_slice(&4u64.to_le_bytes());
+        let b = [(BUF + 0x1000, 4)];
+        assert_eq!(
+            call(&mut p, file[0], 0, &read, &[], &b, 8).1,
+            4u64.to_le_bytes()
+        );
+        assert_eq!(p.mem.read_vec(BUF + 0x1000, 4).unwrap(), b"NRO0");
+        assert_eq!(
+            send(&mut p, h, &words(&[4, 8, 0, 0, 2, file[0], 0, 0])),
+            Ok(0)
+        );
+        assert_eq!(
+            call(&mut p, sdfs, 8, &3u32.to_le_bytes(), &x1, &[], 0).0,
+            fs::result::UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE
+        );
+        assert_eq!(
+            call(&mut p, sdfs, 1, &[], &x1, &[], 0).0,
+            fs::result::UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM
+        );
+        put(&mut p, BUF + 0x400, "/other.nro");
+        assert_eq!(
+            call(&mut p, sdfs, 5, &[], &x2, &[], 0).0,
+            fs::result::UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM
+        );
+        put(&mut p, BUF, "/switch");
+        assert_eq!(
+            call(&mut p, sdfs, 4, &[], &x1, &[], 0).0,
+            fs::result::UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM
+        );
+        assert_eq!(
+            call(&mut p, sdfs, 0, &[0; 16], &x1, &[], 0).0,
+            fs::result::PATH_ALREADY_EXISTS
+        );
+        // What the program writes goes to the card's folder, making
+        // /switch there; the program still shows beside it.
+        assert!(!sd.join("switch").exists());
+        put(&mut p, BUF, "/switch/save.dat");
+        assert_eq!(call(&mut p, sdfs, 0, &[0; 16], &x1, &[], 0).0, 0);
+        assert!(sd.join("switch").join("save.dat").is_file());
+        assert!(!library.join("save.dat").exists());
+        assert_eq!(
+            read_dir(&mut p, "/switch"),
+            [("game.nro".into(), 1, 10), ("save.dat".into(), 1, 0)]
+        );
+        // A real file at the program's path wins.
+        std::fs::write(sd.join("switch").join("game.nro"), b"mine").unwrap();
+        assert_eq!(
+            read_dir(&mut p, "/switch"),
+            [("game.nro".into(), 1, 4), ("save.dat".into(), 1, 0)]
+        );
+        put(&mut p, BUF, "/switch/game.nro");
+        assert_eq!(call(&mut p, sdfs, 1, &[], &x1, &[], 0).0, 0);
+        assert_eq!(
+            std::fs::read(library.join("game.nro")).unwrap(),
+            b"NRO0 bytes"
+        );
+        std::fs::remove_dir_all(&sd).unwrap();
+        std::fs::remove_dir_all(&library).unwrap();
+    }
+
     /// A fresh, empty folder for one test's SD card.
     fn sd_folder(test: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("kestrel-{test}-{}", std::process::id()));

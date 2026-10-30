@@ -9,6 +9,14 @@
 //! component by component, and links on the host are never followed.
 //! The checks give the same answers on every host, so a program behaves
 //! the same on Windows, macOS and Linux.
+//!
+//! A program's own file can live outside the card's folder, in the
+//! owner's game library anywhere on the host. Then it shows on the card at
+//! the path the frontend gives it (`sdmc:/switch/<name>.nro`, where the
+//! homebrew menu keeps programs), read-only, with the folders above it,
+//! so the program finds its folder and the files bundled in it. Whatever
+//! the program writes still goes to the card's folder; a file the folder
+//! really has at that path wins.
 
 use super::{Call, Interface, IpcError, Out};
 use crate::Process;
@@ -35,6 +43,8 @@ pub mod result {
     pub const INVALID_OFFSET: u32 = 0x2f5a02;
     pub const INVALID_SIZE: u32 = 0x2f5c02;
     pub const FILE_EXTENSION_WITHOUT_OPEN_MODE_ALLOW_APPEND: u32 = 0x307202;
+    pub const UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM: u32 = 0x31c202;
+    pub const UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE: u32 = 0x31c802;
 }
 
 /// OpenFile's mode bits ("Filesystem services", OpenFile).
@@ -51,9 +61,20 @@ pub struct State {
     pub sd: Option<PathBuf>,
     /// SetCurrentProcess came, with the process ID.
     pub process_set: bool,
+    /// The program's own file, when it lives outside the card's folder.
+    pub program: Option<Program>,
     files: BTreeMap<u32, OpenFile>,
     dirs: BTreeMap<u32, OpenDir>,
     next_id: u32,
+}
+
+/// A program's own file, shown read-only on the card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Program {
+    /// Its path on the card, by component: ["switch", "name.nro"].
+    pub parts: Vec<String>,
+    /// The file on the host.
+    pub host: PathBuf,
 }
 
 #[derive(Debug)]
@@ -177,6 +198,11 @@ enum Found {
     /// A host link, or a path through one: never followed, so it hides
     /// whatever it points at (kestrel's choice).
     Link,
+    /// The program's own file, read-only, with its size.
+    Program(u64),
+    /// A folder on the way to the program's file that the card's folder
+    /// does not have.
+    ProgramDir,
 }
 
 /// The host path of `parts` under `root` and what is there.
@@ -201,18 +227,37 @@ fn lookup(root: &Path, parts: &[String]) -> Result<(PathBuf, Found), Fail> {
             },
             // Below a link, a file or nothing.
             Found::Link => Found::Link,
-            Found::File(_) | Found::Nothing => Found::Nothing,
+            // (The host walk finds neither kind of program entry.)
+            Found::File(_) | Found::Nothing | Found::Program(_) | Found::ProgramDir => {
+                Found::Nothing
+            }
         };
     }
     Ok((p, found))
 }
 
 /// The entries of the host directory `dir` a guest can see, in name order:
-/// links and names the path rules reject are left out.
-fn list(dir: &Path, filter: u64) -> Result<Vec<[u8; ENTRY_SIZE]>, Fail> {
+/// links and names the path rules reject are left out. `extra` is an entry
+/// only the guest sees (the program's file, or a folder above it): its
+/// name, whether it is a folder, its size.
+fn list(
+    dir: &Path,
+    filter: u64,
+    extra: Option<(String, bool, u64)>,
+) -> Result<Vec<[u8; ENTRY_SIZE]>, Fail> {
     let mut names = Vec::new();
-    let read = fs::read_dir(dir).map_err(|e| host("cannot list", dir, e))?;
-    for e in read {
+    let read = match fs::read_dir(dir) {
+        Ok(r) => Some(r),
+        // A folder only the guest sees.
+        Err(e) if e.kind() == ErrorKind::NotFound && extra.is_some() => None,
+        Err(e) => return Err(host("cannot list", dir, e)),
+    };
+    if let Some((name, is_dir, size)) = extra {
+        if filter & if is_dir { 1 } else { 2 } != 0 {
+            names.push((name, is_dir, size));
+        }
+    }
+    for e in read.into_iter().flatten() {
         let e = e.map_err(|e| host("cannot list", dir, e))?;
         let Ok(name) = e.file_name().into_string() else {
             continue;
@@ -272,6 +317,62 @@ impl Process {
         }
     }
 
+    /// What is at `parts` on the card: the host folder's entry, or else
+    /// the program's file or a folder above it.
+    fn find(&self, root: &Path, parts: &[String]) -> Result<(PathBuf, Found), Fail> {
+        let (p, found) = lookup(root, parts)?;
+        if found != Found::Nothing {
+            return Ok((p, found));
+        }
+        match &self.services.fs.program {
+            Some(prog) if prog.parts == parts => {
+                let len = fs::metadata(&prog.host)
+                    .map_err(|e| host("cannot read", &prog.host, e))?
+                    .len();
+                Ok((prog.host.clone(), Found::Program(len)))
+            }
+            Some(prog) if prog.parts.len() > parts.len() && prog.parts.starts_with(parts) => {
+                Ok((p, Found::ProgramDir))
+            }
+            _ => Ok((p, found)),
+        }
+    }
+
+    /// The entry only the guest sees in the folder at `parts`: the next
+    /// step towards the program's file, when the host folder lacks it.
+    fn program_entry(
+        &self,
+        root: &Path,
+        parts: &[String],
+    ) -> Result<Option<(String, bool, u64)>, Fail> {
+        let Some(prog) = &self.services.fs.program else {
+            return Ok(None);
+        };
+        if prog.parts.len() <= parts.len() || !prog.parts.starts_with(parts) {
+            return Ok(None);
+        }
+        let child = &prog.parts[..parts.len() + 1];
+        Ok(match self.find(root, child)?.1 {
+            Found::Program(len) => Some((child[parts.len()].clone(), false, len)),
+            Found::ProgramDir => Some((child[parts.len()].clone(), true, 0)),
+            _ => None,
+        })
+    }
+
+    /// The folder a new entry at `parts` goes in exists, made in the
+    /// card's folder when only the guest saw it.
+    fn parent_exists(&self, root: &Path, parts: &[String]) -> Result<bool, Fail> {
+        let (p, found) = self.find(root, &parts[..parts.len() - 1])?;
+        match found {
+            Found::Dir => Ok(true),
+            Found::ProgramDir => {
+                fs::create_dir_all(&p).map_err(|e| host("cannot create", &p, e))?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// The path in pointer (X) buffer `index`, checked.
     fn fs_path(&self, call: &Call, index: u8) -> Result<Vec<String>, Fail> {
         let bytes = self.read_pointer(call.req, index)?;
@@ -317,10 +418,6 @@ impl Process {
         use result::*;
         let root = self.services.fs.sd.clone().expect("the card is in");
         let code = |c| Err(Fail::Code(c));
-        // The directory a new entry goes in must exist.
-        let parent_is_dir = |parts: &[String]| -> Result<bool, Fail> {
-            Ok(lookup(&root, &parts[..parts.len() - 1])?.1 == Found::Dir)
-        };
         match n {
             // CreateFile: u32 option, padding, s64 size. Option bit 0 makes
             // a concatenation file (libnx, FsCreateOption_BigFile), which
@@ -340,12 +437,12 @@ impl Process {
                 if parts.is_empty() {
                     return code(PATH_ALREADY_EXISTS);
                 }
-                if !parent_is_dir(&parts)? {
-                    return code(PATH_NOT_FOUND);
-                }
-                let (p, found) = lookup(&root, &parts)?;
+                let (p, found) = self.find(&root, &parts)?;
                 if found != Found::Nothing {
                     return code(PATH_ALREADY_EXISTS);
+                }
+                if !self.parent_exists(&root, &parts)? {
+                    return code(PATH_NOT_FOUND);
                 }
                 let f = fs::File::create_new(&p).map_err(|e| host("cannot create", &p, e))?;
                 f.set_len(size as u64)
@@ -355,7 +452,10 @@ impl Process {
             // DeleteFile.
             1 => {
                 let parts = self.fs_path(call, 0)?;
-                let (p, found) = lookup(&root, &parts)?;
+                let (p, found) = self.find(&root, &parts)?;
+                if let Found::Program(_) = found {
+                    return code(UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM);
+                }
                 if !matches!(found, Found::File(_)) {
                     return code(PATH_NOT_FOUND);
                 }
@@ -371,12 +471,17 @@ impl Process {
                 if parts.is_empty() {
                     return code(PATH_ALREADY_EXISTS);
                 }
-                if !parent_is_dir(&parts)? {
-                    return code(PATH_NOT_FOUND);
+                let (p, found) = self.find(&root, &parts)?;
+                if found == Found::ProgramDir {
+                    // It shows already; making it puts it in the folder.
+                    fs::create_dir_all(&p).map_err(|e| host("cannot create", &p, e))?;
+                    return code(PATH_ALREADY_EXISTS);
                 }
-                let (p, found) = lookup(&root, &parts)?;
                 if found != Found::Nothing {
                     return code(PATH_ALREADY_EXISTS);
+                }
+                if !self.parent_exists(&root, &parts)? {
+                    return code(PATH_NOT_FOUND);
                 }
                 fs::create_dir(&p).map_err(|e| host("cannot create", &p, e))?;
                 Ok(Out::empty())
@@ -388,7 +493,10 @@ impl Process {
             // directory that is not empty, so that stops.
             3 | 4 | 13 => {
                 let parts = self.fs_path(call, 0)?;
-                let (p, found) = lookup(&root, &parts)?;
+                let (p, found) = self.find(&root, &parts)?;
+                if found == Found::ProgramDir {
+                    return code(UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM);
+                }
                 if found != Found::Dir {
                     return code(PATH_NOT_FOUND);
                 }
@@ -400,7 +508,7 @@ impl Process {
                 }
                 match n {
                     3 => {
-                        if !list(&p, 3)?.is_empty() {
+                        if !list(&p, 3, self.program_entry(&root, &parts)?)?.is_empty() {
                             return Err(stop(format!(
                                 "IFileSystem DeleteDirectory of {}, which is not empty",
                                 guest_path(&parts)
@@ -411,7 +519,7 @@ impl Process {
                     4 => fs::remove_dir_all(&p).map_err(|e| host("cannot delete", &p, e))?,
                     // What a guest sees goes; host links stay.
                     _ => {
-                        for e in list(&p, 3)? {
+                        for e in list(&p, 3, None)? {
                             let len = e.iter().position(|&b| b == 0).unwrap();
                             let at = p.join(std::str::from_utf8(&e[..len]).unwrap());
                             let gone = if e[0x301] & 1 != 0 {
@@ -430,7 +538,10 @@ impl Process {
             5 | 6 => {
                 let from = self.fs_path(call, 0)?;
                 let to = self.fs_path(call, 1)?;
-                let (src, found) = lookup(&root, &from)?;
+                let (src, found) = self.find(&root, &from)?;
+                if matches!(found, Found::Program(_) | Found::ProgramDir) {
+                    return code(UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE_SYSTEM);
+                }
                 let right_kind = match found {
                     Found::File(_) => n == 5,
                     Found::Dir => n == 6 && !from.is_empty(),
@@ -442,12 +553,12 @@ impl Process {
                 if to.is_empty() {
                     return code(PATH_ALREADY_EXISTS);
                 }
-                if !parent_is_dir(&to)? {
-                    return code(PATH_NOT_FOUND);
-                }
-                let (dst, there) = lookup(&root, &to)?;
+                let (dst, there) = self.find(&root, &to)?;
                 if there != Found::Nothing {
                     return code(PATH_ALREADY_EXISTS);
+                }
+                if !self.parent_exists(&root, &to)? {
+                    return code(PATH_NOT_FOUND);
                 }
                 let (from_s, to_s) = (guest_path(&from), guest_path(&to));
                 if self.services.fs.locked(&from_s, n == 6) {
@@ -464,9 +575,9 @@ impl Process {
             // GetEntryType: a u32 DirectoryEntryType.
             7 => {
                 let parts = self.fs_path(call, 0)?;
-                match lookup(&root, &parts)?.1 {
-                    Found::Dir => Ok(Out::ok(0u32.to_le_bytes().to_vec())),
-                    Found::File(_) => Ok(Out::ok(1u32.to_le_bytes().to_vec())),
+                match self.find(&root, &parts)?.1 {
+                    Found::Dir | Found::ProgramDir => Ok(Out::ok(0u32.to_le_bytes().to_vec())),
+                    Found::File(_) | Found::Program(_) => Ok(Out::ok(1u32.to_le_bytes().to_vec())),
                     _ => code(PATH_NOT_FOUND),
                 }
             }
@@ -478,9 +589,16 @@ impl Process {
                     return Err(stop(format!("IFileSystem OpenFile with mode {m:#x}")));
                 }
                 let parts = self.fs_path(call, 0)?;
-                let (host, found) = lookup(&root, &parts)?;
-                if !matches!(found, Found::File(_)) {
-                    return code(PATH_NOT_FOUND);
+                let (host, found) = self.find(&root, &parts)?;
+                match found {
+                    Found::File(_) => {}
+                    // The program's own file opens for reading only
+                    // (kestrel's choice of when the result applies).
+                    Found::Program(_) if m & mode::WRITE != 0 => {
+                        return code(UNSUPPORTED_WRITE_FOR_READ_ONLY_FILE)
+                    }
+                    Found::Program(_) => {}
+                    _ => return code(PATH_NOT_FOUND),
                 }
                 let fs = &mut self.services.fs;
                 let id = fs.add_id();
@@ -508,11 +626,11 @@ impl Process {
                     )));
                 }
                 let parts = self.fs_path(call, 0)?;
-                let (p, found) = lookup(&root, &parts)?;
-                if found != Found::Dir {
+                let (p, found) = self.find(&root, &parts)?;
+                if !matches!(found, Found::Dir | Found::ProgramDir) {
                     return code(PATH_NOT_FOUND);
                 }
-                let entries = list(&p, filter)?;
+                let entries = list(&p, filter, self.program_entry(&root, &parts)?)?;
                 let fs = &mut self.services.fs;
                 let id = fs.add_id();
                 let path = guest_path(&parts);
@@ -532,8 +650,10 @@ impl Process {
             // FsTimeStampRaw). Kestrel reports none, so runs repeat: all 0.
             14 => {
                 let parts = self.fs_path(call, 0)?;
-                match lookup(&root, &parts)?.1 {
-                    Found::Dir | Found::File(_) => Ok(Out::ok(vec![0; 0x20])),
+                match self.find(&root, &parts)?.1 {
+                    Found::Dir | Found::File(_) | Found::Program(_) | Found::ProgramDir => {
+                        Ok(Out::ok(vec![0; 0x20]))
+                    }
                     _ => code(PATH_NOT_FOUND),
                 }
             }
