@@ -216,6 +216,13 @@ fn system_registers() {
 }
 
 #[test]
+fn both_counters_read_the_instruction_clock() {
+    // mrs x0,cntpct_el0; nop; mrs x1,cntvct_el0; brk
+    let s = run(&[0xd53be020, 0xd503201f, 0xd53be041, 0xd4200000]);
+    assert_eq!(s.x[1], s.x[0] + 2);
+}
+
+#[test]
 fn hints_barriers_and_cache_maintenance() {
     // paciasp; bti c; isb; dmb ish; dsb sy; clrex; ic ivau,x0; dc civac,x0;
     // dc cvau,x0; brk
