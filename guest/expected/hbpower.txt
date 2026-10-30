@@ -1,0 +1,32 @@
+homebrew power test
+sm: register: 0x0000000000000000
+GetBatteryChargePercentage: 0x0000000000000000
+percent: 100
+GetChargerType: 0x0000000000000000
+charger type: 1
+IsBatteryChargingEnabled: 0x0000000000000000
+charging enabled: yes
+GetBatteryVoltageState: 0x0000000000000000
+voltage state: 3
+IsEnoughPowerSupplied: 0x0000000000000000
+enough power: yes
+GetRawBatteryChargePercentage: 0x0000000000000000
+its bits: 0x4059000000000000
+GetBatteryAgePercentage: 0x0000000000000000
+its bits: 0x4059000000000000
+OpenSession: 0x0000000000000000
+it moved a session handle: yes
+SetChargerTypeChangeEventEnabled: 0x0000000000000000
+SetPowerSupplyChangeEventEnabled: 0x0000000000000000
+SetBatteryVoltageStateChangeEventEnabled: 0x0000000000000000
+BindStateChangeEvent: 0x0000000000000000
+it copied a handle: yes
+UnbindStateChangeEvent: 0x0000000000000000
+svcBreak, notification only: 0x0000000000000000
+ThrowFatalWithPolicy, report only: 0x0000000000000000
+the program goes on
+close the event: 0x0000000000000000
+close IPsmSession: 0x0000000000000000
+close fatal:u: 0x0000000000000000
+close psm: 0x0000000000000000
+close sm: 0x0000000000000000

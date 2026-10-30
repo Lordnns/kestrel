@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import math
 import re
+import struct
 import sys
 import zlib
 from pathlib import Path
@@ -977,6 +978,58 @@ def hbfs():
     return "".join(line + "\n" for line in out)
 
 
+def hbpower():
+    """guest/src/nro/hbpower.c: power state and error reports. Switchbrew's
+    "PTM services": psm's GetBatteryChargePercentage returns a u32,
+    GetChargerType a ChargerType (1 EnoughPower), IsBatteryChargingEnabled
+    and IsEnoughPowerSupplied a bool, GetBatteryVoltageState a
+    BatteryVoltageState (3 Good), GetRawBatteryChargePercentage and
+    GetBatteryAgePercentage a double; OpenSession returns an IPsmSession,
+    whose BindStateChangeEvent returns an event handle. "SVC": svcBreak with
+    bit 31 of the reason set returns 0. "Fatal services": FatalType 1 is
+    ErrorReport, which only files a report. Kestrel's documented choices
+    (docs/ROADMAP.md, phase 2 notes): a docked console on its charger, so a
+    full battery (100), EnoughPower, charging enabled, Good, 100.0 for both
+    doubles; an ErrorReport fatal error returns 0."""
+    ok = hex64(0)
+    hundred = struct.unpack("<Q", struct.pack("<d", 100.0))[0]
+    out = [
+        "homebrew power test",
+        f"sm: register: {ok}",
+        f"GetBatteryChargePercentage: {ok}",
+        "percent: 100",
+        f"GetChargerType: {ok}",
+        "charger type: 1",
+        f"IsBatteryChargingEnabled: {ok}",
+        "charging enabled: yes",
+        f"GetBatteryVoltageState: {ok}",
+        "voltage state: 3",
+        f"IsEnoughPowerSupplied: {ok}",
+        "enough power: yes",
+        f"GetRawBatteryChargePercentage: {ok}",
+        f"its bits: {hex64(hundred)}",
+        f"GetBatteryAgePercentage: {ok}",
+        f"its bits: {hex64(hundred)}",
+        f"OpenSession: {ok}",
+        "it moved a session handle: yes",
+        f"SetChargerTypeChangeEventEnabled: {ok}",
+        f"SetPowerSupplyChangeEventEnabled: {ok}",
+        f"SetBatteryVoltageStateChangeEventEnabled: {ok}",
+        f"BindStateChangeEvent: {ok}",
+        "it copied a handle: yes",
+        f"UnbindStateChangeEvent: {ok}",
+        f"svcBreak, notification only: {ok}",
+        f"ThrowFatalWithPolicy, report only: {ok}",
+        "the program goes on",
+        f"close the event: {ok}",
+        f"close IPsmSession: {ok}",
+        f"close fatal:u: {ok}",
+        f"close psm: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -997,6 +1050,7 @@ PROGRAMS = {
     "hbhid": hbhid,
     "hbtime": hbtime,
     "hbfs": hbfs,
+    "hbpower": hbpower,
 }
 
 

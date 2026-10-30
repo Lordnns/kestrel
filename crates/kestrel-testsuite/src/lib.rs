@@ -119,6 +119,7 @@ pub const CASES: &[Case] = &[
     homebrew!("hbhid", "homebrew NRO: hid startup, shared memory"),
     homebrew!("hbtime", "homebrew NRO: time startup, clocks, UTC calendar"),
     homebrew!("hbfs", "homebrew NRO: fsp-srv, the SD card folder"),
+    homebrew!("hbpower", "homebrew NRO: psm power state, error reports"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
