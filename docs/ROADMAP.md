@@ -58,6 +58,7 @@ qemu for Linux ARM64.
 | First services | done, with the gaps below | system version 20.0.0 (`hle::firmware`) in the HosVersion loader entry; `hle/service/`: CMIF domains, copied handles, receive (C) buffers; set:sys GetFirmwareVersion2; apm; appletOE with the commands libnx's applet startup sends; shared memory objects with svcMapSharedMemory/svcUnmapSharedMemory; hid with its shared memory and npad setup; time:u with its clocks, shared memory and UTC calendar times, and CNTPCT_EL0; CloneCurrentObject with shared domains, send (A) and receive (B) buffers; fsp-srv with the SD card's files and directories; psm; fatal:u, svcBreak and result names; controller input in hid's shared memory, from a window (winit, softbuffer, gilrs) mapping keyboard and gamepads; self-test programs `hbapplet`, `hbhid`, `hbtime`, `hbfs`, `hbpower`, `hbinput` |
 | SD folder option, unimplemented-call log | done | `kestrel run --sd <folder>`, else the portable `user/sdmc` next to the executable; unknown SVCs, svcGetInfo types, named ports, services, commands and CMIF control commands stop as `Stop::Unimplemented` with their identifiers, and `kestrel run` appends each to `user/logs/unimplemented.log` |
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
+| Phase 2 acceptance | done locally, CI pending | the four standard examples (hello-world, read-controls, sdmc, barrier), built from source in the pinned devkitPro container (libnx 4.12.0), run in kestrel with scripted presses, and their last frames read back with libnx's font and checked against their sources (`scripts/build-examples.sh`, `run-examples.sh`, `check-examples.py`): 4/4 on Windows x86_64; CI runs them on every native job from the next release tag |
 
 ### Phase 3: Native execution on ARM hosts: **not started**
 
@@ -804,10 +805,10 @@ Phase 2, the rest of the first services (on any machine), each from
 its Switchbrew page, in the order libnx's startup opens them, and each
 checked by a homebrew test program:
 
-1. Phase 2 acceptance (`PLAN.md`), in progress: the standard homebrew
-   examples built from source with the public libnx toolchain, run on all
-   five platforms with their output checked in CI. See "Phase 2
-   acceptance" below for the owner's decisions and the steps.
+1. Phase 2 acceptance (`PLAN.md`): done locally (4/4 examples pass on
+   Windows x86_64); confirm the CI run on the next release tag, then mark
+   phase 2 accepted. See "Phase 2 acceptance" below. Raise with the owner
+   the clock-rate finding recorded there.
 2. Later input tasks the owner wants (2026-10-30): the other
    NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
    players, and real Joy-Con motion, rumble and pairing over their own
@@ -885,12 +886,10 @@ services", "NV services"):
   converts the colour format (RGB565 for the console).
 
 Steps:
-1. Owner: install Docker Desktop (in progress at the end of 2026-10-30).
-   Then a script that builds the four examples at the pinned commits in
-   the container. Commits read on 2026-10-30, to pin unless newer ones
-   are needed: switch-examples 669786898205b7beb25ff1731e72982e6d0397d3,
-   libnx b156b4774fb2df7b93402169509266da7547fc4c (the container's libnx
-   is what the examples link; record its version with the image tag).
+1. Done: Docker Desktop on the owner's PC; `scripts/build-examples.sh`
+   builds switch-examples 669786898205b7beb25ff1731e72982e6d0397d3 in
+   `devkitpro/devkita64:20260219` (pinned by digest): libnx 4.12.0,
+   devkitA64 r29.2, switch-tools 1.13.1.
 2. Done: display services: vi:u, the layer, the binder relay and the
    buffer queue, with a vsync clock in guest time (buffers are released
    at 60 Hz, and the scheduler wakes for it), and am's
@@ -903,10 +902,53 @@ Steps:
 5. Done: `hbdisplay`, drawing three frames of a known pattern; the
    self-test adds a CRC-32 line per frame shown, and the model renders
    the pattern straight to RGB.
-6. The examples: run each, fix what the unimplemented-call log names,
-   press Plus from a scripted controller, compare the final frame.
-7. CI: build the examples in the container on release tags and run them
-   on all five platforms.
+6. Done: the examples run, with the fixes below; `kestrel run` gained
+   `--press <button>@<seconds>` and `--save-frame <file.png>`;
+   `scripts/run-examples.sh` runs them and `check-examples.py` reads each
+   last frame back as text with libnx's font (4.12.0) and checks it
+   against what the example's source prints (barrier against the
+   barrier's rules). 4/4 pass; breaking the block-linear reading fails
+   all four.
+7. Committed, not yet run: `ci.yml` builds the examples in a job of its
+   own and every native job runs and checks them. Verify on the next
+   release tag.
+
+What libnx 4.12's startup and the examples needed (each found by
+running them):
+- QueryPointerBufferSize on every session; sm: refusing vi:m and vi:s
+  with NotAllowed.
+- svcSetMemoryPermission on any FlagCanReprotect memory: libnx makes its
+  relocated read-only data (RELRO, in the data segment) read-only and
+  panics otherwise. Its svcSetMemoryAttribute PermissionLocked call gets
+  InvalidCombination, as Switchbrew documents; libnx ignores it.
+- svcGetInfo AliasRegionExtraSize (28), 0.
+- OpenDirectory's filter as a u32, as libnx sends it.
+- A loader return address in LR: a page with `svc #0x7`, so returning
+  from main ends the process instead of jumping to 0.
+- argv[0] as the program's place on the card, and the program's file
+  shown there read-only when it lives elsewhere (the owner's choice,
+  below); libnx starts in that folder.
+- Repeated slashes in paths count as one: libnx's working directory ends
+  in '/' and relative paths are joined with another.
+
+The program's place on the card (the owner's decision, 2026-10-30): a
+game library can be anywhere on the host, kestrel elsewhere, as with
+Dolphin. Files kestrel only reads come from where they are; what a
+program writes goes to kestrel's `user` folder. A program inside the
+card's folder is at its real place; one elsewhere is told it is at
+`sdmc:/switch/<name>` and shows there read-only, with `/switch`
+(`fs::Program`); writing to it is UnsupportedWriteForReadOnlyFile(System);
+creating files beside it makes `/switch` in the card's folder; a real
+file at that path wins. A setting naming the library folder, to pick
+games from a list, comes with the frontend.
+
+A finding for later: kestrel's clock counts one tick per instruction, so
+programs see a CPU about 50 times slower than a Switch's in guest time.
+libnx's console takes about 90 ms of guest time a frame and 0.6 s for a
+frame that clears the screen, so read-controls missed a 100 ms press;
+scripted presses now last 1 s. Choosing how many instructions make a
+tick (or following host time) changes every timing result and belongs
+with the faster CPU backends; it is the owner's decision.
 
 How the display works (`hle/display.rs`, `hle/service/vi.rs`,
 `hle/service/nv.rs`):

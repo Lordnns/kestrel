@@ -154,6 +154,11 @@ method; the methods live next to the state they change:
   `kestrel_hle::display::Screen`: the window paints it, the self-test
   records a CRC-32 of it. Buffers are freed at a 60 Hz vsync of guest
   time, which the scheduler wakes for.
+- Unattended runs: `kestrel-cli/src/unattended.rs` gives a program a
+  scripted controller (`--press`) and saves its last frame as a PNG
+  (`--save-frame`); `scripts/run-examples.sh` uses both to run the
+  standard homebrew examples, and `check-examples.py` reads the frames
+  back as text with libnx's font.
 - Whatever kestrel does not implement (an SVC, a named port, a service,
   a command or a CMIF control command) stops the program with
   `Stop::Unimplemented`, which names it with its identifiers; services

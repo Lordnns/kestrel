@@ -116,6 +116,28 @@ With a window, programs run in real time: a program that sleeps waits
 for real, and there is no instruction budget. On Linux, gamepads need libudev (`libudev.so.1`, on every desktop
 distribution).
 
+### The standard homebrew examples
+
+`scripts/build-examples.sh` builds four of the public homebrew examples
+(hello world, reading the controller, listing the SD card, threads) from
+source with the official homebrew toolchain in Docker, and
+`scripts/run-examples.sh` runs them in kestrel and checks what each one
+shows. CI does both on every platform. To try one yourself after
+building them:
+
+```
+cargo run --release -p kestrel-cli -- run target/examples/bin/hello-world.nro
+```
+
+Press **+** (Enter on the keyboard) to leave it. For runs with nobody at
+the controls, `--press Plus@2` presses a button for a second at that
+time, and `--save-frame shot.png` saves the last frame shown.
+
+A homebrew program sees its own file on the SD card at
+`sdmc:/switch/<name>.nro` (read-only, read from wherever it is on your
+computer), as the homebrew menu would place it; what it writes goes to
+`user/sdmc`.
+
 ### What kestrel does not do yet
 
 When a program uses a system call, service or command kestrel does not
