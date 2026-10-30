@@ -19,6 +19,10 @@ pub struct Case {
 
 macro_rules! case {
     ($name:literal, $desc:literal) => {
+        case!($name, $name, $desc)
+    };
+    // A build of `$program` under another name, sharing its expected output.
+    ($name:literal, $program:literal, $desc:literal) => {
         Case {
             name: $name,
             description: $desc,
@@ -31,7 +35,7 @@ macro_rules! case {
             expected: include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../guest/expected/",
-                $name,
+                $program,
                 ".txt"
             )),
         }
@@ -46,6 +50,12 @@ pub const CASES: &[Case] = &[
     case!("bigint", "128-bit math, Miller-Rabin primality"),
     case!("algos", "recursion, CRC32, sieve, heap, sort"),
     case!("sha256", "SHA-256 of three inputs"),
+    // The same C programs built with floating point and NEON allowed.
+    case!("hello-neon", "hello", "hello, NEON build"),
+    case!("vm-neon", "vm", "vm, NEON build"),
+    case!("bigint-neon", "bigint", "bigint, NEON build"),
+    case!("algos-neon", "algos", "algos, NEON build (vector compares)"),
+    case!("sha256-neon", "sha256", "sha256, NEON build (LD4, widening)"),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.

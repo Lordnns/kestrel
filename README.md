@@ -41,10 +41,12 @@ cargo run --release -p kestrel-cli -- selftest
 
 ## Self-test and test programs
 
-`kestrel selftest` runs six ARM64 programs compiled into the binary and
+`kestrel selftest` runs eleven ARM64 programs compiled into the binary and
 compares their output byte for byte with answers computed independently
 by `scripts/gen-expected.py` (Python, hashlib, zlib), so testers need
-nothing but the executable:
+nothing but the executable. Each C program is in the suite twice: built
+integer-only, and built with floating point and NEON allowed (`name-neon`),
+so auto-vectorised code must give the same output:
 
 | Program      | Exercises                                                        |
 |--------------|------------------------------------------------------------------|
