@@ -1,4 +1,4 @@
-//! Arm floating-point semantics for scalar single and double precision.
+//! Arm floating-point semantics for half, single and double precision.
 //!
 //! Follows the shared pseudocode of the Arm Architecture Reference Manual
 //! (DDI 0487, `shared/functions/float`): FPUnpack, FPProcessNaN(s), FPRound,
@@ -6,18 +6,24 @@
 //! FPRSqrtEstimate, FPRecpX and the reciprocal step functions. Values travel
 //! as raw bit patterns so results are bit-identical on every host.
 //!
-//! Arithmetic that needs IEEE rounding (add, subtract, multiply, divide,
-//! square root, fused multiply-add) runs on the host in round-to-nearest-even,
-//! which gives the Arm result for every finite, non-NaN case. NaN inputs are
-//! processed before the host computes, host-generated NaNs are replaced by
-//! the Arm default NaN, and flush-to-zero is applied on both sides.
-//! Conversions and round-to-integral are done in integer arithmetic here, in
-//! every rounding mode.
+//! Single- and double-precision arithmetic that needs IEEE rounding (add,
+//! subtract, multiply, divide, square root, fused multiply-add) runs on the
+//! host in round-to-nearest-even, which gives the Arm result for every
+//! finite, non-NaN case. NaN inputs are processed before the host computes,
+//! host-generated NaNs are replaced by the Arm default NaN, and
+//! flush-to-zero is applied on both sides. Half precision (FEAT_FP16) is
+//! small enough to compute exactly in integers here, following the
+//! pseudocode's special cases, so it honours every rounding mode; FPCR.FZ16
+//! flushes its subnormals (FPCR.FZ does not). Conversions and
+//! round-to-integral are done in integer arithmetic here, in every rounding
+//! mode.
 //!
 //! Not modelled yet (see docs/ROADMAP.md): the FPSR cumulative exception
-//! flags, half precision, the FEAT_AFP controls (FPCR.AH, FIZ, NEP), and
-//! directed FPCR rounding modes for host-computed arithmetic, which report
-//! an unsupported error instead of guessing.
+//! flags, the alternative half-precision format (FPCR.AHP, reported by the
+//! conversions that would use it), the FEAT_AFP controls (FPCR.AH, FIZ,
+//! NEP), and directed FPCR rounding modes for host-computed single- and
+//! double-precision arithmetic, which report an unsupported error instead
+//! of guessing.
 
 /// Why an operation was not computed.
 pub use crate::Unmodelled as Unsupported;
@@ -25,6 +31,7 @@ pub use crate::Unmodelled as Unsupported;
 /// Scalar floating-point format.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fmt {
+    H,
     S,
     D,
 }
@@ -32,18 +39,21 @@ pub enum Fmt {
 impl Fmt {
     pub const fn width(self) -> u32 {
         match self {
+            Fmt::H => 16,
             Fmt::S => 32,
             Fmt::D => 64,
         }
     }
     const fn ebits(self) -> u32 {
         match self {
+            Fmt::H => 5,
             Fmt::S => 8,
             Fmt::D => 11,
         }
     }
     const fn fbits(self) -> u32 {
         match self {
+            Fmt::H => 10,
             Fmt::S => 23,
             Fmt::D => 52,
         }
@@ -51,6 +61,7 @@ impl Fmt {
     /// All bits of a value in this format.
     pub const fn mask(self) -> u64 {
         match self {
+            Fmt::H => 0xffff,
             Fmt::S => 0xffff_ffff,
             Fmt::D => u64::MAX,
         }
@@ -96,15 +107,33 @@ impl Fmt {
     const fn exp_field(self, x: u64) -> u64 {
         (x >> self.fbits()) & self.exp_max()
     }
-    /// The exact value as a host double (single precision widens exactly).
+    /// The exact value as a host double (single and half precision widen
+    /// exactly).
     fn value(self, x: u64) -> f64 {
         match self {
+            Fmt::H => {
+                let mag = match kind(x, self) {
+                    Kind::Inf => f64::INFINITY,
+                    Kind::QNaN | Kind::SNaN => f64::NAN,
+                    _ => {
+                        let (_, m, e) = decompose(x, self);
+                        m as f64 * pow2(e)
+                    }
+                };
+                if x & self.sign() != 0 {
+                    -mag
+                } else {
+                    mag
+                }
+            }
             Fmt::S => f32::from_bits(x as u32) as f64,
             Fmt::D => f64::from_bits(x),
         }
     }
+    /// A constant (2.0, 1.5) in this format.
     fn host_bits(self, v: f64) -> u64 {
         match self {
+            Fmt::H => convert(v.to_bits(), Fmt::D, Fmt::H, Fpcr::from_bits(0)),
             Fmt::S => (v as f32).to_bits() as u64,
             Fmt::D => v.to_bits(),
         }
@@ -138,20 +167,36 @@ impl Rounding {
 /// The FPCR controls this module honours.
 #[derive(Clone, Copy, Debug)]
 pub struct Fpcr {
+    /// Alternative half-precision format (FPCR.AHP, bit 26). Not modelled:
+    /// the decoders report conversions that would use it.
+    pub ahp: bool,
     /// Default NaN (FPCR.DN, bit 25).
     pub dn: bool,
-    /// Flush-to-zero (FPCR.FZ, bit 24).
+    /// Flush-to-zero for single and double precision (FPCR.FZ, bit 24).
     pub fz: bool,
     /// FPCR.RMode, bits 23..22.
     pub rmode: Rounding,
+    /// Flush-to-zero for half precision (FPCR.FZ16, bit 19).
+    pub fz16: bool,
 }
 
 impl Fpcr {
     pub const fn from_bits(v: u64) -> Fpcr {
         Fpcr {
+            ahp: (v >> 26) & 1 != 0,
             dn: (v >> 25) & 1 != 0,
             fz: (v >> 24) & 1 != 0,
             rmode: Rounding::from_rmode((v >> 22) as u32),
+            fz16: (v >> 19) & 1 != 0,
+        }
+    }
+
+    /// Whether subnormals of format `f` flush to zero: FZ16 governs half
+    /// precision, FZ the others (FPUnpackBase, FPRoundBase).
+    const fn flushes(self, f: Fmt) -> bool {
+        match f {
+            Fmt::H => self.fz16,
+            Fmt::S | Fmt::D => self.fz,
         }
     }
 }
@@ -189,7 +234,7 @@ fn is_nan(k: Kind) -> bool {
 /// FPUnpack: classify, flushing subnormal inputs to signed zero under FZ.
 fn unpack(x: u64, f: Fmt, fpcr: Fpcr) -> (Kind, u64) {
     let x = x & f.mask();
-    if fpcr.fz && f.exp_field(x) == 0 {
+    if fpcr.flushes(f) && f.exp_field(x) == 0 {
         return (Kind::Zero, x & f.sign());
     }
     (kind(x, f), x)
@@ -237,7 +282,7 @@ fn finish(
     if is_nan(kind(r, f)) {
         return Ok(f.default_nan());
     }
-    if fpcr.fz {
+    if fpcr.flushes(f) {
         let mag = r & !f.sign();
         if (mag != 0 && mag < f.min_normal()) || (mag == f.min_normal() && below_min()?) {
             return Ok(r & f.sign());
@@ -262,8 +307,12 @@ pub fn arith(op: Op2, a: u64, b: u64, f: Fmt, fpcr: Fpcr) -> Result<u64, Unsuppo
     if let Some(n) = process_nans(&[(ka, a), (kb, b)], f, fpcr) {
         return Ok(n);
     }
+    if f == Fmt::H {
+        return Ok(half_arith(op, (ka, a), (kb, b), fpcr));
+    }
     host_rounding(fpcr)?;
     let r = match f {
+        Fmt::H => unreachable!("computed exactly above"),
         Fmt::S => {
             let (x, y) = (f32::from_bits(a as u32), f32::from_bits(b as u32));
             let r = match op {
@@ -293,8 +342,8 @@ pub fn arith(op: Op2, a: u64, b: u64, f: Fmt, fpcr: Fpcr) -> Result<u64, Unsuppo
             (Op2::Add | Op2::Sub, _) => false,
             // Single-precision products are exact in double precision, and
             // a quotient of 24-bit significands cannot round onto 2^-126.
-            (Op2::Mul, Fmt::S) => x * y < f32::MIN_POSITIVE as f64,
-            (Op2::Div, Fmt::S) => x / y < f32::MIN_POSITIVE as f64,
+            (Op2::Mul, Fmt::S | Fmt::H) => x * y < f32::MIN_POSITIVE as f64,
+            (Op2::Div, Fmt::S | Fmt::H) => x / y < f32::MIN_POSITIVE as f64,
             // Sign of the exact residual. An underflowing residual keeps its
             // sign (it becomes -0.0), and an exact zero gives +0.0.
             (Op2::Mul, Fmt::D) => x.mul_add(y, -f64::MIN_POSITIVE).is_sign_negative(),
@@ -309,8 +358,12 @@ pub fn sqrt(a: u64, f: Fmt, fpcr: Fpcr) -> Result<u64, Unsupported> {
     if is_nan(ka) {
         return Ok(process_nan(a, f, fpcr));
     }
+    if f == Fmt::H {
+        return Ok(half_sqrt(ka, a, fpcr));
+    }
     host_rounding(fpcr)?;
     let r = match f {
+        Fmt::H => unreachable!("computed exactly above"),
         Fmt::S => f32::from_bits(a as u32).sqrt().to_bits() as u64,
         Fmt::D => f64::from_bits(a).sqrt().to_bits(),
     };
@@ -333,8 +386,12 @@ pub fn mul_add(addend: u64, n: u64, m: u64, f: Fmt, fpcr: Fpcr) -> Result<u64, U
             r
         });
     }
+    if f == Fmt::H {
+        return Ok(half_mul_add((ka, a), (kn, n), (km, m), fpcr));
+    }
     host_rounding(fpcr)?;
     let r = match f {
+        Fmt::H => unreachable!("computed exactly above"),
         Fmt::S => {
             let [a, n, m] = [a, n, m].map(|v| f32::from_bits(v as u32));
             n.mul_add(m, a).to_bits() as u64
@@ -345,7 +402,7 @@ pub fn mul_add(addend: u64, n: u64, m: u64, f: Fmt, fpcr: Fpcr) -> Result<u64, U
     };
     finish(r, f, fpcr, || {
         match f {
-            Fmt::S => {
+            Fmt::H | Fmt::S => {
                 // The product is exact in double precision; TwoSum then gives the
                 // exact sum as s + err.
                 let (p, c) = (f.value(n) * f.value(m), f.value(a));
@@ -590,17 +647,21 @@ pub fn from_fixed(v: u64, width: u32, unsigned: bool, fbits: u32, f: Fmt, fpcr: 
     let (neg, mag) = if unsigned {
         (false, v)
     } else {
-        let s = if width == 32 {
-            v as u32 as i32 as i64
-        } else {
-            v as i64
-        };
+        // Sign-extend from `width` bits (16, 32 or 64).
+        let s = ((v << (64 - width)) as i64) >> (64 - width);
         (s < 0, s.unsigned_abs())
     };
     if mag == 0 {
         return f.zero(false);
     }
-    round(neg, mag as u128, -(fbits as i32), f, fpcr.rmode, fpcr.fz)
+    round(
+        neg,
+        mag as u128,
+        -(fbits as i32),
+        f,
+        fpcr.rmode,
+        fpcr.flushes(f),
+    )
 }
 
 /// FPRoundInt: round to an integral value in format `f`.
@@ -624,13 +685,20 @@ pub fn round_int(x: u64, f: Fmt, fpcr: Fpcr, rounding: Rounding) -> u64 {
     }
 }
 
-/// FPConvert between single and double precision, rounded by FPCR.
+/// FPConvert between two formats, rounded by FPCR. FPCR.AHP must be clear
+/// when either format is half precision (the callers check).
 pub fn convert(x: u64, from: Fmt, to: Fmt, fpcr: Fpcr) -> u64 {
     convert_rounded(x, from, to, fpcr, fpcr.rmode)
 }
 
 /// FPConvert with an explicit rounding mode (FCVTXN rounds to odd).
 pub fn convert_rounded(x: u64, from: Fmt, to: Fmt, fpcr: Fpcr, rounding: Rounding) -> u64 {
+    // FPUnpackCV and FPRoundCV clear FZ16: conversions never flush half
+    // precision, while FZ still flushes single and double precision.
+    let fpcr = Fpcr {
+        fz16: false,
+        ..fpcr
+    };
     let (k, x) = unpack(x, from, fpcr);
     let neg = x & from.sign() != 0;
     match k {
@@ -650,7 +718,7 @@ pub fn convert_rounded(x: u64, from: Fmt, to: Fmt, fpcr: Fpcr, rounding: Roundin
         Kind::Zero => to.zero(neg),
         Kind::Finite => {
             let (_, m, e) = decompose(x, from);
-            round(neg, m as u128, e, to, rounding, fpcr.fz)
+            round(neg, m as u128, e, to, rounding, fpcr.flushes(to))
         }
     }
 }
@@ -735,10 +803,8 @@ pub fn recip_estimate(x: u64, f: Fmt, fpcr: Fpcr) -> u64 {
         Kind::Finite => {}
     }
     let v = f.value(x).abs();
-    let (tiny, huge) = match f {
-        Fmt::S => (pow2(-128), pow2(126)),
-        Fmt::D => (pow2(-1024), pow2(1022)),
-    };
+    // 2^-16, 2^-128, 2^-1024 and 2^14, 2^126, 2^1022.
+    let (tiny, huge) = (pow2(-(f.bias() + 1)), pow2(f.bias() - 1));
     if v < tiny {
         let to_inf = match fpcr.rmode {
             Rounding::TieEven | Rounding::TieAway => true,
@@ -752,7 +818,7 @@ pub fn recip_estimate(x: u64, f: Fmt, fpcr: Fpcr) -> u64 {
             f.max_normal(neg)
         };
     }
-    if fpcr.fz && v >= huge {
+    if fpcr.flushes(f) && v >= huge {
         return f.zero(neg);
     }
     let (mut frac, mut exp) = estimate_fields(x, f);
@@ -765,10 +831,8 @@ pub fn recip_estimate(x: u64, f: Fmt, fpcr: Fpcr) -> u64 {
         }
     }
     let scaled = 256 | (frac >> 44) as u32;
-    let mut result_exp = match f {
-        Fmt::S => 253 - exp,
-        Fmt::D => 2045 - exp,
-    };
+    // 29, 253 or 2045 minus the exponent.
+    let mut result_exp = 2 * f.bias() - 1 - exp;
     let estimate = recip_estimate_int(scaled);
     let mut frac = ((estimate & 0xff) as u64) << 44;
     if result_exp == 0 {
@@ -806,10 +870,8 @@ pub fn rsqrt_estimate(x: u64, f: Fmt, fpcr: Fpcr) -> u64 {
     } else {
         128 | (frac >> 45) as u32
     };
-    let result_exp = match f {
-        Fmt::S => (380 - exp) / 2,
-        Fmt::D => (3068 - exp) / 2,
-    };
+    // (44, 380 or 3068 minus the exponent) / 2.
+    let result_exp = (3 * f.bias() - 1 - exp) / 2;
     let estimate = (rsqrt_estimate_int(scaled) & 0xff) as u64;
     ((result_exp as u64) << f.fbits()) | (estimate << (f.fbits() - 8))
 }
@@ -845,8 +907,16 @@ pub fn recip_step(a: u64, b: u64, f: Fmt, fpcr: Fpcr, rsqrt: bool) -> Result<u64
     if ka == Kind::Inf || kb == Kind::Inf {
         return Ok(f.inf((a ^ b) & f.sign() != 0));
     }
+    if f == Fmt::H {
+        // 2 + a*b, or (3 + a*b) / 2, exactly: 2 is 1 * 2^1, 3 is 3 * 2^0.
+        let (p, pe) = signed_product(a, b, f);
+        let (c, ce, halve) = if rsqrt { (3, 0, 1) } else { (1, 1, 0) };
+        let (sum, e) = add_aligned((p, pe), (c, ce));
+        return Ok(round_exact(sum, e - halve, f, fpcr));
+    }
     host_rounding(fpcr)?;
     let r = match f {
+        Fmt::H => unreachable!("computed exactly above"),
         Fmt::S => {
             let (x, y) = (f32::from_bits(a as u32), f32::from_bits(b as u32));
             let r = if rsqrt {
@@ -869,4 +939,137 @@ pub fn recip_step(a: u64, b: u64, f: Fmt, fpcr: Fpcr, rsqrt: bool) -> Result<u64
     // 2 - a*b and 3 - a*b are never tiny: a*b has no bits below about 2^-104
     // when it is close to 2 or 3.
     finish(r, f, fpcr, || Ok(false))
+}
+
+// ---- half precision, computed exactly ---------------------------------------
+
+/// A finite value (zeros included) as a signed significand and exponent.
+fn signed_parts(x: u64, f: Fmt) -> (i128, i32) {
+    let (neg, m, e) = decompose(x, f);
+    (if neg { -(m as i128) } else { m as i128 }, e)
+}
+
+/// The exact product of two finite values.
+fn signed_product(a: u64, b: u64, f: Fmt) -> (i128, i32) {
+    let ((ma, ea), (mb, eb)) = (signed_parts(a, f), signed_parts(b, f));
+    (ma * mb, ea + eb)
+}
+
+/// The exact sum of two values, at the smaller exponent. Half-precision
+/// exponents are close enough that the shifts stay well inside 128 bits.
+fn add_aligned((ma, ea): (i128, i32), (mb, eb): (i128, i32)) -> (i128, i32) {
+    let e = ea.min(eb);
+    ((ma << (ea - e)) + (mb << (eb - e)), e)
+}
+
+/// FPRound of the exact value `sum * 2^exp` in FPCR's rounding mode; an
+/// exact zero is +0, or -0 when rounding towards minus infinity, as the
+/// pseudocode of FPAdd, FPMulAdd and the step functions says.
+fn round_exact(sum: i128, exp: i32, f: Fmt, fpcr: Fpcr) -> u64 {
+    if sum == 0 {
+        return f.zero(fpcr.rmode == Rounding::NegInf);
+    }
+    round(
+        sum < 0,
+        sum.unsigned_abs(),
+        exp,
+        f,
+        fpcr.rmode,
+        fpcr.flushes(f),
+    )
+}
+
+/// FPAdd, FPSub, FPMul and FPDiv after NaN processing.
+fn half_arith(op: Op2, (ka, a): (Kind, u64), (kb, b): (Kind, u64), fpcr: Fpcr) -> u64 {
+    let f = Fmt::H;
+    // FPSub is FPAdd with the second operand's sign inverted.
+    let b = if op == Op2::Sub { b ^ f.sign() } else { b };
+    let (sa, sb) = (a & f.sign() != 0, b & f.sign() != 0);
+    let neg = sa ^ sb;
+    match op {
+        Op2::Add | Op2::Sub => match (ka, kb) {
+            (Kind::Inf, Kind::Inf) if sa != sb => f.default_nan(),
+            (Kind::Inf, _) => f.inf(sa),
+            (_, Kind::Inf) => f.inf(sb),
+            (Kind::Zero, Kind::Zero) if sa == sb => f.zero(sa),
+            _ => {
+                let (sum, e) = add_aligned(signed_parts(a, f), signed_parts(b, f));
+                round_exact(sum, e, f, fpcr)
+            }
+        },
+        Op2::Mul => match (ka, kb) {
+            (Kind::Inf, Kind::Zero) | (Kind::Zero, Kind::Inf) => f.default_nan(),
+            (Kind::Inf, _) | (_, Kind::Inf) => f.inf(neg),
+            (Kind::Zero, _) | (_, Kind::Zero) => f.zero(neg),
+            _ => {
+                let (p, e) = signed_product(a, b, f);
+                round_exact(p, e, f, fpcr)
+            }
+        },
+        Op2::Div => match (ka, kb) {
+            (Kind::Inf, Kind::Inf) | (Kind::Zero, Kind::Zero) => f.default_nan(),
+            (Kind::Inf, _) | (_, Kind::Zero) => f.inf(neg),
+            (Kind::Zero, _) | (_, Kind::Inf) => f.zero(neg),
+            _ => {
+                // 48 more quotient bits than the format keeps, and a sticky
+                // bit for any remainder, round as the exact quotient would.
+                let ((_, ma, ea), (_, mb, eb)) = (decompose(a, f), decompose(b, f));
+                let num = (ma as u128) << 48;
+                let (q, r) = (num / mb as u128, num % mb as u128);
+                let mant = ((q << 1) | (r != 0) as u128) as i128;
+                round_exact(if neg { -mant } else { mant }, ea - eb - 49, f, fpcr)
+            }
+        },
+    }
+}
+
+/// FPSqrt after NaN processing.
+fn half_sqrt(k: Kind, x: u64, fpcr: Fpcr) -> u64 {
+    let f = Fmt::H;
+    match k {
+        Kind::Zero => return x,
+        _ if x & f.sign() != 0 => return f.default_nan(),
+        Kind::Inf => return x,
+        _ => {}
+    }
+    let (_, m, e) = decompose(x, f);
+    // An even exponent, then 30 more result bits and a sticky bit.
+    let (m, e) = if e & 1 != 0 { (m << 1, e - 1) } else { (m, e) };
+    let wide = (m as u128) << 60;
+    let mut s = (wide as f64).sqrt() as u128;
+    while s * s > wide {
+        s -= 1;
+    }
+    while (s + 1) * (s + 1) <= wide {
+        s += 1;
+    }
+    let mant = (s << 1) | (s * s != wide) as u128;
+    round_exact(mant as i128, e / 2 - 31, f, fpcr)
+}
+
+/// FPMulAdd after NaN processing: `addend + n * m`, rounded once.
+fn half_mul_add(
+    (ka, a): (Kind, u64),
+    (kn, n): (Kind, u64),
+    (km, m): (Kind, u64),
+    fpcr: Fpcr,
+) -> u64 {
+    let f = Fmt::H;
+    let sa = a & f.sign() != 0;
+    let sp = (n ^ m) & f.sign() != 0;
+    let inf_p = kn == Kind::Inf || km == Kind::Inf;
+    let zero_p = kn == Kind::Zero || km == Kind::Zero;
+    let invalid = (kn == Kind::Inf && km == Kind::Zero) || (kn == Kind::Zero && km == Kind::Inf);
+    if invalid || (ka == Kind::Inf && inf_p && sa != sp) {
+        f.default_nan()
+    } else if (ka == Kind::Inf && !sa) || (inf_p && !sp) {
+        f.inf(false)
+    } else if (ka == Kind::Inf && sa) || (inf_p && sp) {
+        f.inf(true)
+    } else if ka == Kind::Zero && zero_p && sa == sp {
+        f.zero(sa)
+    } else {
+        let (sum, e) = add_aligned(signed_parts(a, f), signed_product(n, m, f));
+        round_exact(sum, e, f, fpcr)
+    }
 }

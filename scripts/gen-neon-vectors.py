@@ -6,8 +6,10 @@ instruction, assembled by clang (--target=aarch64) and disassembled by
 llvm-objdump to get its encoding. The expected registers, FPSR.QC and memory
 come from the per-lane models in this file, written from the instruction
 descriptions in the Arm Architecture Reference Manual (DDI 0487). Floating
-point is computed exactly with fractions and rounded here. Nothing here runs
-kestrel.
+point, half precision (FEAT_FP16) included, is computed exactly with
+fractions and rounded here (scripts/armfp.py); the scalar floating-point
+group's half-precision forms are here too, with NZCV for the compares.
+Nothing here runs kestrel.
 
     python3 scripts/gen-neon-vectors.py            # regenerate
     python3 scripts/gen-neon-vectors.py --check    # fail if out of date
@@ -15,6 +17,7 @@ kestrel.
 Needs clang and llvm-objdump (override with $CLANG and $OBJDUMP).
 """
 
+import hashlib
 import math
 import os
 import random
@@ -64,6 +67,7 @@ ARR = {
 SCALAR = {"b": 8, "h": 16, "s": 32, "d": 64}
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import armfp  # noqa: E402
 from armfp import *  # noqa: E402,F401,F403
 
 
@@ -91,17 +95,27 @@ V0[22] = pack([7, -100, 123456789, -1], 32)
 V0[23] = pack([-(2**53) - 1, (1 << 62) + 1], 64)
 V0[24] = pack([f32(2.5), f32(-0.5), f32(7.25), f32(-1e-3)], 32)
 V0[25] = pack([f64(-2.5), f64(0.375)], 64)
+# Half-precision lanes: normals, subnormals, signed zeros, infinities, NaNs
+# (a quiet one and a signalling one), the largest normal, ties.
+V0[26] = pack([f16(1.5), f16(-2.25), f16(1000.0), f16(0.1), 0x8000, f16(3.0), 0x0001, 0x7C00], 16)
+V0[27] = pack([f16(-0.75), f16(3.5), f16(0.002), 0x7E12, f16(2.0), f16(-3.0), 0x03FF, 0xFC00], 16)
+V0[28] = pack([0x7D01, 0x7BFF, f16(1.0), f16(-1.0), f16(1 / 3), f16(7.0), 0x0400, 0x8001], 16)
+V0[29] = pack([f16(2.5), f16(-0.5), f16(7.25), f16(-1e-3), f16(100.5), f16(6.0e4), 0x8200, 0x0000], 16)
 X0 = [0xDEAD_BEEF_DEAD_BEEF, MEM_BASE, 48, 0x8899_AABB_CCDD_EEFF]
 MEM0 = bytes((k * 37 + 11) & 0xFF for k in range(MEM_LEN))
 
 
 class State:
-    def __init__(self, fpcr):
+    def __init__(self, fpcr, nzcv=0):
         self.v = list(V0)
         self.x = list(X0)
         self.mem = bytearray(MEM0)
         self.qc = False
         self.fpcr = fpcr
+        self.nzcv = nzcv
+        armfp.FZ16 = bool(fpcr >> 19 & 1)
+        armfp.FZ = bool(fpcr >> 24 & 1)
+        armfp.DN = bool(fpcr >> 25 & 1)
 
 
 ST = None  # the state of the case being modelled
@@ -505,6 +519,265 @@ def m_elem_long(asm, kind, signed):
     wr(d, pack(out, es2), es2 if scal else 128)
 
 
+def m_dot(asm, signed):
+    """SDOT, UDOT: each 32-bit lane adds the four products of its byte group
+    of Vn with a byte group of Vm (its own, or the indexed one)."""
+    mn, regs, arrs, idx, _, _ = parse(asm)
+    d, n, m = regs[:3]
+    bits = ARR[arrs[0]][1]
+    a, b, acc = lanes(ST.v[n], 8), lanes(ST.v[m], 8), lanes(ST.v[d], 32)
+    out = []
+    for e in range(bits // 32):
+        g = idx[0] if idx else e
+        out.append(acc[e] + sum(val(a[4 * e + j], 8, signed) * val(b[4 * g + j], 8, signed) for j in range(4)))
+    wr(d, pack(out, 32), bits)
+
+
+# ---- the cryptographic extension -------------------------------------------------
+#
+# From the Arm ARM pseudocode (AESShiftRows, AESSubBytes, AESMixColumns and the
+# inverses, SHAchoose, SHAparity, SHAmajority, SHA256hash, the schedule
+# instructions) and FIPS 197. crypto_selfcheck() runs real AES-128, SHA-1 and
+# SHA-256 through these models and compares with FIPS 197 and hashlib.
+
+
+def gf_mul(a, b):
+    r = 0
+    for _ in range(8):
+        if b & 1:
+            r ^= a
+        a = ((a << 1) ^ (0x11B if a & 0x80 else 0)) & 0xFF
+        b >>= 1
+    return r
+
+
+def make_sbox():
+    """FIPS 197 5.1.1: the inverse in GF(2^8) (from powers of the generator
+    3), then the affine map b'_i = b_i ^ b_i+4 ^ b_i+5 ^ b_i+6 ^ b_i+7 ^ c_i."""
+    exp, log = [0] * 255, [0] * 256
+    x = 1
+    for k in range(255):
+        exp[k], log[x] = x, k
+        x = gf_mul(x, 3)
+    box = []
+    for v in range(256):
+        b = 0 if v == 0 else exp[(255 - log[v]) % 255]
+        bit = lambda i: (b >> (i % 8)) & 1  # noqa: E731
+        box.append(sum((bit(i) ^ bit(i + 4) ^ bit(i + 5) ^ bit(i + 6) ^ bit(i + 7) ^ ((0x63 >> i) & 1)) << i
+                       for i in range(8)))
+    return box
+
+
+SBOX = make_sbox()
+ISBOX = [SBOX.index(v) for v in range(256)]
+
+
+def by(v):
+    return [(v >> (8 * k)) & 0xFF for k in range(16)]
+
+
+def unby(bs):
+    return sum(b << (8 * k) for k, b in enumerate(bs))
+
+
+def aes_shift_rows(v, inv=False):
+    # State byte (row r, column c) is register byte r + 4c; row r rotates
+    # left by r columns (right when inverting).
+    b = by(v)
+    return unby([b[(r + 4 * ((c + (-r if inv else r)) % 4))] for c in range(4) for r in range(4)])
+
+
+def aes_sub_bytes(v, inv=False):
+    return unby([(ISBOX if inv else SBOX)[x] for x in by(v)])
+
+
+def aes_mix_columns(v, inv=False):
+    m = [14, 11, 13, 9] if inv else [2, 3, 1, 1]
+    b = by(v)
+    out = []
+    for c in range(4):
+        col = b[4 * c:4 * c + 4]
+        for r in range(4):
+            x = 0
+            for k in range(4):
+                x ^= gf_mul(m[(k - r) % 4], col[k])
+            out.append(x)
+    return unby(out)
+
+
+def aese(d, n):
+    return aes_sub_bytes(aes_shift_rows(d ^ n))
+
+
+def aesd(d, n):
+    return aes_sub_bytes(aes_shift_rows(d ^ n, True), True)
+
+
+def w32(v, e):
+    return (v >> (32 * e)) & M(32)
+
+
+def ror32(x, k):
+    return ((x >> k) | (x << (32 - k))) & M(32)
+
+
+def rol32(x, k):
+    return ror32(x, 32 - k)
+
+
+SHA_F = {
+    "c": lambda x, y, z: ((y ^ z) & x) ^ z,
+    "p": lambda x, y, z: x ^ y ^ z,
+    "m": lambda x, y, z: (x & y) | ((x | y) & z),
+}
+
+
+def sha1_rounds(x, y, w, f):
+    for e in range(4):
+        t = SHA_F[f](w32(x, 1), w32(x, 2), w32(x, 3))
+        y = (y + rol32(w32(x, 0), 5) + t + w32(w, e)) & M(32)
+        x = (x & ~(M(32) << 32)) | (rol32(w32(x, 1), 30) << 32)
+        yx = (y << 128) | x
+        yx = ((yx << 32) | (yx >> 128)) & M(160)
+        x, y = yx & M(128), yx >> 128
+    return x
+
+
+def sha256_hash(x, y, w, part1):
+    for e in range(4):
+        chs = SHA_F["c"](w32(y, 0), w32(y, 1), w32(y, 2))
+        maj = SHA_F["m"](w32(x, 0), w32(x, 1), w32(x, 2))
+        s1 = ror32(w32(y, 0), 6) ^ ror32(w32(y, 0), 11) ^ ror32(w32(y, 0), 25)
+        t = (w32(y, 3) + s1 + chs + w32(w, e)) & M(32)
+        x = (x & M(96)) | (((t + w32(x, 3)) & M(32)) << 96)
+        s0 = ror32(w32(x, 0), 2) ^ ror32(w32(x, 0), 13) ^ ror32(w32(x, 0), 22)
+        y = (y & M(96)) | (((t + s0 + maj) & M(32)) << 96)
+        yx = (y << 128) | x
+        yx = ((yx << 32) | (yx >> 224)) & M(256)
+        x, y = yx & M(128), yx >> 128
+    return x if part1 else y
+
+
+def sha1su0(d, n, m):
+    return ((((n & M(64)) << 64) | (d >> 64)) ^ d ^ m) & M(128)
+
+
+def sha1su1(d, n):
+    t = d ^ (n >> 32)
+    r = [rol32(w32(t, e), 1) for e in range(4)]
+    r[3] ^= rol32(w32(t, 0), 2)
+    return pack(r, 32)
+
+
+def sha256su0(d, n):
+    t = ((n & M(32)) << 96) | (d >> 32)
+    sig = lambda x: ror32(x, 7) ^ ror32(x, 18) ^ (x >> 3)  # noqa: E731
+    return pack([(sig(w32(t, e)) + w32(d, e)) & M(32) for e in range(4)], 32)
+
+
+def sha256su1(d, n, m):
+    t0 = ((m & M(32)) << 96) | (n >> 32)
+    sig = lambda x: ror32(x, 17) ^ ror32(x, 19) ^ (x >> 10)  # noqa: E731
+    r = [0] * 4
+    for e in range(4):
+        src = w32(m, e + 2) if e < 2 else r[e - 2]
+        r[e] = (sig(src) + w32(d, e) + w32(t0, e)) & M(32)
+    return pack(r, 32)
+
+
+def crypto_selfcheck():
+    """Real AES-128, SHA-1 and SHA-256 through the instruction models."""
+    # FIPS 197 Appendix C.1. Block bytes go to register bytes in order.
+    key = bytes(range(16))
+    pt = bytes.fromhex("00112233445566778899aabbccddeeff")
+    ct = bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a")
+    words = [key[4 * k:4 * k + 4] for k in range(4)]
+    rcon = 1
+    for k in range(4, 44):
+        t = words[k - 1]
+        if k % 4 == 0:
+            t = bytes(SBOX[b] for b in t[1:] + t[:1])
+            t = bytes([t[0] ^ rcon]) + t[1:]
+            rcon = gf_mul(rcon, 2)
+        words.append(bytes(a ^ b for a, b in zip(words[k - 4], t)))
+    rk = [int.from_bytes(b"".join(words[4 * r:4 * r + 4]), "little") for r in range(11)]
+    st = int.from_bytes(pt, "little")
+    for r in range(9):
+        st = aes_mix_columns(aese(st, rk[r]))
+    st = aese(st, rk[9]) ^ rk[10]
+    assert st.to_bytes(16, "little") == ct, "AESE/AESMC model"
+    st = aesd(int.from_bytes(ct, "little"), rk[10])
+    for r in range(9, 0, -1):
+        st = aesd(aes_mix_columns(st ^ rk[r], True), 0)
+    assert (st ^ rk[0]).to_bytes(16, "little") == pt, "AESD/AESIMC model"
+    # One SHA-256 and one SHA-1 block of b"abc".
+    msg = b"abc"
+    block = msg + b"\x80" + bytes(64 - len(msg) - 9) + (8 * len(msg)).to_bytes(8, "big")
+    ws = [int.from_bytes(block[4 * k:4 * k + 4], "big") for k in range(16)]
+    sched = [pack(ws[4 * k:4 * k + 4], 32) for k in range(4)]
+    primes = [p for p in range(2, 312) if all(p % q for q in range(2, p))][:64]
+    icbrt = lambda n: next(r for r in range(int(round(n ** (1 / 3))) + 2, -1, -1) if r ** 3 <= n)  # noqa: E731
+    isq = lambda n: math.isqrt(n)  # noqa: E731
+    # FIPS 180-4: the first 32 bits of the fractional parts of the cube roots
+    # of the first 64 primes, and of the square roots of the first 8.
+    k256 = [icbrt(p << 96) & M(32) for p in primes]
+    h256 = [isq(p << 64) & M(32) for p in primes[:8]]
+    s0, s1 = pack(h256[:4], 32), pack(h256[4:], 32)
+    a, b = s0, s1
+    msgs = list(sched)
+    for g in range(16):
+        if g >= 4:
+            msgs.append(sha256su1(sha256su0(msgs[g - 4], msgs[g - 3]), msgs[g - 2], msgs[g - 1]))
+        wk = pack([(w32(msgs[g], e) + k256[4 * g + e]) & M(32) for e in range(4)], 32)
+        # SHA256H Qa, Qb, wk then SHA256H2 Qb, Q(old a), wk.
+        a, b = sha256_hash(a, b, wk, True), sha256_hash(a, b, wk, False)
+    out = [(w32(a, e) + w32(s0, e)) & M(32) for e in range(4)] + [(w32(b, e) + w32(s1, e)) & M(32) for e in range(4)]
+    assert b"".join(x.to_bytes(4, "big") for x in out) == hashlib.sha256(msg).digest(), "SHA256 models"
+    h1 = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0]
+    k1 = [0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6]
+    abcd, e = pack(h1[:4], 32), h1[4]
+    msgs = list(sched)
+    for g in range(20):
+        if g >= 4:
+            msgs.append(sha1su1(sha1su0(msgs[g - 4], msgs[g - 3], msgs[g - 2]), msgs[g - 1]))
+        wk = pack([(w32(msgs[g], k) + k1[g // 5]) & M(32) for k in range(4)], 32)
+        e_next = rol32(w32(abcd, 0), 30)  # SHA1H
+        # Rounds 0-19 choose, 20-39 parity, 40-59 majority, 60-79 parity.
+        abcd = sha1_rounds(abcd, e, wk, "cpmp"[g // 5])
+        e = e_next
+    out = [(w32(abcd, k) + h1[k]) & M(32) for k in range(4)] + [(e + h1[4]) & M(32)]
+    assert b"".join(x.to_bytes(4, "big") for x in out) == hashlib.sha1(msg).digest(), "SHA1 models"
+
+
+def m_crypto(asm):
+    mn, regs, arrs, _, _, _ = parse(asm)
+    v = lambda k: ST.v[regs[k]]  # noqa: E731
+    d = regs[0]
+    r = {
+        "aese": lambda: aese(v(0), v(1)),
+        "aesd": lambda: aesd(v(0), v(1)),
+        "aesmc": lambda: aes_mix_columns(v(1)),
+        "aesimc": lambda: aes_mix_columns(v(1), True),
+        "sha1c": lambda: sha1_rounds(v(0), w32(v(1), 0), v(2), "c"),
+        "sha1p": lambda: sha1_rounds(v(0), w32(v(1), 0), v(2), "p"),
+        "sha1m": lambda: sha1_rounds(v(0), w32(v(1), 0), v(2), "m"),
+        "sha1h": lambda: rol32(w32(v(1), 0), 30),
+        "sha1su0": lambda: sha1su0(v(0), v(1), v(2)),
+        "sha1su1": lambda: sha1su1(v(0), v(1)),
+        "sha256h": lambda: sha256_hash(v(0), v(1), v(2), True),
+        "sha256h2": lambda: sha256_hash(v(1), v(0), v(2), False),
+        "sha256su0": lambda: sha256su0(v(0), v(1)),
+        "sha256su1": lambda: sha256su1(v(0), v(1), v(2)),
+    }[mn]()
+    wr(d, r, 128)
+
+
+def m_pmull64(asm):
+    mn, (d, n, m), _, _, _, _ = parse(asm)
+    half = 1 if mn.endswith("2") else 0
+    wr(d, clmul(lanes(ST.v[n], 64)[half], lanes(ST.v[m], 64)[half]), 128)
+
+
 # ---- copies, permutes, immediates --------------------------------------------
 
 
@@ -624,28 +897,28 @@ def m_fmov_imm(asm):
 # ---- floating-point lane models -----------------------------------------------
 
 FSAME = {
-    "fadd": lambda a, b, d, f: f_add(a, b, f),
-    "fsub": lambda a, b, d, f: f_sub(a, b, f),
-    "fmul": lambda a, b, d, f: f_mul(a, b, f),
-    "fdiv": lambda a, b, d, f: f_div(a, b, f),
-    "fmulx": lambda a, b, d, f: f_mulx(a, b, f),
-    "fmla": lambda a, b, d, f: f_fma(d, a, b, f),
-    "fmls": lambda a, b, d, f: f_fma(d, f_neg(a, f), b, f),
+    "fadd": lambda a, b, d, f: f_add(a, b, f, fpcr_mode()),
+    "fsub": lambda a, b, d, f: f_sub(a, b, f, fpcr_mode()),
+    "fmul": lambda a, b, d, f: f_mul(a, b, f, fpcr_mode()),
+    "fdiv": lambda a, b, d, f: f_div(a, b, f, fpcr_mode()),
+    "fmulx": lambda a, b, d, f: f_mulx(a, b, f, fpcr_mode()),
+    "fmla": lambda a, b, d, f: f_fma(d, a, b, f, fpcr_mode()),
+    "fmls": lambda a, b, d, f: f_fma(d, f_neg(a, f), b, f, fpcr_mode()),
     "fmax": lambda a, b, d, f: f_maxmin(a, b, f, True, False),
     "fmin": lambda a, b, d, f: f_maxmin(a, b, f, False, False),
     "fmaxnm": lambda a, b, d, f: f_maxmin(a, b, f, True, True),
     "fminnm": lambda a, b, d, f: f_maxmin(a, b, f, False, True),
-    "fabd": lambda a, b, d, f: f_abs(f_sub(a, b, f), f),
+    "fabd": lambda a, b, d, f: f_abs(f_sub(a, b, f, fpcr_mode()), f),
     "fcmeq": lambda a, b, d, f: M(f.w) if f_cmp(a, b, f, "eq") else 0,
     "fcmge": lambda a, b, d, f: M(f.w) if f_cmp(a, b, f, "ge") else 0,
     "fcmgt": lambda a, b, d, f: M(f.w) if f_cmp(a, b, f, "gt") else 0,
     "facge": lambda a, b, d, f: M(f.w) if f_cmp(f_abs(a, f), f_abs(b, f), f, "ge") else 0,
     "facgt": lambda a, b, d, f: M(f.w) if f_cmp(f_abs(a, f), f_abs(b, f), f, "gt") else 0,
-    "frecps": lambda a, b, d, f: f_recip_step(a, b, f, False),
-    "frsqrts": lambda a, b, d, f: f_recip_step(a, b, f, True),
+    "frecps": lambda a, b, d, f: f_recip_step(a, b, f, False, fpcr_mode()),
+    "frsqrts": lambda a, b, d, f: f_recip_step(a, b, f, True, fpcr_mode()),
 }
 FPAIR = {
-    "faddp": lambda a, b, f: f_add(a, b, f),
+    "faddp": lambda a, b, f: f_add(a, b, f, fpcr_mode()),
     "fmaxp": lambda a, b, f: f_maxmin(a, b, f, True, False),
     "fminp": lambda a, b, f: f_maxmin(a, b, f, False, False),
     "fmaxnmp": lambda a, b, f: f_maxmin(a, b, f, True, True),
@@ -674,25 +947,39 @@ def m_fmisc(asm, fn):
 
 def m_fcvt_narrow(asm, mode):
     mn, (d, n), arrs, _, _, scal = parse(asm)
-    src = lanes(ST.v[n], 64)
-    out = [f_convert(x, FD, FS, mode) for x in src]
+    big = 64 if scal else ARR[arrs[1]][0]
+    small = big // 2
+    src = lanes(ST.v[n], big)
+    out = [f_convert(x, FMT[big], FMT[small], mode) for x in src]
     if scal:
-        wr(d, out[0], 32)
+        wr(d, out[0], small)
     else:
-        wr_narrow(d, pack(out, 32), mn.endswith("2"))
+        wr_narrow(d, pack(out, small), mn.endswith("2"))
 
 
 def m_fcvtl(asm):
-    mn, (d, n), _, _, _, _ = parse(asm)
-    src = lanes(ST.v[n], 32)
-    src = src[2:] if mn.endswith("2") else src[:2]
-    wr(d, pack([f_convert(x, FS, FD) for x in src], 64), 128)
+    mn, (d, n), arrs, _, _, _ = parse(asm)
+    big = ARR[arrs[0]][0]
+    small = big // 2
+    k = 128 // big
+    src = lanes(ST.v[n], small)
+    src = src[k:] if mn.endswith("2") else src[:k]
+    wr(d, pack([f_convert(x, FMT[small], FMT[big]) for x in src], big), 128)
 
 
 def m_facross(asm, fn):
-    mn, (d, n), _, _, _, _ = parse(asm)
-    e = lanes(ST.v[n], 32)
-    wr(d, fn(fn(e[0], e[1], FS), fn(e[2], e[3], FS), FS), 32)
+    mn, (d, n), arrs, _, _, _ = parse(asm)
+    es, bits = ARR[arrs[0]]
+    f = FMT[es]
+
+    def reduce(xs):
+        """Reduce(): each half reduced, then op(lower, upper)."""
+        if len(xs) == 1:
+            return xs[0]
+        h = len(xs) // 2
+        return fn(reduce(xs[:h]), reduce(xs[h:]), f)
+
+    wr(d, reduce(lanes(ST.v[n], es, bits // es)), es)
 
 
 def m_felem(asm, fn):
@@ -798,7 +1085,8 @@ _rint = lambda mode: (lambda a, f: f_rint(a, f, mode))  # noqa: E731
 _cvt = lambda mode, u: (lambda a, f: f_to_int(a, f, mode, f.w, u))  # noqa: E731
 FMISC = {
     "fabs": lambda a, f: f_abs(a, f), "fneg": lambda a, f: f_neg(a, f),
-    "fsqrt": f_sqrt, "frecpe": f_recpe, "frsqrte": f_rsqrte, "frecpx": f_recpx,
+    "fsqrt": lambda a, f: f_sqrt(a, f, fpcr_mode()), "frecpe": lambda a, f: f_recpe(a, f, fpcr_mode()),
+    "frsqrte": f_rsqrte, "frecpx": f_recpx,
     "frintn": _rint("ne"), "frintp": _rint("p"), "frintm": _rint("m"), "frintz": _rint("z"),
     "frinta": _rint("a"), "frintx": lambda a, f: f_rint(a, f, fpcr_mode()),
     "frinti": lambda a, f: f_rint(a, f, fpcr_mode()),
@@ -815,6 +1103,97 @@ FCMP0 = {
     "fcmeq": lambda a, f: f_cmp(a, 0, f, "eq"), "fcmle": lambda a, f: f_cmp(0, a, f, "ge"),
     "fcmlt": lambda a, f: f_cmp(0, a, f, "gt"),
 }
+
+
+# ---- the scalar floating-point group (half-precision forms) ---------------------
+
+
+def cond_holds(cond):
+    """ConditionHolds() on the case's NZCV."""
+    codes = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"]
+    c = codes.index({"cs": "hs", "cc": "lo"}.get(cond, cond))
+    n, z, cy, v = (ST.nzcv >> 3) & 1, (ST.nzcv >> 2) & 1, (ST.nzcv >> 1) & 1, ST.nzcv & 1
+    r = [z, cy, n, v, cy and not z, n == v, n == v and not z, True][c >> 1]
+    return (not r) if (c & 1 and c != 15) else bool(r)
+
+
+def fp_nzcv(a, b, f):
+    """FPCompare as NZCV: unordered 0011, equal 0110, less 1000, greater 0010."""
+    if {cls(a, f)[0], cls(b, f)[0]} & {"snan", "qnan"}:
+        return 0b0011
+    if f_cmp(a, b, f, "eq"):
+        return 0b0110
+    return 0b0010 if f_cmp(a, b, f, "gt") else 0b1000
+
+
+def sreg(op):
+    """(register number, format) of a scalar FP register operand."""
+    return int(op[1:]), FMT[SCALAR[op[0]]]
+
+
+def m_fp_scalar(asm):
+    mn, rest = asm.split(" ", 1)
+    ops = [o.strip() for o in rest.split(",")]
+    rv = lambda op: lanes(ST.v[sreg(op)[0]], sreg(op)[1].w)[0]  # noqa: E731
+    mode = fpcr_mode()
+    if mn in ("fcmp", "fcmpe"):
+        f = sreg(ops[0])[1]
+        ST.nzcv = fp_nzcv(rv(ops[0]), 0 if ops[1] == "#0.0" else rv(ops[1]), f)
+        return
+    if mn in ("fccmp", "fccmpe"):
+        f = sreg(ops[0])[1]
+        ST.nzcv = fp_nzcv(rv(ops[0]), rv(ops[1]), f) if cond_holds(ops[3]) else int(ops[2][1:], 0)
+        return
+    d, f = sreg(ops[0])
+    if mn == "fcsel":
+        r = rv(ops[1]) if cond_holds(ops[3]) else rv(ops[2])
+    elif mn == "fcvt":
+        r = f_convert(rv(ops[1]), sreg(ops[1])[1], f, mode)
+    elif mn == "fnmul":
+        r = f_neg(f_mul(rv(ops[1]), rv(ops[2]), f, mode), f)
+    else:
+        n, m, a = rv(ops[1]), rv(ops[2]), rv(ops[3])
+        # The negations come first, as in the pseudocode.
+        neg = lambda x: f_neg(x, f)  # noqa: E731
+        a, n = {"fmadd": (a, n), "fmsub": (a, neg(n)), "fnmadd": (neg(a), neg(n)), "fnmsub": (neg(a), n)}[mn]
+        r = f_fma(a, n, m, f, mode)
+    wr(d, r, f.w)
+
+
+def m_fmov_scalar(asm):
+    mn, rest = asm.split(" ", 1)
+    dst, src = [o.strip() for o in rest.split(",")]
+    if src.startswith("#"):
+        d, f = sreg(dst)
+        wr(d, enc(Fr(src[1:]), f), f.w)
+    elif dst[0] in "wx":
+        ST.x[int(dst[1:])] = lanes(ST.v[sreg(src)[0]], sreg(src)[1].w)[0]
+    elif src[0] in "wx":
+        d, f = sreg(dst)
+        wr(d, ST.x[int(src[1:])], f.w)
+    else:
+        d, f = sreg(dst)
+        wr(d, lanes(ST.v[sreg(src)[0]], f.w)[0], f.w)
+
+
+CVT_MODE = {"n": "ne", "p": "p", "m": "m", "z": "z", "a": "a"}
+
+
+def m_cvt_gen(asm):
+    """FCVT* to a general register, SCVTF and UCVTF from one, with fbits."""
+    mn, rest = asm.split(" ", 1)
+    ops = [o.strip() for o in rest.split(",")]
+    fb = int(ops[2][1:]) if len(ops) > 2 else 0
+    if mn.startswith("fcvt"):
+        n, f = sreg(ops[1])
+        w = 32 if ops[0][0] == "w" else 64
+        x = lanes(ST.v[n], f.w)[0]
+        ST.x[int(ops[0][1:])] = f_to_int(x, f, CVT_MODE[mn[4]], w, mn[5] == "u", fb)
+    else:
+        d, f = sreg(ops[0])
+        w = 32 if ops[1][0] == "w" else 64
+        x = ST.x[int(ops[1][1:])] & M(w)
+        wr(d, f_from_int(x, w, mn[0] == "u", f, fb, fpcr_mode()), f.w)
 
 
 # ---- dispatch: the model for any assembly line --------------------------------
@@ -844,6 +1223,14 @@ def model(asm):
             return m_ldst_lane(asm, base.startswith("ld"))
         return m_ldst_multi(asm, base.startswith("ld"), int(base[2]))
     # Floating point.
+    ops = [o.strip() for o in rest.split(",")]
+    if base in ("fnmul", "fmadd", "fmsub", "fnmadd", "fnmsub", "fcmp", "fcmpe", "fccmp", "fccmpe", "fcsel",
+                "fcvt"):
+        return m_fp_scalar(asm)
+    if base == "fmov" and not first.startswith("v"):
+        return m_fmov_scalar(asm)
+    if (base.startswith("fcvt") and first[0] in "wx") or (base in ("scvtf", "ucvtf") and ops[1][0] in "wx"):
+        return m_cvt_gen(asm)
     if base in ("fcvtn", "fcvtxn"):
         return m_fcvt_narrow(asm, "odd" if base == "fcvtxn" else fpcr_mode())
     if base == "fcvtl":
@@ -882,7 +1269,15 @@ def model(asm):
         return m_ext(asm)
     if base in ("tbl", "tbx"):
         return m_tbl(asm, base == "tbx")
+    # The cryptographic extension.
+    if mn in ("aese", "aesd", "aesmc", "aesimc", "sha1c", "sha1p", "sha1m", "sha1h", "sha1su0", "sha1su1",
+              "sha256h", "sha256h2", "sha256su0", "sha256su1"):
+        return m_crypto(asm)
+    if base == "pmull" and ".1q" in rest:
+        return m_pmull64(asm)
     # Integer.
+    if base in ("sdot", "udot"):
+        return m_dot(asm, base == "sdot")
     if index:
         if base[0] in "su" and base[1:] in ("mull", "mlal", "mlsl"):
             return m_elem_long(asm, base[1:], base[0] == "s")
@@ -1393,11 +1788,121 @@ GROUPS = {
     ],
 }
 
+# The dot product (FEAT_DotProd).
+GROUPS["dot"] = [
+    "sdot v0.4s, v1.16b, v2.16b", "udot v0.4s, v1.16b, v2.16b", "sdot v0.2s, v4.8b, v5.8b",
+    "udot v0.2s, v4.8b, v5.8b", "sdot v3.4s, v4.16b, v4.16b", "udot v0.4s, v31.16b, v6.16b",
+    "sdot v0.2s, v1.8b, v2.4b[3]", "udot v0.4s, v1.16b, v31.4b[1]", "sdot v0.4s, v3.16b, v20.4b[2]",
+    "udot v0.2s, v5.8b, v4.4b[0]", "sdot v0.4s, v4.16b, v5.4b[1]",
+]
+
+# The cryptographic extension (FEAT_AES, FEAT_PMULL, FEAT_SHA1, FEAT_SHA256).
+GROUPS["crypto"] = [
+    "aese v0.16b, v1.16b", "aesd v0.16b, v1.16b", "aesmc v0.16b, v2.16b", "aesimc v0.16b, v2.16b",
+    "aese v5.16b, v31.16b", "aesd v3.16b, v3.16b", "aesmc v4.16b, v4.16b", "aesimc v7.16b, v30.16b",
+    "sha1c q0, s1, v2.4s", "sha1p q0, s3, v4.4s", "sha1m q0, s5, v6.4s", "sha1h s0, s1", "sha1h s0, s4",
+    "sha1su0 v0.4s, v1.4s, v2.4s", "sha1su1 v0.4s, v1.4s", "sha1c q7, s7, v7.4s",
+    "sha256h q0, q1, v2.4s", "sha256h2 q0, q1, v2.4s", "sha256su0 v0.4s, v1.4s",
+    "sha256su1 v0.4s, v1.4s, v2.4s", "sha256h q3, q4, v5.4s", "sha256h2 q5, q4, v3.4s",
+    "pmull v0.1q, v1.1d, v2.1d", "pmull2 v0.1q, v1.2d, v2.2d", "pmull v0.1q, v4.1d, v4.1d",
+    "pmull2 v3.1q, v3.2d, v31.2d",
+]
+
+RP, RM, RZ = 1 << 22, 2 << 22, 3 << 22
+C_FZ, C_DN, C_FZ16 = 1 << 24, 1 << 25, 1 << 19
+NZ, ZZ, CZ = 0b1000, 0b0100, 0b0010  # NZCV inputs: N, Z, C
+
+# Half precision (FEAT_FP16). V26..V29 hold edge lanes, other registers
+# random ones; FPCR adds directed rounding, FZ16 (FZ alone must not flush
+# half precision), DN.
+GROUPS.update({
+    "fp16_same": [
+        "fadd v0.8h, v26.8h, v27.8h", "fadd v0.4h, v28.4h, v29.4h", "fsub v0.8h, v26.8h, v28.8h",
+        "fmul v0.8h, v28.8h, v28.8h", ("fmul v0.8h, v28.8h, v28.8h", RZ), "fmul v0.8h, v26.8h, v29.8h",
+        "fdiv v0.8h, v26.8h, v27.8h", "fdiv v0.8h, v28.8h, v29.8h", "fmulx v0.8h, v26.8h, v29.8h",
+        "fmla v0.8h, v26.8h, v27.8h", "fmls v28.8h, v26.8h, v29.8h", "fmax v0.8h, v26.8h, v27.8h",
+        "fmin v0.8h, v27.8h, v28.8h", "fmaxnm v0.8h, v26.8h, v27.8h", "fminnm v0.8h, v28.8h, v27.8h",
+        "fabd v0.8h, v26.8h, v29.8h", "fcmeq v0.8h, v26.8h, v26.8h", "fcmge v0.8h, v26.8h, v27.8h",
+        "fcmgt v0.4h, v28.4h, v29.4h", "facge v0.8h, v26.8h, v27.8h", "facgt v0.8h, v27.8h, v29.8h",
+        "frecps v0.8h, v26.8h, v29.8h", "frsqrts v0.8h, v27.8h, v29.8h",
+        "faddp v0.8h, v26.8h, v27.8h", "fmaxp v0.8h, v28.8h, v29.8h", "fminp v0.4h, v26.4h, v27.4h",
+        "fmaxnmp v0.8h, v27.8h, v28.8h", "fminnmp v0.8h, v26.8h, v29.8h",
+        "fmulx h0, h26, h29", "fcmeq h0, h26, h26", "fcmge h0, h27, h26", "fcmgt h0, h28, h29",
+        "facge h0, h27, h26", "facgt h0, h29, h28", "fabd h0, h26, h27", "frecps h0, h26, h29",
+        "frsqrts h0, h27, h29",
+        "fadd v0.8h, v1.8h, v2.8h", "fmul v0.8h, v7.8h, v8.8h", "fdiv v0.8h, v9.8h, v10.8h",
+        "fmla v0.8h, v11.8h, v12.8h", "fsub v0.8h, v13.8h, v14.8h", "fmls v0.8h, v26.8h, v15.8h",
+        ("fadd v0.8h, v26.8h, v27.8h", RP), ("fmul v0.8h, v1.8h, v2.8h", RM), ("fdiv v0.8h, v9.8h, v10.8h", RZ),
+        ("fmla v0.8h, v11.8h, v12.8h", RP), ("fsub v0.8h, v26.8h, v26.8h", RM), ("fadd v0.8h, v7.8h, v8.8h", RZ),
+        ("fadd v0.8h, v26.8h, v27.8h", C_FZ16), ("fadd v0.8h, v26.8h, v27.8h", C_FZ),
+        ("fmul v0.8h, v26.8h, v29.8h", C_FZ16), ("fmul v0.8h, v9.8h, v10.8h", C_FZ16),
+        ("fmaxnm v0.8h, v26.8h, v27.8h", C_DN), ("fadd v0.8h, v26.8h, v28.8h", C_DN),
+        ("fmla v0.8h, v26.8h, v27.8h", C_DN | C_FZ16), ("frecps v0.8h, v1.8h, v2.8h", RZ),
+        ("frsqrts v0.8h, v3.8h, v4.8h", RM),
+    ],
+    "fp16_misc": [
+        "fabs v0.8h, v27.8h", "fneg v0.4h, v28.4h", "fsqrt v0.8h, v26.8h", "fsqrt v0.8h, v29.8h",
+        "fsqrt v0.8h, v1.8h", ("fsqrt v0.8h, v1.8h", RP), ("fsqrt v0.8h, v2.8h", RZ),
+        "frecpe v0.8h, v26.8h", "frecpe v0.8h, v28.8h", ("frecpe v0.8h, v28.8h", RZ),
+        ("frecpe v0.8h, v29.8h", RP), ("frecpe v0.8h, v29.8h", C_FZ16), "frecpe v0.8h, v5.8h",
+        "frsqrte v0.8h, v26.8h", "frsqrte v0.8h, v28.8h", "frsqrte v0.8h, v29.8h", ("frsqrte v0.8h, v29.8h", C_FZ16),
+        "frintn v0.8h, v26.8h", "frintp v0.8h, v29.8h", "frintm v0.8h, v27.8h", "frintz v0.8h, v26.8h",
+        "frinta v0.8h, v29.8h", ("frintx v0.8h, v29.8h", RM), ("frinti v0.8h, v26.8h", RP),
+        "fcvtns v0.8h, v26.8h", "fcvtps v0.8h, v29.8h", "fcvtms v0.4h, v27.4h", "fcvtzs v0.8h, v28.8h",
+        "fcvtas v0.8h, v29.8h", "fcvtnu v0.8h, v26.8h", "fcvtpu v0.8h, v29.8h", "fcvtmu v0.8h, v28.8h",
+        "fcvtzu v0.8h, v27.8h", "fcvtau v0.8h, v29.8h", "scvtf v0.8h, v22.8h", "ucvtf v0.8h, v22.8h",
+        ("scvtf v0.8h, v1.8h", RZ), "ucvtf v0.4h, v6.4h", ("ucvtf v0.8h, v1.8h", RP),
+        "fcmgt v0.8h, v26.8h, #0.0", "fcmge v0.8h, v29.8h, #0.0", "fcmeq v0.8h, v29.8h, #0.0",
+        "fcmle v0.8h, v27.8h, #0.0", "fcmlt v0.4h, v28.4h, #0.0", ("fcmeq v0.8h, v26.8h, #0.0", C_FZ16),
+        "fcvtns h0, h26", "fcvtzu h0, h28", "fcvtas h0, h29", "scvtf h0, h22", "ucvtf h0, h1",
+        "fcmgt h0, h26, #0.0", "fcmlt h0, h27, #0.0", "fcmle h0, h28, #0.0", "frecpe h0, h26",
+        "frsqrte h0, h29", "frecpx h0, h26", "frecpx h0, h29", "frecpx h0, h28",
+    ],
+    "fp16_other": [
+        "fmaxnmv h0, v26.8h", "fminnmv h0, v27.4h", "fmaxv h0, v29.8h", "fminv h0, v28.8h", "fmaxv h0, v26.4h",
+        "fminnmv h0, v28.8h",
+        "faddp h0, v26.2h", "fmaxp h0, v27.2h", "fminp h0, v28.2h", "fmaxnmp h0, v29.2h", "fminnmp h0, v26.2h",
+        "fmul v0.8h, v26.8h, v2.h[5]", "fmla v0.4h, v27.4h, v15.h[3]", "fmls v28.8h, v29.8h, v9.h[1]",
+        "fmulx v0.8h, v26.8h, v13.h[6]", "fmul h0, h26, v2.h[7]", "fmla h29, h26, v3.h[2]",
+        "fmulx h0, h27, v8.h[4]", "fmls h0, h28, v1.h[0]", ("fmla v0.8h, v26.8h, v7.h[0]", RM),
+        "scvtf v0.8h, v22.8h, #3", "ucvtf v0.4h, v6.4h, #16", "fcvtzs v0.8h, v26.8h, #4",
+        "fcvtzu v0.8h, v29.8h, #10", "scvtf h0, h22, #1", "fcvtzs h0, h29, #8", "fcvtzu h0, h26, #2",
+        ("scvtf v0.8h, v1.8h, #5", RM),
+        "fmov v0.8h, #1.5", "fmov v0.4h, #-31.0", "fmov v0.8h, #0.125",
+        "fcvtn v0.4h, v16.4s", "fcvtn2 v0.8h, v17.4s", ("fcvtn v0.4h, v20.4s", RZ), "fcvtn v0.4h, v1.4s",
+        "fcvtl v0.4s, v26.4h", "fcvtl2 v0.4s, v27.8h", ("fcvtl v0.4s, v29.4h", C_FZ16),
+        ("fcvtl2 v0.4s, v29.8h", C_FZ16), ("fcvtn v0.4h, v24.4s", C_FZ16), ("fcvtn v0.4h, v1.4s", C_FZ),
+        ("fcvtn2 v0.8h, v2.4s", C_DN), ("fcvtl v0.4s, v28.4h", C_DN),
+    ],
+    "fp16_scalar": [
+        "fadd h0, h26, h27", "fsub h0, h1, h29", "fmul h0, h29, h29", "fdiv h0, h26, h27", "fnmul h0, h26, h29",
+        "fnmul h0, h28, h29", "fmax h0, h26, h27", "fmin h0, h26, h27", "fmaxnm h0, h1, h2", "fminnm h0, h3, h4",
+        "fmadd h0, h26, h27, h29", "fmsub h0, h26, h27, h29", "fnmadd h0, h1, h2, h3", "fnmsub h0, h7, h8, h9",
+        ("fmadd h0, h26, h29, h27", RM), ("fadd h0, h26, h27", RP), ("fdiv h0, h1, h2", RZ),
+        ("fmul h0, h7, h8", C_FZ16), "fmadd h0, h28, h26, h27", ("fmadd h0, h28, h26, h27", C_DN),
+        "fabs h0, h27", "fneg h0, h26", "fsqrt h0, h29", "fsqrt h0, h27", "fsqrt h0, h5",
+        "frintn h0, h26", "frintp h0, h27", "frintm h0, h29", "frintz h0, h1", "frinta h0, h26",
+        "frintx h0, h29", ("frinti h0, h29", RM),
+        "fmov h0, h27", "fmov h0, #-1.25", "fmov w0, h26", "fmov x0, h27", "fmov h0, w3", "fmov h0, x2",
+        "fcvt h0, s16", "fcvt h0, d18", "fcvt s0, h26", "fcvt d0, h27", ("fcvt h0, s20", RM), "fcvt d0, h6",
+        ("fcvt s0, h28", C_DN), "fcvt d0, h28", ("fcvt h0, d19", RP), ("fcvt s0, h10", C_FZ16),
+        ("fcvt h0, s1", C_FZ16),
+        "fcvtzs w0, h26", "fcvtzs x0, h28", "fcvtns w0, h29", "fcvtps x0, h27", "fcvtms w0, h27",
+        "fcvtas x0, h29", "fcvtnu w0, h26", "fcvtzu x0, h27", "fcvtau w0, h29", "fcvtpu x0, h1",
+        "fcvtmu w0, h29", "scvtf h0, w3", "ucvtf h0, x3", "scvtf h0, x0", ("ucvtf h0, w2", RZ),
+        "fcvtzs w0, h26, #4", "fcvtzu x0, h29, #12", "scvtf h0, w2, #8", "ucvtf h0, x3, #60",
+        "fcmp h26, h27", "fcmp h27, h26", "fcmp h26, h26", "fcmpe h27, #0.0", "fcmp h28, #0.0", "fcmpe h28, h26",
+        "fcmp h1, h2", ("fccmp h26, h27, #0b0101, eq", 0, ZZ), ("fccmp h26, h27, #0b0101, eq", 0, 0),
+        ("fccmpe h28, h26, #2, ne", 0, 0), ("fcsel h0, h26, h27, eq", 0, ZZ), ("fcsel h0, h26, h27, eq", 0, 0),
+        ("fcsel h0, h1, h2, mi", 0, NZ),
+    ],
+})
+
 CASES = [
-    (g, *(item if isinstance(item, tuple) else (item, 0)))
+    (g, *((item + (0,))[:3] if isinstance(item, tuple) else (item, 0, 0)))
     for g, items in GROUPS.items()
     for item in items
-]  # (group, asm, fpcr)
+]  # (group, asm, fpcr, nzcv)
 
 # ---- assembly and output -------------------------------------------------------
 
@@ -1407,7 +1912,7 @@ def assemble(lines):
         src, obj = os.path.join(tmp, "v.s"), os.path.join(tmp, "v.o")
         with open(src, "w") as fh:
             fh.write("".join(line + "\n" for line in lines))
-        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a", "-c", src,
+        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+fp16+dotprod+aes+sha2", "-c", src,
                         "-o", obj], check=True)
         dis = subprocess.run([os.environ.get("OBJDUMP", "llvm-objdump"), "-d", obj], check=True, capture_output=True,
                              text=True).stdout
@@ -1419,7 +1924,8 @@ def assemble(lines):
 
 def main():
     global ST
-    words = assemble([asm for _, asm, _ in CASES])
+    crypto_selfcheck()
+    words = assemble([asm for _, asm, _, _ in CASES])
     out = []
     w = out.append
     w("// Generated by scripts/gen-neon-vectors.py. Do not edit.")
@@ -1438,8 +1944,8 @@ def main():
     w("];")
     w("")
     w("pub const CASES: &[Case] = &[")
-    for (group, asm, fpcr), insn in zip(CASES, words):
-        ST = State(fpcr)
+    for (group, asm, fpcr, nzcv), insn in zip(CASES, words):
+        ST = State(fpcr, nzcv)
         model(asm)
         v = [(k, x) for k, x in enumerate(ST.v) if x != V0[k]]
         xs = [(k, x) for k, x in enumerate(ST.x) if x != X0[k]]
@@ -1452,9 +1958,11 @@ def main():
             w(f"        fpcr: {fpcr:#x},")
         else:
             w("        fpcr: 0,")
+        w(f"        nzcv_in: {nzcv:#06b},")
         w("        v: &[%s]," % ", ".join(f"({k}, {x:#x})" for k, x in v))
         w("        x: &[%s]," % ", ".join(f"({k}, {x:#x})" for k, x in xs))
         w(f"        qc: {'true' if ST.qc else 'false'},")
+        w(f"        nzcv: {ST.nzcv:#06b},")
         w("        mem: &[%s]," % ", ".join(f"({k}, {b:#x})" for k, b in mem))
         w("    },")
     w("];")

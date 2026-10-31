@@ -86,9 +86,12 @@ first, on Linux (2026-10-30; "Phase 3 notes").
 
 ### Deviations from the hard rules found in the audit
 
-- "Every instruction has a unit test": `interp/tests.rs` plus the 91 checks in
-  `asm_checks.S` cover most implemented instructions, but not all (for
-  example BIT/BIF, REV32, CCMN, SMADDL/UMADDL, LDSMIN/LDUMAX).
+- Fixed (2026-10-31): "Every instruction has a unit test": `interp/tests.rs`
+  plus the 91 checks in `asm_checks.S` covered most implemented
+  instructions, but not all (for example BIT/BIF, REV32, CCMN,
+  SMADDL/UMADDL, LDSMIN/LDUMAX). `scripts/gen-int-vectors.py` now tests
+  every general-purpose instruction one by one (see "CPU gaps before
+  phase 3").
 - Fixed: `system.rs` treated every MSR (immediate) and every SYS/SYSL other
   than `DC ZVA` as a no-op, and `svcOutputDebugString` truncated at 1 MiB.
   Now hints and barriers run as NOP (as the architecture defines), the EL0
@@ -137,6 +140,97 @@ on host threads is what lets the fast backends keep up with games that
 spread their work over the console's cores; a single host thread taking
 turns would cap them at one core's speed.
 
+### Plan changes (2026-10-31)
+
+The owner's decision of 2026-10-30 to close the CPU gaps before phase 3
+(below). What changed in `PLAN.md` and what it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Phase 1A: half precision no longer stops as unsupported "for now"; it is added before phase 3 | `float.rs`, the scalar and NEON floating-point decoders |
+| Phase 1B: the crypto extension, with the dot product, is added before phase 3 rather than when a program needs it | the NEON decoders |
+
+### CPU gaps before phase 3 (owner, 2026-10-30)
+
+The owner's decision: close the CPU gaps on Linux before phase 3, keeping
+the changes inside `kestrel-cpu` and its tests and leaving how
+instructions reach memory alone (a separate branch is turning guest memory
+into the phase 3 arena). Switch 2 games are built for the Cortex-A78C,
+which has half precision, the dot product and the crypto extension.
+
+| Step | Status | Evidence |
+|------|--------|----------|
+| 1. A unit test for every implemented instruction | done | `scripts/gen-int-vectors.py` writes `interp/int_vectors.rs`: 478 one-instruction cases (data processing immediate and register, branches, system registers and hints, single, SIMD-register, pair and literal loads and stores, exclusives, acquire/release, CAS, the LSE atomics, FMOV to and from general registers), run by `interp/int_tests.rs`; with the NEON vectors, every interpreter line except undefined-encoding paths runs under `cargo test -p kestrel-cpu` (measured with `-C instrument-coverage`) |
+| 2. Half precision (FP16) | done | `Fmt::H` in `float.rs`, computed exactly in integers (every rounding mode, FPCR.FZ16); the scalar floating-point group with `ftype` 11 (arithmetic, FMA, compares, selects, FMOV, round-to-integral, conversions to and from single, double and integers), the FP16 three-same and two-register-misc groups (vector and scalar), across lanes, scalar pairwise, by element, fixed-point conversion, FMOV (vector), FCVTN/FCVTL to and from half; 240 cases in `neon_vectors.rs` (groups `fp16_same`, `fp16_misc`, `fp16_other`, `fp16_scalar`) |
+| 3. DotProd (SDOT, UDOT) | done | vector (three same extra, opcode 0010) and by element (opcode 1110, index H:L), 2S and 4S, in `neon/int.rs`; 11 cases in `neon_vectors.rs` (group `dot`); flipping the signedness fails all 11 |
+| 4. Crypto (AES, SHA1, SHA2, 64-bit PMULL) | done | `neon/crypto.rs`: AESE, AESD, AESMC, AESIMC (the S-box computed from FIPS 197's definition), SHA1C/P/M, SHA1H, SHA1SU0/SU1, SHA256H/H2, SHA256SU0/SU1; PMULL/PMULL2 1Q in `neon/int.rs`; 26 cases in `neon_vectors.rs` (group `crypto`); breaking SHA256SU1's upper words or the inverse MixColumns matrix fails 1 and 2 cases |
+| 5. CRC32 and CASP (owner, 2026-10-31) | done | CRC32B/H/W/X and CRC32CB/H/W/X (FEAT_CRC32) in `dp_reg.rs`; CASP, CASPA, CASPL, CASPAL (FEAT_LSE) in `ldst.rs`, through the same load and store helpers as CAS; 16 cases in `int_vectors.rs`, with X26..X29 holding pairs that match memory; swapping the CRC-32C polynomial for CRC-32's, or giving Rs+1 the wrong old value, fails 5 and 6 cases |
+
+How the integer vectors work: each case is one instruction at
+`0x10080`, assembled by clang and read back with llvm-objdump (the script
+refuses any encoding left to a relocation). Every case starts from the
+same 31 registers (edge values, pointers into a 768-byte memory window,
+a value for a CAS that matches), SP, vector registers, FPCR, FPSR and
+TPIDR_EL0, with its own NZCV and exclusive-monitor address, runs one step,
+and compares all of them plus the next PC and the memory window. The
+models read the assembly text, not the encoding, and follow the Arm ARM
+pseudocode (AddWithCarry, ConditionHolds, ShiftReg, ExtendReg, the
+bitfield aliases, the exclusive monitor: a store-exclusive leaves the
+local monitor open whether or not it succeeded). CTR_EL0, DCZID_EL0 and
+CNTFRQ_EL0 are kestrel's documented values (64-byte lines, 64-byte DC ZVA
+blocks, 19.2 MHz). Deliberately breaking CCMN's carry and LDSMIN's signed
+compare fails 2 and 4 cases.
+
+Half precision: the models are `scripts/armfp.py` with a 16-bit format
+(FZ16 for half precision, FZ for the others; conversions clear FZ16 as
+FPUnpackCV and FPRoundCV do), and the rounding mode now passed to the
+arithmetic models (an exact zero sum is -0 only when rounding to minus
+infinity). The square root of a half is computed exactly
+(`armfp.exact_sqrt`), and the reciprocal estimate's overflow follows the
+rounding mode. The NEON vectors gained NZCV, an input and an output per
+case, for FCMP, FCCMP and FCSEL, and four half-precision registers
+(V26..V29: subnormals, signed zeros, infinities, a quiet and a signalling
+NaN, the largest normal). Checked beyond the committed cases: the Python
+model matches numpy's float16 on 200,000 random add, subtract, multiply,
+divide and square-root operands, and kestrel matched the model on 3,600
+further random cases across rounding modes, FZ16 and DN. Writing the
+cases found a bug: SCVTF and UCVTF read 16-bit lanes as unsigned
+(`from_fixed` sign-extended only 32 and 64 bits). Deliberately using FZ
+for half precision, or +0 for exact zero sums under round-to-minus,
+fails 4 and 1 cases. Kestrel's choice: the alternative half-precision
+format (FPCR.AHP) is not modelled; conversions to or from half
+precision under it stop as `Unmodelled::AltHalfPrecision` (half-precision
+arithmetic ignores AHP, as the pseudocode's FPUnpack does).
+
+Crypto: the Python models are checked every time the vectors are
+generated (`crypto_selfcheck` in `gen-neon-vectors.py`): AES-128 through
+AESE/AESMC and back through AESD/AESIMC must give FIPS 197's Appendix C.1
+vector, and SHA-1 and SHA-256 of "abc" through the hash and schedule
+instructions must match Python's `hashlib`; the SHA-256 constants are
+computed from their definition (FIPS 180-4), not copied. Perturbing any
+schedule model or the majority function fails the check. SHA512, SHA3,
+SM3 and SM4 (optional, and not on the Cortex-A78C) stay undefined.
+
+The C test programs rebuilt with `GUEST_OPT="-O3
+-march=armv8.2-a+fp16+dotprod+crypto"` (`scripts/check-optimised.sh`)
+still give the expected output, 13/13, but clang 18 emits none of the new
+instructions for them, so the unit vectors are what covers them.
+
+CRC32 and CASP: both are mandatory from Armv8.1, so the Cortex-A78C has
+them; the owner asked for them after the first four steps (2026-10-31).
+The CRC model follows the pseudocode literally (BitReverse, Poly32Mod2,
+BitReverse), while kestrel shifts the reflected polynomial, and the model
+must give the standard check values (CRC-32 of "123456789" as zlib
+computes it, CRC-32C 0xE3069283) every time the vectors are generated.
+CASP with an odd Rs or Rt, which the Arm ARM leaves CONSTRAINED
+UNPREDICTABLE, stops as undefined (kestrel's choice).
+
+Not reached by any CPU unit test, though the instructions are tested:
+some value paths of `float.rs` (FRECPE and FRSQRTE of subnormals and of
+values whose reciprocal overflows under each rounding mode, FRECPS and
+FRSQRTS of infinity times zero, single-precision FMA under FZ) in single
+and double precision.
+
 ### Phase 1A notes
 
 Implemented for single and double precision: FADD, FSUB, FMUL, FDIV,
@@ -150,7 +244,8 @@ pseudocode; conversions and FRINT honour every rounding mode.
 
 Remaining gaps, each reported as `Exit::Unsupported` rather than guessed:
 
-- Half precision (per the plan's provision).
+- Half precision: done since (2026-10-31, "CPU gaps before phase 3"),
+  except conversions under FPCR.AHP.
 - FPCR.RMode other than round-to-nearest for host-computed arithmetic
   (add, sub, mul, div, sqrt, FMA, FRECPS, FRSQRTS). Conversions and FRINT
   already honour it.
@@ -191,11 +286,11 @@ also run natively on real ARM CPUs by `scripts/check-host.sh` (task 1D).
 
 Remaining gaps:
 
-- Half precision stops as `Exit::Unsupported` (per the plan's provision).
-- Not implemented, so they stop as undefined: the crypto extension (AES,
-  SHA, 64-bit PMULL; the plan adds them only when a program needs them),
-  DotProd (SDOT, UDOT; optional in Armv8.2), and the Armv8.3+ complex,
-  BFloat16 and Int8 matrix forms.
+- Half precision: done (2026-10-31, "CPU gaps before phase 3").
+- DotProd (SDOT, UDOT) and the crypto extension (AES, SHA1, SHA256,
+  64-bit PMULL): done (2026-10-31, "CPU gaps before phase 3").
+- Not implemented, so they stop as undefined: SHA512, SHA3, SM3, SM4,
+  and the Armv8.3+ complex, BFloat16 and Int8 matrix forms.
 - As for scalar FP: directed FPCR rounding for host-computed lanes is
   reported as unsupported, and FPSR exception flags other than QC are not
   set.
@@ -923,6 +1018,18 @@ candidates:
    players, and real Joy-Con motion, rumble and pairing over their own
    protocol. A Wii Remote is not a Switch controller type; it can only be
    mapped as a host gamepad.
+
+The CPU gaps the owner chose to close before phase 3 are closed on branch
+`claude/bold-euler-pjl3cr` (2026-10-31, "CPU gaps before phase 3": a unit
+test for every instruction, half precision, the dot product, the crypto
+extension, then CRC32 and CASP), waiting for review; once merged, a
+manual CI run or a release tag checks it on every platform, including
+the new `gen-int-vectors.py --check`. CPU features left for the owner to decide: LDAPR (FEAT_LRCPC),
+the non-hint pointer authentication instructions (PACIA, AUTIA, RETAA,
+LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as undefined; they
+are later or optional features, to check against the Cortex-A78C's
+documentation before adding. The hint-space PAC instructions (PACIASP
+and the like) already run as NOP.
 
 Each service so far followed the same steps; keep them:
 

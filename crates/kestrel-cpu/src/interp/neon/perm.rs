@@ -6,7 +6,6 @@ use super::super::bits::*;
 use super::super::{Ctx, Flow, Step};
 use super::*;
 use crate::float::{self as fpu, Fmt};
-use crate::Unmodelled;
 
 /// Advanced SIMD copy, and the scalar DUP (element).
 pub fn copy(c: &mut Ctx, scalar: bool) -> Step {
@@ -188,12 +187,14 @@ pub fn modified_imm(c: &mut Ctx) -> Step {
     let (q, op, cmode) = (bit(i, 30), bit(i, 29), field(i, 15, 12));
     let imm8 = ((field(i, 18, 16) << 5) | field(i, 9, 5)) as u64;
     if bit(i, 11) {
-        // o2 = 1 is FMOV (half precision) or unallocated.
-        return Err(if cmode == 0b1111 && !op {
-            c.unsupported(Unmodelled::HalfPrecision)
-        } else {
-            c.undef()
-        });
+        // o2 = 1 is FMOV (vector, half precision) or unallocated.
+        if cmode != 0b1111 || op {
+            return Err(c.undef());
+        }
+        let h = fpu::expand_imm(imm8 as u32, Fmt::H) as u128;
+        let r = h * 0x0001_0001_0001_0001_0001_0001_0001_0001;
+        write(c, rd(i), r, if q { 128 } else { 64 });
+        return Ok(Flow::Next);
     }
     let rep32 = |w: u64| w | (w << 32);
     // AdvSIMDExpandImm.

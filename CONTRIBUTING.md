@@ -28,10 +28,14 @@ line; `scripts/build-guest.sh` links them position-independent and
 ## Workflow
 
 1. `cargo test` and `cargo clippy --workspace --all-targets -- -D warnings` must pass.
-2. New instructions need a test in `crates/kestrel-cpu/src/interp/tests.rs`
-   whose encoding comes from a real assembler (`llvm-mc --triple=aarch64`),
-   with the assembly in a comment. NEON instructions get a case in
-   `scripts/gen-neon-vectors.py` instead: add the assembly and a Python
-   model of its result, then run the script (needs clang and llvm-objdump)
-   to regenerate `interp/neon_vectors.rs`.
+2. New instructions need a test whose encoding comes from a real assembler.
+   General-purpose instructions (data processing, branches, system
+   registers, scalar loads and stores, atomics) get a case in
+   `scripts/gen-int-vectors.py`, NEON instructions one in
+   `scripts/gen-neon-vectors.py`: add the assembly and a Python model of its
+   result written from the Arm ARM, then run the script (needs clang and
+   llvm-objdump) to regenerate `interp/int_vectors.rs` or
+   `interp/neon_vectors.rs`. Tests that need several instructions go in
+   `crates/kestrel-cpu/src/interp/tests.rs`, encoded with
+   `llvm-mc --triple=aarch64` and the assembly in a comment.
 3. Keep host-specific code behind `cfg(target_arch = ...)` so every host keeps building.

@@ -27,11 +27,14 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
 ## What works
 
 - **Portable ARM64 interpreter** — integer data processing, branches, all
-  load/store addressing modes, pairs, exclusives, acquire/release, CAS, ARMv8.1
-  LSE atomics, user system registers, scalar single and double precision
-  floating point (Arm NaN, default-NaN and flush-to-zero rules, bit-identical
-  on every host), and Advanced SIMD (NEON) vector and scalar instructions
-  with structure loads and stores. ~140 MIPS on a modern x86 core.
+  load/store addressing modes, pairs, exclusives, acquire/release, CAS and
+  CASP, ARMv8.1 LSE atomics, CRC32, user system registers, scalar half, single and double
+  precision floating point (Arm NaN, default-NaN and flush-to-zero rules,
+  bit-identical on every host), and Advanced SIMD (NEON) vector and scalar
+  instructions with structure loads and stores, half precision, the dot
+  product and the AES, SHA-1 and SHA-256 instructions of the Switch 2's
+  Cortex-A78C. Every instruction has a unit test generated from an
+  independent Python model. ~140 MIPS on a modern x86 core.
 - **Guest address space** with permissions and fault reporting.
 - **Loaders** for the ELF test programs in `guest/` and for homebrew NRO
   executables (segments, BSS, asset section), with the homebrew launch

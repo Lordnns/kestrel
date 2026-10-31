@@ -210,9 +210,10 @@ Goal: any ARM64 code a compiler emits runs correctly in the interpreter.
 - Provisions: process NaNs first, then compute on the host, then replace any
   host-generated NaN with the Arm default NaN, so x86 and ARM hosts give
   bit-identical results. Honour the default-NaN and flush-to-zero control bits.
-  Estimates follow the architected algorithms exactly. Half precision raises an
-  explicit unsupported error for now. Exception status flags are not tracked
-  yet; document that.
+  Estimates follow the architected algorithms exactly. Half precision raised an
+  explicit unsupported error at first; the owner's decision of 2026-10-30
+  adds it before phase 3 (the Switch 2's Cortex-A78C has it). Exception
+  status flags are not tracked yet; document that.
 
 1B. NEON (Advanced SIMD)
 - Vector integer: add, subtract, multiply and accumulate, all compares,
@@ -230,7 +231,9 @@ Goal: any ARM64 code a compiler emits runs correctly in the interpreter.
   element copies, and all scalar SIMD forms.
 - Structure loads and stores: one to four registers, single lane, replicate,
   with immediate and register post-increment.
-- Crypto extensions only when a real program needs them.
+- Crypto extensions only when a real program needs them; the owner's
+  decision of 2026-10-30 adds them, with the dot product, before phase 3,
+  because Switch 2 games are built for the Cortex-A78C, which has both.
 - Provision: a single set of lane helpers serves all element sizes; operating
   on the 64-bit form clears the top half of the register.
 

@@ -1,10 +1,10 @@
-//! Scalar floating point: single and double precision.
+//! Scalar floating point: half, single and double precision.
 //!
 //! Decoding follows the "Data Processing -- Scalar Floating-Point and
 //! Advanced SIMD" encoding group; the arithmetic lives in [`crate::float`],
 //! which implements the Arm pseudocode. Writing a scalar result clears the
-//! rest of the 128-bit register. Half precision stops with an explicit
-//! unsupported error.
+//! rest of the 128-bit register. Conversions to or from half precision
+//! under FPCR.AHP stop with an explicit unsupported error.
 
 use super::bits::*;
 use super::{Ctx, Flow, Step};
@@ -52,7 +52,7 @@ fn ftype(c: &Ctx) -> Result<Fmt, Exit> {
     match field(c.insn, 23, 22) {
         0b00 => Ok(Fmt::S),
         0b01 => Ok(Fmt::D),
-        0b11 => Err(c.unsupported(Unmodelled::HalfPrecision)),
+        0b11 => Ok(Fmt::H),
         _ => Err(c.undef()),
     }
 }
@@ -135,14 +135,20 @@ fn one_source(c: &mut Ctx) -> Step {
         0b000001 => x & !f.sign(), // FABS
         0b000010 => x ^ f.sign(),  // FNEG
         0b000011 => float::sqrt(x, f, fpcr).map_err(|what| c.unsupported(what))?,
-        0b000100 | 0b000101 => {
-            let to = if opc == 0b000100 { Fmt::S } else { Fmt::D };
+        0b000100 | 0b000101 | 0b000111 => {
+            let to = match opc {
+                0b000100 => Fmt::S,
+                0b000101 => Fmt::D,
+                _ => Fmt::H,
+            };
             if to == f {
                 return Err(c.undef());
             }
+            if fpcr.ahp && (f == Fmt::H || to == Fmt::H) {
+                return Err(c.unsupported(Unmodelled::AltHalfPrecision));
+            }
             float::convert(x, f, to, fpcr)
         }
-        0b000111 => return Err(c.unsupported(Unmodelled::HalfPrecision)),
         0b001000..=0b001111 if opc != 0b001101 => {
             let rounding = match opc & 7 {
                 0 => Rounding::TieEven, // FRINTN
@@ -285,7 +291,9 @@ fn fmov_general(c: &mut Ctx) -> Step {
             let lo = c.s.v[rd as usize] & u64::MAX as u128;
             c.s.v[rd as usize] = lo | ((c.s.xr(rn) as u128) << 64);
         }
-        (_, 0b11, _, _) => return Err(c.unsupported(Unmodelled::HalfPrecision)),
+        // FMOV Wd, Hn and Xd, Hn; FMOV Hd, Wn and Hd, Xn.
+        (_, 0b11, 0b00, 0b110) => c.s.set_xr(rd, c.s.v[rn as usize] as u16 as u64),
+        (_, 0b11, 0b00, 0b111) => c.s.v[rd as usize] = c.s.xr(rn) as u16 as u128,
         _ => return Err(c.undef()),
     }
     Ok(Flow::Next)

@@ -34,8 +34,9 @@ The HLE layer handles the exit and calls `run` again.
 (bits 28..25), one file per group; Advanced SIMD has its own directory,
 `interp/neon/`, with one set of lane helpers for every element size. Unsupported encodings return
 `Exit::Undefined { pc, insn }` rather than guessing, so gaps are explicit.
-Encodings that decode but use something not modelled yet (half precision,
-for example) return `Exit::Unsupported` with an `Unmodelled` reason. Both
+Encodings that decode but use something not modelled yet (a half-precision
+conversion under FPCR.AHP, for example) return `Exit::Unsupported` with an
+`Unmodelled` reason. Both
 variants keep `Exit` at 24 bytes, because every interpreter step returns it.
 
 ### Floating point
@@ -43,10 +44,12 @@ variants keep `Exit` at 24 bytes, because every interpreter step returns it.
 `crates/kestrel-cpu/src/float.rs` implements the Arm floating-point
 pseudocode on raw bit patterns, independent of any backend: NaN processing,
 default NaN, flush-to-zero, FPRound, conversions, round-to-integral and the
-reciprocal estimates. IEEE arithmetic runs on the host in round-to-nearest,
-which matches Arm for finite results; everything around it (NaN choice,
-host-generated NaNs, FZ) is applied here, so x86 and ARM hosts give the same
-bits. NEON floating-point lanes call the same functions. Future backends
+reciprocal estimates. Single- and double-precision IEEE arithmetic runs on
+the host in round-to-nearest, which matches Arm for finite results;
+everything around it (NaN choice, host-generated NaNs, FZ) is applied here,
+so x86 and ARM hosts give the same bits. Half precision (FEAT_FP16) is
+computed exactly in integers and rounded here, in every rounding mode, with
+FPCR.FZ16 as its flush-to-zero control. NEON floating-point lanes call the same functions. Future backends
 should call them too, or be differentially tested against them.
 
 ### Native (aarch64 hosts, planned)
