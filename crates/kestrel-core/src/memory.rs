@@ -713,6 +713,23 @@ cas_impl!(compare_exchange32, u32, AtomicU32);
 cas_impl!(compare_exchange64, u64, AtomicU64);
 
 impl Memory {
+    /// The 128-bit compare-and-swap, for the guest's exclusive pairs and
+    /// CASP of two X registers: as the others, but `addr` must be aligned
+    /// to 16, as Arm requires of those instructions.
+    pub fn compare_exchange128(
+        &self,
+        addr: u64,
+        current: u128,
+        new: u128,
+    ) -> Result<Result<u128, u128>, MemFault> {
+        if addr % 16 != 0 {
+            return Err(MemFault::Unaligned { addr });
+        }
+        let p = self.host(addr, Perm::RW)?;
+        // SAFETY: 16 aligned bytes in a mapped page.
+        Ok(unsafe { crate::atomic128::compare_exchange(p, current, new) })
+    }
+
     /// A 128-bit read: two 64-bit halves when 8-byte aligned (each
     /// single-copy atomic, as Arm requires of a 128-bit SIMD load without
     /// FEAT_LSE2), else byte by byte.
@@ -998,6 +1015,66 @@ mod tests {
             m.compare_exchange64(0x3000, 0, 1),
             Err(MemFault::Unmapped { addr: 0x3000 })
         );
+    }
+
+    #[test]
+    fn compare_exchange128_compares_both_halves() {
+        let m = Memory::new();
+        m.map(0x1000, 0x1000, Perm::RW, "data").unwrap();
+        let v = 0x1111_2222_3333_4444_5555_6666_7777_8888u128;
+        m.write128(0x1010, v).unwrap();
+        let new = u128::MAX - 1;
+        // Either half differing fails, and nothing is written.
+        for wrong in [v ^ 1, v ^ 1 << 64] {
+            assert_eq!(m.compare_exchange128(0x1010, wrong, new), Ok(Err(v)));
+        }
+        assert_eq!(m.read128(0x1010), Ok(v));
+        assert_eq!(m.compare_exchange128(0x1010, v, new), Ok(Ok(v)));
+        assert_eq!(m.read128(0x1010), Ok(new));
+        assert_eq!(m.read64(0x1010), Ok(u64::MAX - 1), "little-endian halves");
+        assert_eq!(
+            m.compare_exchange128(0x1008, 0, 1),
+            Err(MemFault::Unaligned { addr: 0x1008 })
+        );
+        m.map(0x2000, 0x1000, Perm::R, "ro").unwrap();
+        assert_eq!(
+            m.compare_exchange128(0x2000, 0, 1),
+            Err(MemFault::Permission {
+                addr: 0x2000,
+                needed: Perm::RW
+            })
+        );
+    }
+
+    /// 128-bit increments from several host threads all land: the low
+    /// half carries into the high half, so a compare-and-swap that saw or
+    /// wrote only one half loses counts or tears the value.
+    #[test]
+    fn compare_exchange128_is_atomic_between_host_threads() {
+        const THREADS: u128 = 4;
+        const ROUNDS: u128 = 20_000;
+        let m = Memory::new();
+        m.map(0x1000, 0x1000, Perm::RW, "shared").unwrap();
+        let start = u128::from(u64::MAX) - 2 * ROUNDS;
+        m.write128(0x1000, start).unwrap();
+        std::thread::scope(|s| {
+            for _ in 0..THREADS {
+                let m = &m;
+                s.spawn(move || {
+                    let mut seen = m.read128(0x1000).unwrap();
+                    for _ in 0..ROUNDS {
+                        loop {
+                            match m.compare_exchange128(0x1000, seen, seen + 1).unwrap() {
+                                Ok(_) => break,
+                                Err(now) => seen = now,
+                            }
+                        }
+                        seen += 1;
+                    }
+                });
+            }
+        });
+        assert_eq!(m.read128(0x1000), Ok(start + THREADS * ROUNDS));
     }
 
     /// Six host threads, one per Switch 2 core, on one Memory: atomic
