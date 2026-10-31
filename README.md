@@ -48,6 +48,11 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   priorities, cores, sleep and yield on a deterministic scheduler), and
   synchronisation: waiting on events and threads, mutexes, condition
   variables and address arbitration, with deadlock reports.
+- **Threaded cores** (`--threaded`): each of the four guest cores on its
+  own host thread, in real time, so a program's threads run in parallel
+  as on the console; guest atomics and exclusives hold between host
+  threads, and the OS layer is safe to call from every core. The
+  deterministic scheduler stays the default.
 - **IPC**: the message format (CMIF, CMIF domains and TIPC), named
   ports, client sessions, svcSendSyncRequest and the service manager sm:,
   with unknown services and commands reported by name.
@@ -75,7 +80,10 @@ signed div/mod = 97 99
 ```
 
 Add `--stats` to see the instruction count and speed; `kestrel selftest`
-reports speed for the whole suite.
+reports speed for the whole suite. `--threaded` runs each guest core on
+its own host thread in real time (runs then do not repeat exactly), and
+`kestrel selftest --threaded --repeat 20` runs every test program that
+way twenty times, to look for races on your machine.
 
 ### The SD card
 

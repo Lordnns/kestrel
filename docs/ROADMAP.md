@@ -74,7 +74,7 @@ first, on Linux (2026-10-30; "Phase 3 notes").
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
 | Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
 | Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
-| One host thread per guest core (six) | not started | `PLAN.md` section 3, "Time and cores"; the interpreter's scheduler runs every core on one host thread |
+| One host thread per guest core | done for four cores (2026-10-31), on the interpreter; CI not run yet | `Process::run_threaded` (`kestrel-hle/src/cores.rs`), `kestrel run --threaded`, `kestrel selftest --threaded`; the OS layer behind one lock; guest atomics and exclusives on host compare-and-swap; "Phase 3 notes", "Threaded cores". Six cores wait for the Switch 2's numbering (`thread::CORES`) |
 
 ### Phases 4 to 7: **not started**
 
@@ -993,7 +993,127 @@ Not verified (no ARM host with a hypervisor here): the hypervisor and
 recompiler constraints in `docs/ARCHITECTURE.md` are for phases 3 and 4
 to check.
 
+### Threaded cores (owner, 2026-10-31)
+
+The owner's decision: give each guest core its own host thread now, as
+`PLAN.md` section 3 ("Time and cores") plans for the fast backends, and
+make it testable by running the interpreter that way. The main target is
+now Windows x86_64 at up to 120 fps (a parallel session records it in
+`PLAN.md` and builds the x86_64 recompiler and the differential tester),
+so the mode is backend-agnostic: the recompiler plugs into it unchanged.
+The deterministic scheduler stays the default for the self-test,
+unattended runs and the differential tester; their output did not change.
+
+What was built (`docs/ARCHITECTURE.md`, "Threaded cores", has the design):
+- `CpuBackend` (the one interface change, kept minimal): `run` takes
+  `&Memory` instead of `&mut Memory`, and the trait is `Send`.
+- `Memory::compare_exchange128`: `LOCK CMPXCHG16B` on x86_64, an
+  LDAXP/STLXP loop on aarch64, a process-wide lock on other hosts.
+- The interpreter's atomics on host compare-and-swap: CAS, CASP, the LSE
+  atomics, and an exclusive monitor that remembers the value LDXR read
+  and makes STXR a compare-and-swap from it; DMB/DSB and acquire/release
+  as host fences. `CpuState::exclusive_value` is new.
+- `Process` is `Send`: guest memory is an `Arc<Memory>`, CMIF domains an
+  `Arc<Mutex<..>>`, `input::Source` and `display::Screen` are `Send`.
+- The kernel's read-then-write changes to guest words (a signalled
+  condition variable waiter taking its mutex back, SignalAndIncrementIfEqual)
+  are compare-and-swaps.
+- `Process::run_threaded(backends, max_steps)` in `kestrel-hle/src/cores.rs`:
+  one host thread per core, the OS layer behind one lock, guest code
+  outside it, the host's clock.
+- `kestrel run --threaded`; `kestrel selftest --threaded [--repeat <n>]`;
+  `kestrel_testsuite::run_case_threaded`; `tests/threaded.rs`;
+  `scripts/run-examples.sh` runs the examples threaded too.
+- `thread::CORES` (4) is the one core count: svcCreateThread's processor
+  check now uses it too.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| OS layer locking | one mutex around the whole `Process` (kernel, handles, scheduler, synchronisation, IPC, services); a system call and every look at the scheduler take it; guest code runs without it. Finer locks later, where a game shows contention |
+| Which thread a core runs | the best ready thread of its ideal core that no other core runs: priority, then turn, as the deterministic scheduler; equal priorities take turns only on a yield, wait, sleep or exit |
+| How often a core looks at the scheduler | after every system call, and every `SLICE` (19,200) instructions: preemption, a thread moved to the core, sleepers, timeouts, hid samples and vsync are seen then |
+| An idle core | waits on a condition variable until another core changes the threads, or the next wake-up, at most 10 ms (to see a closed window) |
+| Stopping | the first stop on any core wins; the others finish their slice; the registers kept are the stopping thread's |
+| Exclusive monitor | address and value; STXR is a compare-and-swap from the value LDXR read; a store of the same value in between is not seen (Arm allows a monitor that clears on fewer events, never more) |
+| Store-release | release fence, store, full fence (so a later load-acquire cannot pass it) |
+| Time in a threaded run | always the host's clock (a counted clock is replaced) |
+| The kernel's unlock of a mutex | a plain store: others only set WAIT_MASK on the owner's tag, and their svcArbitrateLock then sees a new value and retries |
+
+Verified (Linux x86_64 host, 4 CPUs):
+- `cargo test --workspace`: new tests for the 128-bit compare-and-swap
+  (both halves compared; four host threads incrementing across the carry
+  lose nothing), the interpreter's atomics (another core's store fails a
+  store-exclusive; four host threads incrementing with LDAXR/STLXR,
+  LDADDAL, CASAL, LDAXP/STLXP and CASPAL lose nothing), the runner (a
+  fault on another core stops the process with that thread's registers;
+  the end of every thread; a deadlock; the budget; an interrupt; a 50 ms
+  sleep takes 50 ms), every self-test program once threaded, and hbthreads
+  and hbsync 25 times each threaded.
+- Mutations fail tests: a store-exclusive that succeeds on the address
+  alone; LDADD as a load and a store; a non-atomic 128-bit
+  compare-and-swap; never setting WAIT_MASK on relock; the increment's
+  check inverted; a scheduler that ignores priority; a call that loses a
+  register.
+- The self-test's output is unchanged (27/27; hbsync retires 81 more
+  instructions, its program changed, below) and as fast as before within
+  run-to-run noise. `selftest --threaded --repeat 20`: 27/27.
+- hbthreads and hbsync threaded: 200 runs each with nothing else
+  running, and 150 beside four spinning host threads, no failure, after
+  one fix to hbsync: its address waiter could be signalled before it
+  reached its wait (5 of 100 runs under load; the program assumed 1 ms
+  was enough for another core to get there). The waiter now says when it
+  is about to wait; the expected output is unchanged.
+- The four libnx examples (`build-examples.sh` in the pinned container,
+  `run-examples.sh`): 4/4 deterministic and 4/4 threaded; the barrier
+  example threaded 10 more times, and 20 times beside four spinning host
+  threads, all passing.
+- `scripts/check-optimised.sh`: every program at `-O3 -march=armv8.2-a`
+  passes; hbsync's `-O3` build gives the same output, deterministic and
+  threaded.
+- Built for aarch64 Linux and run under qemu-user: the workspace's tests
+  (so the LDAXP/STLXP compare-and-swap and the fences ran), the threaded
+  tests 5 times, the self-test 27/27. Built for Windows
+  (`x86_64-pc-windows-gnu`) and run under Wine: the workspace's tests,
+  including the threaded ones, and `selftest --threaded --repeat 5`, 27/27.
+  Wine found a bug the Linux build hid: LLVM gave the 128-bit
+  compare-and-swap's address the register the asm swaps out (RBX); fixed
+  before commit, the address is now in RDI. (`fp_tests::flush_to_zero`
+  fails under Wine on `main` too; native Windows CI passes it.)
+- `cargo check` for `aarch64-apple-darwin`, `x86_64-apple-darwin` and
+  `x86_64-pc-windows-msvc`.
+
+Not verified here: native Windows, macOS and Linux ARM (a manual CI run
+of the branch checks them); a real program with a window in threaded
+mode (no display here).
+
+Gaps and next steps:
+- Programs whose output depends on doing something within a span of real
+  time need a host that keeps up: hbdisplay (two buffers queued within
+  one vsync) and hbinput (no new hid sample while it prints one) fail
+  threaded under qemu, so `tests/threaded.rs` leaves them out
+  (`kestrel_testsuite::HOST_SPEED`) and `selftest --threaded` says why
+  when they fail.
+- Idle cores sleep with the host's condition variable timeout, whose
+  resolution on Windows is the system timer's (often 1 to 15.6 ms); a
+  game waiting a few ms may wait longer there. A high-resolution wait
+  (`timeBeginPeriod` or a waitable timer) is for the real-time work.
+- One lock for the whole OS layer serialises every system call; measure
+  with real games before splitting it.
+- A core sees preemption only at its next call or slice end (19,200
+  instructions); a fast backend may want an interrupt flag so another
+  core can stop it sooner. That would be an addition to `CpuBackend`.
+- `--threaded` is opt-in. Whether a window should run threaded by
+  default is the owner's call (recommended once CI passes on every
+  platform, since a window already runs on the host's clock).
+
 ## Next task
+
+Threaded cores (owner, 2026-10-31; "Phase 3 notes", "Threaded cores")
+are done on branch `claude/dazzling-gates-ecemqi`, waiting for review: a
+manual CI run of the branch, or a release tag once merged, checks them on
+every platform (`cargo test` runs the threaded tests, and
+`run-examples.sh` the examples threaded). Then the owner decides whether
+a window runs threaded by default.
 
 Phase 2 is accepted (`v0.1.17`, 2026-10-30), the clock follows the
 owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
