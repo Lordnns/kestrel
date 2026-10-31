@@ -1320,9 +1320,24 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
           compare-and-swap fails both multi-thread tests. Not covered by
           a failing test: the fences (a litmus test would need weak
           ordering, which x86 hosts do not show).
-        - Next: REV, REV16, REV32, CLZ, CLS, RBIT; then DC ZVA, the
-          counters (the retired count flushed first, as `Op::Interp`
-          does), exclusive pairs and the LSE atomics.
+        - Next: REV, REV16, REV32, CLZ, CLS, RBIT (`interp/dp_reg.rs`,
+          `one_source`); then DC ZVA, the counters (the retired count
+          flushed first, as `Op::Interp` does), exclusive pairs and the
+          LSE atomics. A plan for the first: IR operations `ByteSwap`
+          and `Clz` (width 32 or 64); the encoder gains `bsr` (x86_64
+          has no LZCNT without BMI, so CLZ is `bsr` with the zero case
+          made the width) with llvm-mc cases in `gen-x64-vectors.py`;
+          REV16 and RBIT as shifts and masks in the IR (RBIT: swap
+          bits, pairs and nibbles with masks, then `ByteSwap`); CLS as
+          the interpreter computes it (CLZ of `x ^ (x asr 1)`, minus 1).
+          The integer vectors already cover all six.
+        - How to measure what still runs in the interpreter: count each
+          `insn` in `jit::interp` (a temporary `static` map, not
+          committed), run the self-test programs and a libnx example
+          (`Process::load` of `target/examples/bin/hello-world.nro`,
+          `Process::run` with a `Jit` for 100 million instructions),
+          and disassemble the counted words with `llvm-mc
+          --disassemble -triple=aarch64`.
      3. Floating point and NEON: first as calls to the interpreter's own
         routines (`float.rs`, the NEON lane helpers) with operands in
         `CpuState::v`, so results stay identical on every host; then

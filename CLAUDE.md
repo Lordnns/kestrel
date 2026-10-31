@@ -40,6 +40,14 @@ sessions learned. The plan and the status live elsewhere; read them first:
   Linux x86_64): self-test 27/27, zero divergences, about 5 times the
   interpreter's speed. `auto` picks it on Windows and Linux x86_64
   (owner, 2026-10-31); `--backend interp` for the interpreter.
+- The recompiler's next commits (branch `claude/modest-albattani-tr25g6`,
+  PR #5, on top of PR #4): chained jumps check the memory's change count
+  (another core may change a mapping mid-run), and system instructions,
+  LDAR/STLR and the single exclusives are translated (STXR a host
+  compare-and-swap, as the interpreter's after PR #4). Linux checks all
+  pass; a manual CI run on the branch is needed before merging (Windows
+  not yet run). Next: the ROADMAP's "Next task", CPU track B step 2
+  (REV, CLZ, RBIT ... with a plan written there).
 - Threaded cores (owner's decision of 2026-10-31; branch
   `claude/dazzling-gates-ecemqi`, PR #4): each guest core on its own
   host thread (`Process::run_threaded`), the OS layer behind one lock,
