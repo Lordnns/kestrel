@@ -58,6 +58,14 @@ jobs:
         run: |
           cargo run -q --release -p kestrel-cli -- info
           cargo run -q --release -p kestrel-cli -- selftest
+      # The x86_64 recompiler is built for Windows and Linux x86_64 only
+      # (PLAN.md section 3, "Platform priority").
+      - name: Self-test on the recompiler, and zero divergences from the interpreter
+        if: matrix.name == 'Linux x86_64' || matrix.name == 'Windows x86_64'
+        shell: bash
+        run: |
+          cargo run -q --release -p kestrel-cli -- selftest --backend jit
+          cargo run -q --release -p kestrel-cli -- diff --backend jit
       - uses: actions/download-artifact@v4
         with:
           name: homebrew-examples
@@ -97,6 +105,8 @@ jobs:
         run: python3 scripts/gen-neon-vectors.py --check
       - name: Integer test vectors match the independent Python model
         run: python3 scripts/gen-int-vectors.py --check
+      - name: The recompiler's x86_64 encodings match llvm-mc
+        run: python3 scripts/gen-x64-vectors.py --check
       - run: bash scripts/build-guest.sh
       - run: cargo run -q --release -p kestrel-cli -- selftest
       - name: Programs built with -O3 for Armv8.2 hit no unsupported instruction

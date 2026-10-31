@@ -9,7 +9,7 @@ mod host;
 pub mod memory;
 
 pub use arena::{Arena, ARENA_ALIGN, DEFAULT_ARENA_SIZE};
-pub use memory::{Block, MemFault, Memory, Perm, Tag, PAGE_SIZE};
+pub use memory::{Block, MemFault, Memory, Perm, RawTables, Tag, PAGE_SIZE};
 
 /// Host CPU architecture the emulator was compiled for.
 pub fn host_arch() -> &'static str {

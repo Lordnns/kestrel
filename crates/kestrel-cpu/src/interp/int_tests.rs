@@ -37,8 +37,8 @@ pub struct Case {
     pub mem: &'static [(u16, u8)],
 }
 
-/// Run one case and describe every mismatch.
-fn run(case: &Case) -> Vec<String> {
+/// Run one case on `backend` (one step) and describe every mismatch.
+pub(crate) fn run_on(case: &Case, backend: &mut dyn CpuBackend) -> Vec<String> {
     let (mut s, m) = setup(&[]);
     let code_base = PC - 0x80;
     m.poke_bytes(code_base, &CODE).unwrap();
@@ -60,7 +60,7 @@ fn run(case: &Case) -> Vec<String> {
     s.fpsr = FPSR;
     s.tpidr_el0 = TPIDR;
     s.tpidrro_el0 = TPIDRRO;
-    let exit = Interpreter::new().run(&mut s, &m, 1);
+    let exit = backend.run(&mut s, &m, 1);
     if exit != Exit::StepLimit {
         return vec![format!("stopped with {exit:?}")];
     }
@@ -134,12 +134,19 @@ fn run(case: &Case) -> Vec<String> {
 /// Run every case in `group` and report all failures together.
 #[track_caller]
 fn group(name: &str) {
+    group_on(name, &mut Interpreter::new());
+}
+
+/// Run every case in `group` on `backend` and report all failures
+/// together.
+#[track_caller]
+pub(crate) fn group_on(name: &str, backend: &mut dyn CpuBackend) {
     let cases: Vec<&Case> = CASES.iter().filter(|c| c.group == name).collect();
     assert!(!cases.is_empty(), "no cases in group {name}");
     let failures: Vec<String> = cases
         .iter()
         .filter_map(|c| {
-            let errs = run(c);
+            let errs = run_on(c, backend);
             (!errs.is_empty())
                 .then(|| format!("{} ({:08x}):\n    {}", c.asm, c.insn, errs.join("\n    ")))
         })

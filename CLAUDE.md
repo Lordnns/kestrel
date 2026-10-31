@@ -25,21 +25,27 @@ sessions learned. The plan and the status live elsewhere; read them first:
   hypervisor VM and a recompiler (`docs/ARCHITECTURE.md`, "Memory").
   It and the clock passed CI on all six native jobs (a manual run on
   the arena's branch, 2026-10-31).
-- Threaded cores (owner's decision of 2026-10-31) are on branch
-  `claude/dazzling-gates-ecemqi` (PR #4), green on every CI job (manual
-  run 7): each guest core on its own host thread, the OS layer behind
-  one lock, guest atomics on host compare-and-swap; a window runs that
-  way by default (ROADMAP "Phase 3 notes", "Threaded cores").
-- The owner has not yet picked the next task. The candidates, from the
-  ROADMAP's "Next task":
-  1. phase 3 on Linux KVM and Windows (phase 3 on macOS needs a session
-     on the owner's Mac), designed for the real-time goal;
-  2. a licence-notices file in the release packages (they now bundle
-     MIT/Apache crates: winit, softbuffer, gilrs and their dependencies);
-  3. more homebrew, fixing what `user/logs/unimplemented.log` names;
-  4. the later input tasks: other controller types (GameCube,
-     NES/SNES/N64/Genesis), several players, real Joy-Con motion, rumble
-     and pairing.
+- The owner's decisions of 2026-10-31 (`PLAN.md` sections 1 and 3,
+  "Platform priority"): Windows x86_64 only until the Windows milestone
+  (a game the owner owns playable at full speed); the other platforms
+  are frozen, not dropped (existing features keep passing CI on all six
+  targets; new ones compile there and stop with "not yet supported on
+  this platform"). Two tracks in parallel: the CPU track (differential
+  tester, then the x86_64 recompiler) and the graphics track (5A, 5B,
+  Vulkan). The owner has no ARM machine. The ROADMAP's "Next task" has
+  the order and where the work stands.
+- The CPU track so far (2026-10-31, branch
+  `claude/modest-albattani-tr25g6`): the differential tester (`kestrel
+  diff`) and the first x86_64 recompiler (`--backend jit`, Windows and
+  Linux x86_64): self-test 27/27, zero divergences, about 5 times the
+  interpreter's speed. `auto` picks it on Windows and Linux x86_64
+  (owner, 2026-10-31); `--backend interp` for the interpreter.
+- Threaded cores (owner's decision of 2026-10-31; branch
+  `claude/dazzling-gates-ecemqi`, PR #4): each guest core on its own
+  host thread (`Process::run_threaded`), the OS layer behind one lock,
+  guest atomics on host compare-and-swap; a window runs that way by
+  default. It drives any backend, the recompiler included (ROADMAP
+  "Phase 3 notes", "Threaded cores").
 
 ## How the owner works
 
@@ -65,6 +71,11 @@ sessions learned. The plan and the status live elsewhere; read them first:
 ## Decisions the owner has made
 
 Each is also recorded in the ROADMAP's phase notes.
+
+- Windows x86_64 first (2026-10-31): new features are built for it, and
+  for Linux x86_64 where testing needs it; on macOS and ARM they compile
+  and stop with an explicit message. The recompiler uses kestrel's own
+  x86_64 encoder, every encoding checked against llvm-mc.
 
 - The product goal (`PLAN.md` section 1): behave like a real Switch 2 in
   real time, 1:1 with wall-clock time, up to 120 fps, on the native and

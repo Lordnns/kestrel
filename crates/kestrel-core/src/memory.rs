@@ -30,6 +30,11 @@ impl Perm {
     pub const RX: Perm = Perm(5);
     pub const RWX: Perm = Perm(7);
 
+    /// The permission's bits: R 1, W 2, X 4.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
     pub const fn contains(self, other: Perm) -> bool {
         self.0 & other.0 == other.0
     }
@@ -149,6 +154,26 @@ const LEAF_BITS: u32 = 9;
 const LEAF_ENTRIES: usize = 1 << LEAF_BITS;
 const TOP_ENTRIES: usize = 1 << (ADDRESS_BITS - PAGE_BITS - LEAF_BITS);
 
+/// Where generated code finds the page table and the arena; see
+/// [`Memory::raw_tables`]. The walk: entry `addr >> TABLE_TOP_SHIFT` of
+/// `top` (below [`TABLE_TOP_ENTRIES`]) is a pointer to a leaf, null if
+/// none; entry `(addr >> 12) % TABLE_LEAF_ENTRIES` of the leaf (8 bytes
+/// each) is the page's entry: the frame's offset in the arena in bits 12
+/// and up, the permission ([`Perm`]'s bits) shifted left by
+/// [`TABLE_PERM_SHIFT`], and [`TABLE_PRESENT`]. The byte is at
+/// `arena + frame + addr % 4096`.
+#[derive(Clone, Copy, Debug)]
+pub struct RawTables {
+    pub top: u64,
+    pub arena: u64,
+}
+
+pub const TABLE_TOP_SHIFT: u32 = PAGE_BITS + LEAF_BITS;
+pub const TABLE_TOP_ENTRIES: u64 = TOP_ENTRIES as u64;
+pub const TABLE_LEAF_ENTRIES: u64 = LEAF_ENTRIES as u64;
+pub const TABLE_PERM_SHIFT: u32 = PERM_SHIFT;
+pub const TABLE_PRESENT: u64 = PRESENT;
+
 /// A page table entry: the frame's offset in the arena in bits 12 and up,
 /// the permission in bits 1 to 3, bit 0 set when the page is mapped. Zero
 /// is an unmapped page.
@@ -167,6 +192,8 @@ const fn entry_frame(e: u64) -> u64 {
     e & !(PAGE_SIZE - 1)
 }
 
+// Generated code reads leaf entries as plain 8-byte values.
+#[repr(transparent)]
 struct Leaf([AtomicU64; LEAF_ENTRIES]);
 
 /// Guest page -> arena frame, in two levels so an access costs two loads.
@@ -481,6 +508,17 @@ impl Memory {
     pub fn translate(&self, addr: u64) -> Option<(u64, Perm)> {
         let e = self.table.get(addr);
         (e & PRESENT != 0).then_some((entry_frame(e), entry_perm(e)))
+    }
+
+    /// The page table as generated code walks it (docs/ARCHITECTURE.md,
+    /// "What the recompiler (phase 4) must do with it"). The addresses
+    /// stay valid as long as this `Memory`: leaves are never freed and
+    /// the arena never moves.
+    pub fn raw_tables(&self) -> RawTables {
+        RawTables {
+            top: self.table.top.as_ptr() as u64,
+            arena: self.arena.ptr(0) as u64,
+        }
     }
 
     /// A count that moves on after every change to the mappings or their

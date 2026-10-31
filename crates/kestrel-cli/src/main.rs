@@ -2,6 +2,7 @@
 
 #[cfg(feature = "window")]
 mod input_config;
+mod perf;
 mod unattended;
 #[cfg(feature = "window")]
 mod window;
@@ -27,10 +28,14 @@ const USAGE: &str = "\
 kestrel - experimental ARM64 console emulator
 
 USAGE:
-    kestrel selftest [-v] [--threaded [--repeat <n>]]
+    kestrel selftest [-v] [--backend <b>] [--threaded [--repeat <n>]]
                                      Run the built-in ARM64 test programs;
                                      --threaded runs each guest core on its
                                      own host thread, <n> times each
+    kestrel diff [--backend <b>] [case...]
+                                     Run the test programs on the interpreter
+                                     and backend <b> side by side and report
+                                     the first divergence (default: auto)
     kestrel extract <dir>            Write the built-in test programs to <dir>
     kestrel run <program.elf|program.nro> [options] [-- args...]
     kestrel info                     Show host and backend information
@@ -41,7 +46,9 @@ RUN OPTIONS:
                                          or none with a window)
     --trace                              Print every executed instruction
     --regs                               Dump registers when the program stops
-    --stats                              Print instruction count and speed
+    --stats                              Print instruction count and speed,
+                                         and frame times (average, 1% low,
+                                         worst) when the program shows frames
     --sd <folder>                        The folder that is the SD card
                                          (default: user/sdmc next to kestrel)
     --threaded                           Each guest core on its own host
@@ -148,18 +155,23 @@ fn info() {
     println!("host architecture : {}", kestrel_core::host_arch());
     println!("host OS           : {}", std::env::consts::OS);
     println!("portable backend  : interp (available)");
-    match kestrel_cpu::planned_fast_backend() {
-        Some(k) => println!("fast backend      : {k:?} (planned, not implemented yet)"),
-        None => println!("fast backend      : none planned for this host"),
+    match kestrel_cpu::create_backend(BackendKind::Jit) {
+        Ok(_) => println!("fast backend      : jit (x86_64 recompiler; --backend jit)"),
+        Err(e) => match kestrel_cpu::planned_fast_backend() {
+            Some(BackendKind::Jit) | None => println!("fast backend      : none ({e})"),
+            Some(k) => println!("fast backend      : {k:?} (planned, not implemented yet)"),
+        },
     }
 }
 
 fn selftest(args: &[String]) -> Result<ExitCode, String> {
     let (mut verbose, mut threaded, mut repeat) = (false, false, 1u32);
+    let mut kind = BackendKind::Auto;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-v" | "--verbose" => verbose = true,
+            "--backend" => kind = it.next().ok_or("--backend needs a value")?.parse()?,
             "--threaded" => threaded = true,
             "--repeat" => {
                 repeat = it
@@ -199,9 +211,9 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
         let mut out: Option<kestrel_testsuite::Outcome> = None;
         for _ in 0..repeat {
             let run = if threaded {
-                kestrel_testsuite::run_case_threaded(case, BackendKind::Auto)?
+                kestrel_testsuite::run_case_threaded(case, kind)?
             } else {
-                kestrel_testsuite::run_case(case, BackendKind::Auto)?
+                kestrel_testsuite::run_case(case, kind)?
             };
             total_insns += run.instructions;
             total_time += run.elapsed.as_secs_f64();
@@ -250,7 +262,107 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
         "{passed}/{} passed  ({total_insns} guest instructions, {mips:.1} MIPS on the {backend} backend)",
         cases.len()
     );
-    Ok(if passed == cases.len() {
+    // Without --backend, the other backends this build has run the same
+    // programs too, so the report shows each one's speed (and a fast
+    // backend that fails fails the self-test). Not with --threaded, whose
+    // real-time waits make speeds meaningless.
+    let mut all_passed = passed == cases.len();
+    if kind == BackendKind::Auto && !threaded {
+        let others: Vec<BackendKind> = [BackendKind::Interp, BackendKind::Jit, BackendKind::Native]
+            .into_iter()
+            .filter(|&k| create_backend(k).is_ok_and(|(b, _)| b.name() != backend))
+            .collect();
+        if !others.is_empty() {
+            println!();
+            println!("Speed by backend (the same programs):");
+            println!(
+                "  {backend:<7} {passed:>2}/{}  {mips:>7.1} MIPS",
+                cases.len()
+            );
+        }
+        for k in others {
+            let (mut ok, mut insns, mut time, mut name) = (0, 0u64, 0f64, "?");
+            for case in cases {
+                let out = kestrel_testsuite::run_case(case, k)?;
+                name = out.backend;
+                insns += out.instructions;
+                time += out.elapsed.as_secs_f64();
+                if out.passed {
+                    ok += 1;
+                } else {
+                    println!(
+                        "  FAIL  {} on {name}: {}",
+                        case.name,
+                        out.failure_reason(case).unwrap_or_default()
+                    );
+                }
+            }
+            all_passed &= ok == cases.len();
+            let mips = insns as f64 / time.max(1e-9) / 1e6;
+            println!("  {name:<7} {ok:>2}/{}  {mips:>7.1} MIPS", cases.len());
+        }
+    }
+    Ok(if all_passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+/// `kestrel diff`: the differential tester on the self-test programs.
+fn diff(args: &[String]) -> Result<ExitCode, String> {
+    let mut kind = BackendKind::Auto;
+    let mut names = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--backend" => kind = it.next().ok_or("--backend needs a value")?.parse()?,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown diff option '{other}'"))
+            }
+            name => names.push(name),
+        }
+    }
+    let cases: Vec<_> = kestrel_testsuite::CASES
+        .iter()
+        .filter(|c| names.is_empty() || names.contains(&c.name))
+        .collect();
+    if let Some(bad) = names
+        .iter()
+        .find(|n| !kestrel_testsuite::CASES.iter().any(|c| c.name == **n))
+    {
+        return Err(format!("no test program named '{bad}'"));
+    }
+    let (_, note) = create_backend(kind)?;
+    if let Some(note) = note {
+        eprintln!("note: {note}");
+    }
+    let reference = || -> Box<dyn CpuBackend> { Box::new(Interpreter::new()) };
+    let candidate = || {
+        create_backend(kind)
+            .expect("the backend was created above")
+            .0
+    };
+    let mut diverged = 0;
+    for case in &cases {
+        let r = kestrel_testsuite::diff::diff_case(case, &reference, &candidate)?;
+        match &r.divergence {
+            None => println!(
+                "  SAME      {:<11} {:>12} instr  {} and {}, {:?}",
+                case.name, r.instructions, r.backends.0, r.backends.1, r.stop
+            ),
+            Some(d) => {
+                diverged += 1;
+                println!("  DIVERGED  {:<11} {d}", case.name);
+            }
+        }
+    }
+    println!();
+    println!(
+        "{diverged} of {} programs diverged (counted clock, 52 instructions a tick)",
+        cases.len()
+    );
+    Ok(if diverged == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
@@ -461,6 +573,13 @@ fn emulate(
             inner: proc.screen.take(),
         }));
     }
+    let frame_times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    if o.stats {
+        proc.screen = Some(Box::new(perf::Timed {
+            times: frame_times.clone(),
+            inner: proc.screen.take(),
+        }));
+    }
     let max_steps = o
         .max_steps
         .unwrap_or(if windowed { u64::MAX } else { 10_000_000_000 });
@@ -516,6 +635,9 @@ fn emulate(
             proc.svc_count,
             elapsed.as_secs_f64()
         );
+        if let Some(summary) = perf::Summary::of(&frame_times.lock().unwrap()) {
+            eprintln!("[{backend_name}] {}", summary.describe());
+        }
     }
     match stop {
         Stop::Exited => Ok(ExitCode::SUCCESS),
@@ -570,6 +692,7 @@ fn main() -> ExitCode {
         Some("run") => parse(&args[1..]).and_then(run),
         Some("selftest" | "self-test" | "test") => selftest(&args[1..]),
         Some("extract") => extract(&args[1..]),
+        Some("diff") => diff(&args[1..]),
         Some("info") => {
             info();
             Ok(ExitCode::SUCCESS)

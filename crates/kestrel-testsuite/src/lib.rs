@@ -13,6 +13,8 @@ use kestrel_hle::{Process, Stop};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub mod diff;
+
 pub struct Case {
     pub name: &'static str,
     pub description: &'static str,
@@ -243,9 +245,61 @@ impl Outcome {
     }
 }
 
-/// Load and run one case on the requested backend. A homebrew case gets
-/// an empty SD card, a new folder in the system's temporary directory that
-/// is removed afterwards, so every run starts the same.
+/// A case's process, ready to run: its SD card folder, if it has one,
+/// and the frame lines it shows.
+pub(crate) struct Prepared {
+    pub proc: Process,
+    pub sd: Option<std::path::PathBuf>,
+    pub frames: Arc<Mutex<Vec<String>>>,
+}
+
+impl Prepared {
+    /// Load `case`. A homebrew case gets an empty SD card, a new folder in
+    /// the system's temporary directory named after the case and `tag`,
+    /// removed when this is dropped, so every run starts the same.
+    pub(crate) fn new(case: &Case, tag: &str) -> Result<Self, String> {
+        let nro = kestrel_loader::is_nro(case.file);
+        let file_name = format!("{}.{}", case.name, if nro { "nro" } else { "elf" });
+        let mut proc = Process::load(case.file, &file_name, &case.args())?;
+        let mut sd = None;
+        if nro {
+            let dir = std::env::temp_dir().join(format!(
+                "kestrel-selftest-{}-{}{tag}",
+                std::process::id(),
+                case.name
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            proc.services.fs.sd = Some(dir.clone());
+            sd = Some(dir);
+        }
+        proc.input = case.input.map(|make| make());
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        proc.screen = Some(Box::new(FrameLog(frames.clone())));
+        Ok(Prepared { proc, sd, frames })
+    }
+
+    /// The program's debug output followed by its frame lines.
+    pub(crate) fn output(&self) -> String {
+        let mut output = self.proc.debug_output_str();
+        for line in self.frames.lock().unwrap().iter() {
+            output.push_str(line);
+            output.push('\n');
+        }
+        output
+    }
+}
+
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        if let Some(sd) = &self.sd {
+            let _ = std::fs::remove_dir_all(sd);
+        }
+    }
+}
+
+/// Load and run one case on the requested backend.
 pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
     run(case, backend, false)
 }
@@ -255,7 +309,9 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
 /// pending less than one 60 Hz vsync (16.7 ms) later; hbinput prints the
 /// newest controller state and expects it still the newest less than one
 /// 5 ms hid sample later. Both hold on a host running natively with time
-/// to spare, not under an emulator such as qemu.
+/// to spare, not under an emulator such as qemu, and not on the
+/// recompiler, whose cores each translate the program's code as it first
+/// runs it, in real time.
 pub const HOST_SPEED: &[&str] = &["hbdisplay", "hbinput"];
 
 /// Run one case with each guest core on its own host thread and the
@@ -267,46 +323,24 @@ pub fn run_case_threaded(case: &Case, backend: BackendKind) -> Result<Outcome, S
 }
 
 fn run(case: &Case, backend: BackendKind, threaded: bool) -> Result<Outcome, String> {
-    let nro = kestrel_loader::is_nro(case.file);
-    let file_name = format!("{}.{}", case.name, if nro { "nro" } else { "elf" });
-    let mut proc = Process::load(case.file, &file_name, &case.args())?;
-    let sd = std::env::temp_dir().join(format!(
-        "kestrel-selftest-{}-{}",
-        std::process::id(),
-        case.name
-    ));
-    if nro {
-        let _ = std::fs::remove_dir_all(&sd);
-        std::fs::create_dir_all(&sd).map_err(|e| format!("cannot create {}: {e}", sd.display()))?;
-        proc.services.fs.sd = Some(sd.clone());
-    }
-    proc.input = case.input.map(|make| make());
-    let frames = Arc::new(Mutex::new(Vec::new()));
-    proc.screen = Some(Box::new(FrameLog(frames.clone())));
+    let mut p = Prepared::new(case, "")?;
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
     let stop = if threaded {
         let cores = (0..kestrel_hle::thread::CORES)
             .map(|_| create_backend(backend).map(|(b, _)| b))
             .collect::<Result<_, _>>()?;
-        proc.run_threaded(cores, MAX_STEPS)
+        p.proc.run_threaded(cores, MAX_STEPS)
     } else {
-        proc.run(cpu.as_mut(), MAX_STEPS)
+        p.proc.run(cpu.as_mut(), MAX_STEPS)
     };
     let elapsed = t0.elapsed();
-    if nro {
-        let _ = std::fs::remove_dir_all(&sd);
-    }
-    let mut output = proc.debug_output_str();
-    for line in frames.lock().unwrap().iter() {
-        output.push_str(line);
-        output.push('\n');
-    }
+    let output = p.output();
     Ok(Outcome {
         passed: stop == Stop::Exited && output == case.expected,
         stop,
         output,
-        instructions: proc.instructions(),
+        instructions: p.proc.instructions(),
         elapsed,
         backend: cpu.name(),
     })
