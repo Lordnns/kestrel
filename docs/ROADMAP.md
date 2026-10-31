@@ -68,7 +68,7 @@ first, on Linux (2026-10-30; "Phase 3 notes").
 
 | Task | Status | Evidence |
 |------|--------|----------|
-| Memory arena refactor | done (Linux, 2026-10-30; CI on every platform at the next tag) | `kestrel_core::arena` (one host range, 2 MiB aligned, committed as used), `Memory` as a lock-free two-level page table over it, `Send + Sync`; compare-and-swap, `translate` and `epoch` for the fast backends; the self-test's output unchanged; the hypervisor and recompiler constraints in `docs/ARCHITECTURE.md`, "Memory" |
+| Memory arena refactor | done (2026-10-30; CI green on every platform, manual run 5 on the branch) | `kestrel_core::arena` (one host range, 2 MiB aligned, committed as used), `Memory` as a lock-free two-level page table over it, `Send + Sync`; compare-and-swap, `translate` and `epoch` for the fast backends; the self-test's output unchanged; the hypervisor and recompiler constraints in `docs/ARCHITECTURE.md`, "Memory" |
 | Native backend | not started | `create_backend(Native)` returns "not implemented yet" |
 | Differential tester | not started | none |
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
@@ -885,20 +885,27 @@ Verified (Linux x86_64 host):
   aligned write split in two, and unmapping without freeing frames each
   fail a test.
 
-Not verified here (no ARM host with a hypervisor, no macOS): macOS's
-`mmap` constants and 16 KiB pages run only in CI (`cargo check` passes
-for both macOS targets); the hypervisor and recompiler constraints in
-`docs/ARCHITECTURE.md` are for phases 3 and 4 to check.
+CI (manual run of `ci.yml` on the branch, run 5, 2026-10-31,
+https://github.com/Lordnns/kestrel/actions/runs/41149930809):
+all 11 jobs green. The six native jobs (Linux, Windows and macOS, x86_64
+and aarch64) build, test, lint, pass the self-test and the four libnx
+examples, so the arena's host code ran natively: macOS's `mmap` on
+Apple Silicon's 16 KiB pages and on Intel, and Windows' `VirtualAlloc`
+on x86_64 and ARM64. The same run is the first CI check of the clock
+(52 instructions a tick), which this branch builds on.
+
+Not verified (no ARM host with a hypervisor here): the hypervisor and
+recompiler constraints in `docs/ARCHITECTURE.md` are for phases 3 and 4
+to check.
 
 ## Next task
 
 Phase 2 is accepted (`v0.1.17`, 2026-10-30), the clock follows the
 owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
 window, 52 instructions a tick otherwise), and guest memory is the
-phase 3 arena (2026-10-30, "Phase 3 notes"). Tag a release so CI runs
-the self-test and the examples on every platform: the arena's host code
-(macOS's `mmap` and 16 KiB pages, Windows' `VirtualAlloc`) runs natively
-there for the first time. Then ask the owner which comes next; the
+phase 3 arena (2026-10-30, "Phase 3 notes"). Both passed CI on every
+platform (a manual run on the arena's branch, 2026-10-31); a release tag
+is needed only to publish packages. Ask the owner which comes next; the
 candidates:
 
 1. Phase 3 on Linux KVM and Windows (the native backend), now that
