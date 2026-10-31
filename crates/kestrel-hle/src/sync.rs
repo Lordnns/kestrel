@@ -163,6 +163,16 @@ impl Process {
         self.mem.write32(addr, v).expect("checked word");
     }
 
+    /// Replace the checked word at `addr` with `new` if it holds `current`:
+    /// `Err(seen)` if not. Guest cores on other host threads change these
+    /// words with their own atomics while the kernel looks at them, so a
+    /// change that depends on what the kernel read is a compare-and-swap.
+    fn swap_word(&mut self, addr: u64, current: u32, new: u32) -> Result<u32, u32> {
+        self.mem
+            .compare_exchange32(addr, current, new)
+            .expect("checked word")
+    }
+
     /// The thread whose handle is `tag`, as a thread ID.
     fn tag_owner(&self, tag: u32) -> Option<u64> {
         let i = self.thread_index(tag as u64).ok()?;
@@ -203,7 +213,10 @@ impl Process {
 
     /// Release the running thread's mutex at `addr`: the best waiter gets
     /// it (with WAIT_MASK if others still wait, who now wait on the new
-    /// owner), or the word becomes 0.
+    /// owner), or the word becomes 0. A plain store, whatever another core
+    /// did meanwhile: the word holds the owner's tag, and other threads
+    /// change it only by setting WAIT_MASK, after which their
+    /// svcArbitrateLock finds a new value and returns for them to retry.
     fn unlock(&mut self, addr: u64) {
         let me = self.current_thread().id;
         let waiters = self.waiters(
@@ -276,15 +289,26 @@ impl Process {
         if let Err(code) = self.check_word(addr) {
             return self.wake(i, code, None);
         }
-        let value = self.word(addr);
-        if value == 0 {
-            self.set_word(addr, tag);
-            return self.wake(i, result::SUCCESS, None);
-        }
-        let Some(owner) = self.tag_owner(value & !WAIT_MASK) else {
-            return self.wake(i, result::INVALID_HANDLE, None);
+        let mut value = self.word(addr);
+        let owner = loop {
+            if value == 0 {
+                match self.swap_word(addr, 0, tag) {
+                    Ok(_) => return self.wake(i, result::SUCCESS, None),
+                    Err(seen) => value = seen,
+                }
+                continue;
+            }
+            let Some(owner) = self.tag_owner(value & !WAIT_MASK) else {
+                return self.wake(i, result::INVALID_HANDLE, None);
+            };
+            if value & WAIT_MASK != 0 {
+                break owner;
+            }
+            match self.swap_word(addr, value, value | WAIT_MASK) {
+                Ok(_) => break owner,
+                Err(seen) => value = seen,
+            }
         };
-        self.set_word(addr, value | WAIT_MASK);
         let t = &mut self.sched.threads[i];
         t.wait = Some(Wait::Lock { addr, owner, tag });
         t.state = State::Waiting { until: None };
@@ -340,10 +364,10 @@ impl Process {
         match kind {
             0 => {}
             1 => {
-                if self.word(addr) as i32 != value {
+                let next = value.wrapping_add(1) as u32;
+                if self.swap_word(addr, value as u32, next).is_err() {
                     return Err(result::INVALID_STATE.into());
                 }
-                self.set_word(addr, value.wrapping_add(1) as u32);
             }
             2 => {
                 return Err(ArbitrationError::Unsupported(
