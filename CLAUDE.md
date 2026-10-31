@@ -40,6 +40,12 @@ sessions learned. The plan and the status live elsewhere; read them first:
   Linux x86_64): self-test 27/27, zero divergences, about 5 times the
   interpreter's speed. `auto` picks it on Windows and Linux x86_64
   (owner, 2026-10-31); `--backend interp` for the interpreter.
+- Threaded cores (owner's decision of 2026-10-31; branch
+  `claude/dazzling-gates-ecemqi`, PR #4): each guest core on its own
+  host thread (`Process::run_threaded`), the OS layer behind one lock,
+  guest atomics on host compare-and-swap; a window runs that way by
+  default. It drives any backend, the recompiler included (ROADMAP
+  "Phase 3 notes", "Threaded cores").
 
 ## How the owner works
 
@@ -78,7 +84,12 @@ Each is also recorded in the ROADMAP's phase notes.
   clock; the self-test, headless runs and the differential tester count
   52 instructions a tick (998.4 MHz), so they repeat.
 - Six guest cores, each on its own host thread on the fast backends; the
-  interpreter's deterministic scheduler stays for tests.
+  interpreter's deterministic scheduler stays for tests. The threaded
+  mode (`Process::run_threaded`) is backend-agnostic and testable on the
+  interpreter; the core count is `thread::CORES`, four until the Switch
+  2's numbering is documented. A window runs threaded by default
+  (2026-10-31; `--single-thread` to opt out); without one, runs stay
+  deterministic unless `--threaded`.
 - System version 20.0.0; clock starts 2025-06-05 00:00 UTC, time zone
   UTC.
 - Portable, Dolphin-style: kestrel's `user/` folder next to the
@@ -154,7 +165,10 @@ Co-Authored-By line from the session's attribution instructions.
 ## Running things
 
 - `cargo run --release -p kestrel-cli -- run <program.nro>` opens a
-  window; `--headless` runs without one. `--press Plus@2` presses a
+  window, threaded (`--single-thread` otherwise); `--headless` runs
+  without one; `--threaded` puts each guest core on its own host thread
+  there too (real time, not repeatable);
+  `selftest --threaded --repeat 20` looks for races. `--press Plus@2` presses a
   button for 1 s at that time; `--save-frame shot.png` saves the last
   frame. Read the PNG to see what a program drew.
 - The examples: `scripts/build-examples.sh` (Docker, pinned

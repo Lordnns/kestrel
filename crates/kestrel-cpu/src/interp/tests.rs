@@ -26,9 +26,9 @@ pub(crate) fn setup(words: &[u32]) -> (CpuState, Memory) {
 
 /// Run until the trailing BRK and return the final state.
 fn run_with(words: &[u32], init: impl FnOnce(&mut CpuState)) -> (CpuState, Memory) {
-    let (mut s, mut m) = setup(words);
+    let (mut s, m) = setup(words);
     init(&mut s);
-    let exit = Interpreter::new().run(&mut s, &mut m, 10_000);
+    let exit = Interpreter::new().run(&mut s, &m, 10_000);
     assert_eq!(exit, Exit::Breakpoint(0), "unexpected exit, state:\n{s:?}");
     (s, m)
 }
@@ -168,12 +168,12 @@ fn exclusives_and_atomics() {
 #[test]
 fn svc_exits_and_resumes() {
     // mov x0,#7; svc #0x27; mov x0,#9; brk
-    let (mut s, mut m) = setup(&[0xd28000e0, 0xd40004e1, 0xd2800120, 0xd4200000]);
+    let (mut s, m) = setup(&[0xd28000e0, 0xd40004e1, 0xd2800120, 0xd4200000]);
     let mut cpu = Interpreter::new();
-    assert_eq!(cpu.run(&mut s, &mut m, 100), Exit::Svc(0x27));
+    assert_eq!(cpu.run(&mut s, &m, 100), Exit::Svc(0x27));
     assert_eq!(s.x[0], 7);
     assert_eq!(s.pc, CODE + 8);
-    assert_eq!(cpu.run(&mut s, &mut m, 100), Exit::Breakpoint(0));
+    assert_eq!(cpu.run(&mut s, &m, 100), Exit::Breakpoint(0));
     assert_eq!(s.x[0], 9);
 }
 
@@ -268,8 +268,8 @@ fn unsupported_system_instructions_are_reported() {
         0xd508751f, // ic iallu (EL1 only)
         0xd5380000, // mrs x0, midr_el1
     ] {
-        let (mut s, mut m) = setup(&[insn]);
-        let exit = Interpreter::new().run(&mut s, &mut m, 10);
+        let (mut s, m) = setup(&[insn]);
+        let exit = Interpreter::new().run(&mut s, &m, 10);
         assert_eq!(exit, Exit::Undefined { pc: CODE, insn }, "{insn:08x}");
     }
 }
@@ -277,8 +277,8 @@ fn unsupported_system_instructions_are_reported() {
 #[test]
 fn unknown_encoding_is_reported() {
     // sha512h q0, q1, v2.2d (FEAT_SHA512, which the Cortex-A78C lacks)
-    let (mut s, mut m) = setup(&[0xce628020]);
-    let exit = Interpreter::new().run(&mut s, &mut m, 10);
+    let (mut s, m) = setup(&[0xce628020]);
+    let exit = Interpreter::new().run(&mut s, &m, 10);
     assert_eq!(
         exit,
         Exit::Undefined {
@@ -291,7 +291,7 @@ fn unknown_encoding_is_reported() {
 #[test]
 fn fault_on_unmapped_access() {
     // ldr x0, [xzr]  -> encoded as ldr x0, [x1] with x1 = 0
-    let (mut s, mut m) = setup(&[0xf9400020]);
-    let exit = Interpreter::new().run(&mut s, &mut m, 10);
+    let (mut s, m) = setup(&[0xf9400020]);
+    let exit = Interpreter::new().run(&mut s, &m, 10);
     assert!(matches!(exit, Exit::Fault { pc: CODE, .. }));
 }

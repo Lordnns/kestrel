@@ -18,15 +18,19 @@ kestrel-cli ──► kestrel-hle ──► kestrel-cpu ──► kestrel-core
 ## CPU backends
 
 ```rust
-pub trait CpuBackend {
-    fn run(&mut self, state: &mut CpuState, mem: &mut Memory, max_steps: u64) -> Exit;
+pub trait CpuBackend: Send {
+    fn run(&mut self, state: &mut CpuState, mem: &Memory, max_steps: u64) -> Exit;
     fn invalidate(&mut self, addr: u64, len: u64);
 }
 ```
 
-A backend runs guest code until something needs the OS (`Exit::Svc`), a
+A backend runs one guest core until something needs the OS (`Exit::Svc`), a
 breakpoint, a fault, an instruction it does not support, or the step budget.
-The HLE layer handles the exit and calls `run` again.
+The HLE layer handles the exit and calls `run` again. With the cores on
+host threads ("Threaded cores" below) each core has its own backend on its
+own host thread, hence `Send`, and all of them run on one shared `Memory`
+at once, hence `&Memory`: a backend's guest atomics, exclusives and
+barriers must hold between host threads (the interpreter's do, below).
 
 ### Interpreter (all hosts)
 
@@ -38,6 +42,19 @@ Encodings that decode but use something not modelled yet (a half-precision
 conversion under FPCR.AHP, for example) return `Exit::Unsupported` with an
 `Unmodelled` reason. Both
 variants keep `Exit` at 24 bytes, because every interpreter step returns it.
+
+Guest atomics reach memory through the host's compare-and-swap
+(`interp/ldst.rs`), so they hold when other cores run on other host
+threads: CAS, CASP and the LSE atomics are compare-and-swap loops, and
+the exclusive monitor remembers the address and the value a
+load-exclusive read, the store-exclusive succeeding only if a
+compare-and-swap from that value does (a store by another core or the
+kernel in between fails it; one writing back the same value does not,
+which Arm permits). Pairs of X registers use the 128-bit compare-and-swap.
+DMB and DSB are full host fences, a load-acquire is followed by an
+acquire fence, and a store-release has a release fence before it and a
+full fence after it, so Arm's ordering holds on an aarch64 host too. A
+thread switch still clears the monitor.
 
 ### Floating point
 
@@ -114,9 +131,16 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   body. Before jumping, the block checks that a whole block (64
   instructions) still fits in the budget, else it returns, so budgets
   stay exact. Links are reset when `Memory::epoch` has moved since they
-  were made (checked at each `run`; the epoch cannot move inside one),
-  and on `invalidate`. Computed jumps (RET, BR, BLR) return to the
-  dispatcher.
+  were made (checked at each `run`), and on `invalidate`. On one host
+  thread the epoch cannot move inside a `run`; with threaded cores
+  another core's system call can move it, and a chained block may then
+  run stale code until its `run` ends (at most `thread::SLICE`
+  instructions): a known gap (ROADMAP, CPU track). Computed jumps (RET,
+  BR, BLR) return to the dispatcher.
+- **Threaded cores**: one `Jit` per guest core (`Jit` is `Send`; each
+  owns its code memory and link cells). Exclusives, LSE atomics,
+  acquire/release and barriers run in the interpreter, whose
+  compare-and-swap and fences hold between host threads.
 - **Encoder** (`x64/asm.rs`): kestrel's own (no dependency), from the
   Intel SDM; `scripts/gen-x64-vectors.py` checks every form it emits
   against llvm-mc (5,359 cases, `x64/asm/vectors.rs`).
@@ -202,19 +226,20 @@ guest address ──page table──► frame offset ──+ arena base──►
 - **Faults.** An access spanning pages goes page by page and stops at the
   first page that is unmapped or lacks the permission, naming its first
   byte; the pages before it keep what a write put there.
-- **For the fast backends:** `compare_exchange8/16/32/64` (guest atomics
-  as host atomics), `translate` (a page's frame and permission) and
-  `epoch` (moves on with every mapping or permission change).
+- **For the fast backends:** `compare_exchange8/16/32/64/128` (guest
+  atomics as host atomics; the 128-bit one is `LOCK CMPXCHG16B` on
+  x86_64 and an LDAXP/STLXP loop on aarch64, as stable Rust has no
+  `AtomicU128`, and a process-wide lock elsewhere), `translate` (a page's
+  frame and permission) and `epoch` (moves on with every mapping or
+  permission change).
 
 Not changed by the arena: svcMapMemory still moves the bytes to the new
 address, and a shared memory object keeps its bytes while unmapped and
 copies them in and out on mapping. The arena allows real sharing (two
 pages, one frame) when a service needs it.
 
-The `CpuBackend` trait still passes `&mut Memory`: the interpreter runs one
-core at a time. The first backend that runs cores on several host threads
-changes it to `&Memory` (each core thread shares one `Memory`); until then
-`kestrel-cpu` is left as it is.
+The `CpuBackend` trait passes `&Memory`: every core's host thread shares
+the one `Memory` (`kestrel_hle::Process::mem` is an `Arc<Memory>`).
 
 ### What the native backend (phase 3) must do with it
 
@@ -276,9 +301,13 @@ phase 3 builds on, and what to check there.
   the same instructions in generated code); LDXR/STXR as a compare-and-swap
   of the value LDXR saw. That misses a store of the same value between the
   two (which should clear the monitor), an accepted approximation for a
-  recompiler; the native backend uses the hardware's monitor. The 128-bit
-  pairs (LDXP/STXP, CASP) need a 128-bit compare-and-swap, which stable
-  Rust lacks (`AtomicU128`): `cmpxchg16b` in generated code.
+  recompiler, and what the interpreter does; the native backend uses the
+  hardware's monitor. The 128-bit pairs (LDXP/STXP, CASP) use
+  `Memory::compare_exchange128`, or `cmpxchg16b` in generated code.
+- One host thread per guest core: `Process::run_threaded` ("Threaded
+  cores" below) takes one backend per core and calls `run` on each from
+  its own host thread with a budget of at most `thread::SLICE`
+  instructions; a recompiler needs nothing more from the OS layer.
 
 ## OS emulation (HLE)
 
@@ -365,11 +394,12 @@ method; the methods live next to the state they change:
 
 ### Scheduling
 
-Every thread runs on one host thread, so runs on the counted clock
-repeat exactly. Guest threads are spread over four virtual cores; each
-core runs its best-priority ready thread, and the cores take turns (the
-native and recompiler backends will run each core on its own host
-thread instead, `PLAN.md` section 3):
+By default every guest thread runs on one host thread, so runs on the
+counted clock repeat exactly: the self-test, unattended runs and the
+differential tester. Guest threads are spread over `thread::CORES` (four)
+virtual cores; each core runs its best-priority ready thread, and the
+cores take turns (with a window or `--threaded`, each core runs on its
+own host thread instead: "Threaded cores" below):
 
 ```
 Process::run
@@ -395,6 +425,52 @@ headless runs repeat; `Clock::Host` is the host's monotonic clock, set by
 switch hands the instruction count and the clock to the incoming thread
 and clears the outgoing thread's exclusive monitor.
 `Process::instructions` counts only executed instructions.
+
+### Threaded cores
+
+`Process::run_threaded` (`kestrel_hle::cores`; `kestrel run` with a
+window unless `--single-thread`, or `--threaded`; `kestrel selftest
+--threaded`) runs each of the `CORES` guest cores on its
+own host thread, with its own `CpuBackend`, on the host's clock, as the
+fast backends will for real time (`PLAN.md` section 3):
+
+```
+core thread k (one per guest core)
+  loop:
+    lock the OS layer
+      the last run ended in an SVC → svc::dispatch with that thread's
+        registers as Process::cpu (as on one host thread), notify idle cores
+      interrupted, out of budget, or another core stopped → stop
+      wake due sleepers and timed-out waits, hid_tick, vsync_tick
+      pick the best ready thread of core k (priority, then turn) that no
+        other core runs; none → wait on the condition variable until
+        another core changes the threads or the next wake-up (≤ 10 ms),
+        or stop if nothing can ever run (exited, or a deadlock)
+    unlock
+    backend.run(thread's registers, &mem, ≤ SLICE instructions), no lock
+```
+
+- **One lock for the OS layer.** Kernel objects, the handle table, the
+  scheduler, synchronisation, IPC and services sit behind one mutex that
+  a system call and every look at the scheduler take. Calls from
+  different cores are serialised, so the OS layer is safe to call from
+  every core with no locks of its own, and the system calls are the same
+  code on both schedulers (`Process` is `Send`; outside a call no thread
+  is current, `thread::NO_THREAD`). Guest code runs without it. Finer
+  locks can follow where a game shows contention.
+- **Guest words the kernel changes.** Other cores change mutex and
+  arbitration words with their own atomics while the kernel looks, so the
+  kernel's read-then-write changes are compare-and-swaps (`sync.rs`).
+- **Latency.** A core sees a newly ready thread of better priority, a
+  thread moved to it, sleepers, timeouts, hid samples and vsync at its
+  next call or within `SLICE` (19,200) instructions.
+- **Stopping.** The first stop on any core wins; the other cores finish
+  their slice. The registers kept are those of the thread that stopped
+  the process.
+
+Programs whose output depends on doing something within a span of real
+time (hbdisplay, hbinput: `kestrel_testsuite::HOST_SPEED`) need a host
+that keeps up; the others give the same output as on one host thread.
 
 Planned: the remaining system services behind sm:, which will also
 bring buffer transfers and shared memory.

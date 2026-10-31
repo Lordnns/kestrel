@@ -5,8 +5,7 @@
 
 use kestrel_hle::display::{Frame, Screen};
 use kestrel_hle::input::{button, Controller, Pad, Source};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 /// hid samples the controller every 5 ms of guest time, 200 a second.
 const SAMPLES_PER_SECOND: f64 = 200.0;
@@ -72,13 +71,13 @@ impl Source for Scripted {
 /// A screen that keeps the last frame, passing every frame on to `inner`
 /// (the window's screen) when there is one.
 pub struct Keep {
-    pub last: Rc<RefCell<Option<Frame>>>,
+    pub last: Arc<Mutex<Option<Frame>>>,
     pub inner: Option<Box<dyn Screen>>,
 }
 
 impl Screen for Keep {
     fn present(&mut self, frame: &Frame) {
-        *self.last.borrow_mut() = Some(frame.clone());
+        *self.last.lock().unwrap() = Some(frame.clone());
         if let Some(s) = self.inner.as_mut() {
             s.present(frame);
         }

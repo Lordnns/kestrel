@@ -39,7 +39,7 @@ pub struct Case {
 
 /// Run one case on `backend` (one step) and describe every mismatch.
 pub(crate) fn run_on(case: &Case, backend: &mut dyn CpuBackend) -> Vec<String> {
-    let (mut s, mut m) = setup(&[]);
+    let (mut s, m) = setup(&[]);
     let code_base = PC - 0x80;
     m.poke_bytes(code_base, &CODE).unwrap();
     m.poke_bytes(PC, &case.insn.to_le_bytes()).unwrap();
@@ -50,11 +50,17 @@ pub(crate) fn run_on(case: &Case, backend: &mut dyn CpuBackend) -> Vec<String> {
     s.v = V;
     s.flags = Flags::from_nzcv((case.nzcv_in as u64) << 28);
     s.exclusive_addr = case.excl_in;
+    // A monitor set before the case was set by a load-exclusive that read
+    // what memory holds there now: the value the store-exclusive's
+    // compare-and-swap expects.
+    if let Some(a) = case.excl_in {
+        s.exclusive_value = m.read128(a).unwrap_or(0);
+    }
     s.fpcr = FPCR;
     s.fpsr = FPSR;
     s.tpidr_el0 = TPIDR;
     s.tpidrro_el0 = TPIDRRO;
-    let exit = backend.run(&mut s, &mut m, 1);
+    let exit = backend.run(&mut s, &m, 1);
     if exit != Exit::StepLimit {
         return vec![format!("stopped with {exit:?}")];
     }

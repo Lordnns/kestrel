@@ -160,22 +160,22 @@ fn budgets_are_exact_with_chained_blocks() {
 
 #[test]
 fn code_written_again_is_translated_again() {
-    let (mut s, mut m) = setup(&[0xd280_0020, BRK]); // mov x0, #1
+    let (mut s, m) = setup(&[0xd280_0020, BRK]); // mov x0, #1
     let mut jit = Jit::new().unwrap();
-    assert_eq!(jit.run(&mut s, &mut m, 10), Exit::Breakpoint(0));
+    assert_eq!(jit.run(&mut s, &m, 10), Exit::Breakpoint(0));
     assert_eq!(s.x[0], 1);
     // Through a permission change, which moves the memory's change count.
     assert!(m.protect(CODE, Perm::RW));
     m.write32(CODE, 0xd280_0040).unwrap(); // mov x0, #2
     assert!(m.protect(CODE, Perm::RX));
     s.pc = CODE;
-    assert_eq!(jit.run(&mut s, &mut m, 10), Exit::Breakpoint(0));
+    assert_eq!(jit.run(&mut s, &m, 10), Exit::Breakpoint(0));
     assert_eq!(s.x[0], 2);
     // Written behind the page table's back: the OS layer says so.
     m.poke_bytes(CODE, &0xd280_0020u32.to_le_bytes()).unwrap();
     jit.invalidate(CODE, 4);
     s.pc = CODE;
-    assert_eq!(jit.run(&mut s, &mut m, 10), Exit::Breakpoint(0));
+    assert_eq!(jit.run(&mut s, &m, 10), Exit::Breakpoint(0));
     assert_eq!(s.x[0], 1);
 }
 
@@ -190,14 +190,14 @@ fn an_access_crossing_into_a_page_elsewhere_in_the_arena_is_whole() {
     // page mapped in between takes the frame after the first.
     let (a, b) = (0x40_0000, 0x40_1000);
     for abi in [Abi::SysV, Abi::Win64] {
-        let (mut s, mut m) = setup(&words);
+        let (mut s, m) = setup(&words);
         m.map(a, 0x1000, Perm::RW, "a").unwrap();
         m.map(0x50_0000, 0x1000, Perm::RW, "between").unwrap();
         m.map(b, 0x1000, Perm::RW, "b").unwrap();
         m.write64(0x50_0000, 0x5555_5555_5555_5555).unwrap();
         s.x[0] = 0x1122_3344_5566_7788;
         s.x[3] = b - 4;
-        let exit = Jit::with_abi(abi).unwrap().run(&mut s, &mut m, 10);
+        let exit = Jit::with_abi(abi).unwrap().run(&mut s, &m, 10);
         assert_eq!(exit, Exit::Breakpoint(0));
         assert_eq!(s.x[5], 0x1122_3344_5566_7788, "{abi:?}");
         assert_eq!(m.read32(b).unwrap(), 0x1122_3344, "{abi:?}");

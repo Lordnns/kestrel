@@ -30,8 +30,7 @@ use crate::ipc::{self, command_type, domain_kind, Reply, Request};
 use crate::kernel::{Kind, Object, ObjectId};
 use crate::svc::result;
 use crate::Process;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Longest port name read, with its NUL: kestrel's choice, as long as the
 /// longest name a service can have (8 bytes) with room to spare.
@@ -177,7 +176,35 @@ impl Interface {
 
 /// A domain's objects, object ID n at n - 1. Sessions cloned from a
 /// domain session share its domain.
-pub type Domain = Rc<RefCell<Vec<Option<Interface>>>>;
+#[derive(Clone, Debug, Default)]
+pub struct Domain(Arc<Mutex<Vec<Option<Interface>>>>);
+
+impl Domain {
+    fn new(objects: Vec<Option<Interface>>) -> Self {
+        Domain(Arc::new(Mutex::new(objects)))
+    }
+
+    /// The domain's objects. Only the kernel uses them, under its lock,
+    /// so this lock is never contended.
+    fn objects(&self) -> MutexGuard<'_, Vec<Option<Interface>>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The sessions sharing the domain.
+    fn sessions(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+/// Domains are equal when they hold the same objects, as before they were
+/// shared between host threads.
+impl PartialEq for Domain {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || *self.objects() == *other.objects()
+    }
+}
+
+impl Eq for Domain {}
 
 /// A client session: the kernel object a session handle names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -490,7 +517,7 @@ impl Process {
                 } else {
                     // ConvertCurrentObjectToDomain: the session's object
                     // becomes object 1, kestrel's choice of ID.
-                    let domain = Rc::new(RefCell::new(vec![Some(session.object)]));
+                    let domain = Domain::new(vec![Some(session.object)]);
                     self.session(id).domain = Some(domain);
                     ipc::cmif_reply(&Reply::ok(1u32.to_le_bytes().to_vec()), None).map_err(stop)?
                 }
@@ -526,7 +553,7 @@ impl Process {
         let d = ipc::domain_request(req).map_err(IpcError::Stop)?;
         let slot = d.object_id.checked_sub(1).map(|i| i as usize);
         let domain = self.session(id).domain.clone().expect("a domain");
-        let mut domain = domain.borrow_mut();
+        let mut domain = domain.objects();
         let Some(object) = slot.and_then(|i| domain.get(i).copied().flatten()) else {
             return Err(IpcError::Stop(format!(
                 "a request to domain object {}, which does not exist",
@@ -572,7 +599,7 @@ impl Process {
         for object in out.objects {
             if in_domain {
                 let domain = self.session(call.session).domain.clone().expect("a domain");
-                let mut domain = domain.borrow_mut();
+                let mut domain = domain.objects();
                 let free = domain.iter().position(Option::is_none);
                 let i = free.unwrap_or_else(|| {
                     domain.push(None);
@@ -640,8 +667,9 @@ impl Process {
     /// session of a domain, every object in the domain.
     pub(crate) fn session_released(&mut self, session: Session) {
         match session.domain {
-            Some(d) if Rc::strong_count(&d) == 1 => {
-                for object in d.take().into_iter().flatten() {
+            Some(d) if d.sessions() == 1 => {
+                let all = std::mem::take(&mut *d.objects());
+                for object in all.into_iter().flatten() {
                     self.interface_released(object);
                 }
             }
@@ -1856,18 +1884,18 @@ mod tests {
     }
 
     /// Frames a test's screen was shown.
-    struct Keep(Rc<RefCell<Vec<crate::display::Frame>>>);
+    struct Keep(Arc<Mutex<Vec<crate::display::Frame>>>);
 
     impl crate::display::Screen for Keep {
         fn present(&mut self, frame: &crate::display::Frame) {
-            self.0.borrow_mut().push(frame.clone());
+            self.0.lock().unwrap().push(frame.clone());
         }
     }
 
     #[test]
     fn vi_shows_the_frames_a_layer_queues_and_frees_them_at_vsync() {
         let mut p = setup();
-        let frames = Rc::new(RefCell::new(Vec::new()));
+        let frames = Arc::new(Mutex::new(Vec::new()));
         p.screen = Some(Box::new(Keep(frames.clone())));
         // viInitialize asks for vi:m, then vi:s, then vi:u.
         let h = sm(&mut p);
@@ -2005,7 +2033,7 @@ mod tests {
             u32s(&transact(&mut p, 7, &queue).unwrap()),
             [32, 8, 0, 1, 0]
         );
-        let shown = frames.borrow().last().cloned().unwrap();
+        let shown = frames.lock().unwrap().last().cloned().unwrap();
         assert_eq!((shown.width, shown.height), (32, 8));
         let lit: Vec<usize> = (0..256).filter(|&i| shown.pixels[i] != 0).collect();
         assert_eq!(lit, vec![5 * 32 + 3]);
@@ -2026,7 +2054,7 @@ mod tests {
         // The wake-up wrote the result and the index.
         assert_eq!((p.cpu.x[0], p.cpu.x[1]), (0, 0));
         assert_eq!(p.now(), vi::VSYNC_PERIOD);
-        assert_eq!(frames.borrow().len(), 2);
+        assert_eq!(frames.lock().unwrap().len(), 2);
         // Freed oldest first; CANCEL_BUFFER frees a dequeued buffer.
         assert_eq!(dequeue(&mut p).unwrap()[0], 0);
         let mut cancel = words(&[0]);
@@ -2665,7 +2693,8 @@ mod tests {
             .iter()
             .all(|&b| b == 0));
         assert!(p.log.is_empty());
-        // Activated, but only Handheld supported: refused, noted once.
+        // Activated, nothing supported yet: not connected, but not refused
+        // either, as the next call may set what the program supports.
         let hid = open(&mut p, b"hid");
         let aruid = PROCESS_ID.to_le_bytes();
         let mut rev = 5u64.to_le_bytes().to_vec();
@@ -2674,6 +2703,9 @@ mod tests {
             send(&mut p, hid, &request(true, &[], None, 109, &rev)),
             Ok(0)
         );
+        sample(&mut p);
+        assert!(p.log.is_empty(), "{:?}", p.log);
+        // Only Handheld supported: refused, noted once.
         let mut styles = 2u64.to_le_bytes().to_vec();
         styles.extend(aruid);
         assert_eq!(

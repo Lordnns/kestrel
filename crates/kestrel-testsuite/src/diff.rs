@@ -106,7 +106,7 @@ impl CpuBackend for Recorder {
         self.inner.name()
     }
 
-    fn run(&mut self, state: &mut CpuState, mem: &mut kestrel_core::Memory, max: u64) -> Exit {
+    fn run(&mut self, state: &mut CpuState, mem: &kestrel_core::Memory, max: u64) -> Exit {
         let exit = self.inner.run(state, mem, max);
         if let Exit::Svc(n) = exit {
             let mut args = [0; 8];
@@ -406,8 +406,7 @@ pub fn diff_case(
 mod tests {
     use super::*;
     use kestrel_cpu::interp::Interpreter;
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     fn interp() -> Box<dyn CpuBackend> {
         Box::new(Interpreter::new())
@@ -441,7 +440,7 @@ mod tests {
         bug: Bug,
         nth: u64,
         seen: u64,
-        struck: Rc<Cell<Option<(u64, u64)>>>,
+        struck: Arc<Mutex<Option<(u64, u64)>>>,
     }
 
     impl CpuBackend for Faulty {
@@ -449,7 +448,7 @@ mod tests {
             "faulty"
         }
 
-        fn run(&mut self, s: &mut CpuState, m: &mut kestrel_core::Memory, max: u64) -> Exit {
+        fn run(&mut self, s: &mut CpuState, m: &kestrel_core::Memory, max: u64) -> Exit {
             for _ in 0..max {
                 let (pc, at) = (s.pc, s.retired);
                 let insn = m.fetch32(pc).unwrap_or(0);
@@ -469,8 +468,9 @@ mod tests {
                     .wrapping_add((insn as u64 >> 10 & 0xfff) * 8);
                 let exit = self.inner.run(s, m, 1);
                 if strike {
-                    if self.struck.get().is_none() {
-                        self.struck.set(Some((at, pc)));
+                    let mut struck = self.struck.lock().unwrap();
+                    if struck.is_none() {
+                        *struck = Some((at, pc));
                     }
                     match self.bug {
                         Bug::AddResult => s.x[(insn & 31) as usize] ^= 1,
@@ -493,7 +493,7 @@ mod tests {
     /// Diff `name` against an interpreter with `bug` at its `nth`
     /// occurrence; returns the divergence and where the bug struck.
     fn find(name: &str, bug: Bug, nth: u64) -> (Divergence, (u64, u64)) {
-        let struck = Rc::new(Cell::new(None));
+        let struck = Arc::new(Mutex::new(None));
         let s = struck.clone();
         let faulty = move || -> Box<dyn CpuBackend> {
             Box::new(Faulty {
@@ -506,7 +506,8 @@ mod tests {
         };
         let report = diff_case(case(name), &interp, &faulty).unwrap();
         let d = report.divergence.expect("the bug should be found");
-        (d, struck.get().expect("the bug should strike"))
+        let at = *struck.lock().unwrap();
+        (d, at.expect("the bug should strike"))
     }
 
     #[test]

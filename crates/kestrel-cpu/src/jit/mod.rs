@@ -41,7 +41,7 @@ const CODE_SIZE: usize = 64 << 20;
 /// What generated code and its helpers share with the dispatcher.
 pub struct JitCtx {
     state: *mut CpuState,
-    mem: *mut Memory,
+    mem: *const Memory,
     /// Set by a helper whose guest access faulted, with the fault.
     faulted: u8,
     fault: Option<MemFault>,
@@ -338,19 +338,26 @@ impl Jit {
     }
 }
 
+// SAFETY: a `Jit` is moved to the host thread of the guest core it runs
+// (`kestrel_hle::cores`) and used only there. Its raw pointers point into
+// memory it owns (its code memory and its link cells), never into another
+// thread's; generated code reaches guest memory only through the shared
+// `Memory`, which is `Sync`.
+unsafe impl Send for Jit {}
+
 impl CpuBackend for Jit {
     fn name(&self) -> &'static str {
         "jit"
     }
 
-    fn run(&mut self, state: &mut CpuState, mem: &mut Memory, max_steps: u64) -> Exit {
+    fn run(&mut self, state: &mut CpuState, mem: &Memory, max_steps: u64) -> Exit {
         let start = state.retired;
         if self.mem_id != mem as *const Memory as usize {
             self.flush();
             self.mem_id = mem as *const Memory as usize;
         }
         let state: *mut CpuState = state;
-        let mem: *mut Memory = mem;
+        let mem: *const Memory = mem;
         // SAFETY: as below.
         let epoch = unsafe { (*mem).epoch() };
         if epoch != self.link_epoch {
@@ -479,7 +486,7 @@ unsafe fn write(ctx: *mut JitCtx, addr: u64, v: u64, size: u32) {
 unsafe fn interp(ctx: *mut JitCtx, pc: u64, insn: u32) -> u64 {
     let ctx = &mut *ctx;
     let s = &mut *ctx.state;
-    let m = &mut *ctx.mem;
+    let m = &*ctx.mem;
     let r = execute(&mut Ctx { s, m, pc, insn });
     let s = &mut *ctx.state;
     match r {

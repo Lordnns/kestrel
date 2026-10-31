@@ -126,8 +126,11 @@ pub struct CpuState {
     /// Thread pointer registers (TLS).
     pub tpidr_el0: u64,
     pub tpidrro_el0: u64,
-    /// Exclusive monitor for LDXR/STXR.
+    /// Exclusive monitor for LDXR/STXR: the address a load-exclusive read
+    /// and the value it read (two registers' worth for LDXP), which the
+    /// store-exclusive's compare-and-swap expects to find.
     pub exclusive_addr: Option<u64>,
+    pub exclusive_value: u128,
     /// Instructions retired.
     pub retired: u64,
     /// The system counter's time source.

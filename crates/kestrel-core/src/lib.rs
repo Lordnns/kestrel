@@ -4,6 +4,7 @@
 //! x86_64 and aarch64 hosts.
 
 pub mod arena;
+mod atomic128;
 mod host;
 pub mod memory;
 

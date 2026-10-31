@@ -10,8 +10,7 @@ use kestrel_cpu::{create_backend, BackendKind};
 use kestrel_hle::display::{Frame, Screen};
 use kestrel_hle::input::{button, Controller, Pad, Source, STICK_MAX};
 use kestrel_hle::{Process, Stop};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub mod diff;
@@ -78,12 +77,12 @@ pub fn crc32(data: &[u8]) -> u32 {
 /// The frames a program shows, as lines the self-test adds to its output:
 /// each frame's size and the CRC-32 of its pixels as little-endian
 /// 0x00RRGGBB words (modelled in scripts/gen-expected.py).
-struct FrameLog(Rc<RefCell<Vec<String>>>);
+struct FrameLog(Arc<Mutex<Vec<String>>>);
 
 impl Screen for FrameLog {
     fn present(&mut self, frame: &Frame) {
         let bytes: Vec<u8> = frame.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
-        let mut log = self.0.borrow_mut();
+        let mut log = self.0.lock().unwrap();
         let line = format!(
             "frame {}: {}x{}, crc32 {:#010x}",
             log.len() + 1,
@@ -251,7 +250,7 @@ impl Outcome {
 pub(crate) struct Prepared {
     pub proc: Process,
     pub sd: Option<std::path::PathBuf>,
-    pub frames: Rc<RefCell<Vec<String>>>,
+    pub frames: Arc<Mutex<Vec<String>>>,
 }
 
 impl Prepared {
@@ -276,7 +275,7 @@ impl Prepared {
             sd = Some(dir);
         }
         proc.input = case.input.map(|make| make());
-        let frames = Rc::new(RefCell::new(Vec::new()));
+        let frames = Arc::new(Mutex::new(Vec::new()));
         proc.screen = Some(Box::new(FrameLog(frames.clone())));
         Ok(Prepared { proc, sd, frames })
     }
@@ -284,7 +283,7 @@ impl Prepared {
     /// The program's debug output followed by its frame lines.
     pub(crate) fn output(&self) -> String {
         let mut output = self.proc.debug_output_str();
-        for line in self.frames.borrow().iter() {
+        for line in self.frames.lock().unwrap().iter() {
             output.push_str(line);
             output.push('\n');
         }
@@ -302,10 +301,39 @@ impl Drop for Prepared {
 
 /// Load and run one case on the requested backend.
 pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
+    run(case, backend, false)
+}
+
+/// Cases whose output, in real time (`run_case_threaded`), depends on the
+/// host keeping up: hbdisplay queues two buffers and expects both still
+/// pending less than one 60 Hz vsync (16.7 ms) later; hbinput prints the
+/// newest controller state and expects it still the newest less than one
+/// 5 ms hid sample later. Both hold on a host running natively with time
+/// to spare, not under an emulator such as qemu, and not on the
+/// recompiler, whose cores each translate the program's code as it first
+/// runs it, in real time.
+pub const HOST_SPEED: &[&str] = &["hbdisplay", "hbinput"];
+
+/// Run one case with each guest core on its own host thread and the
+/// host's clock (`Process::run_threaded`), as a game runs in real time.
+/// Runs do not repeat exactly; a case passes when its output does not
+/// depend on how the cores interleave, as a console program's must not.
+pub fn run_case_threaded(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
+    run(case, backend, true)
+}
+
+fn run(case: &Case, backend: BackendKind, threaded: bool) -> Result<Outcome, String> {
     let mut p = Prepared::new(case, "")?;
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
-    let stop = p.proc.run(cpu.as_mut(), MAX_STEPS);
+    let stop = if threaded {
+        let cores = (0..kestrel_hle::thread::CORES)
+            .map(|_| create_backend(backend).map(|(b, _)| b))
+            .collect::<Result<_, _>>()?;
+        p.proc.run_threaded(cores, MAX_STEPS)
+    } else {
+        p.proc.run(cpu.as_mut(), MAX_STEPS)
+    };
     let elapsed = t0.elapsed();
     let output = p.output();
     Ok(Outcome {

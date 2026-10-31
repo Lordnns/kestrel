@@ -37,13 +37,13 @@ const BRK: u32 = 0xd4200000;
 
 /// Run one case and describe every mismatch.
 fn run(case: &Case) -> Vec<String> {
-    let (mut s, mut m) = setup(&[case.insn, BRK]);
+    let (mut s, m) = setup(&[case.insn, BRK]);
     s.v = V;
     s.x[..4].copy_from_slice(&X);
     s.fpcr = case.fpcr;
     s.flags = Flags::from_nzcv((case.nzcv_in as u64) << 28);
     m.write_bytes(MEM_BASE, &MEM).unwrap();
-    let exit = Interpreter::new().run(&mut s, &mut m, 10);
+    let exit = Interpreter::new().run(&mut s, &m, 10);
     if exit != Exit::Breakpoint(0) {
         return vec![format!("stopped with {exit:?}")];
     }
@@ -254,9 +254,9 @@ fn alternative_half_precision_and_undefined_encodings_are_reported() {
         (0x0e216820, "fcvtn v0.4h, v1.4s"),
         (0x4e217820, "fcvtl2 v0.4s, v1.8h"),
     ] {
-        let (mut s, mut m) = setup(&[insn]);
+        let (mut s, m) = setup(&[insn]);
         s.fpcr = 1 << 26;
-        let exit = Interpreter::new().run(&mut s, &mut m, 1);
+        let exit = Interpreter::new().run(&mut s, &m, 1);
         let want = Exit::Unsupported {
             pc: s.pc,
             insn,
@@ -271,8 +271,8 @@ fn alternative_half_precision_and_undefined_encodings_are_reported() {
         (0x4e684820, "aese with size 01"),
         (0xce628020, "sha512h q0, q1, v2.2d"),
     ] {
-        let (mut s, mut m) = setup(&[insn]);
-        let exit = Interpreter::new().run(&mut s, &mut m, 1);
+        let (mut s, m) = setup(&[insn]);
+        let exit = Interpreter::new().run(&mut s, &m, 1);
         assert_eq!(exit, Exit::Undefined { pc: s.pc, insn }, "{asm}");
     }
 }

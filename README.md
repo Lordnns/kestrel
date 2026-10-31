@@ -48,6 +48,12 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
   priorities, cores, sleep and yield on a deterministic scheduler), and
   synchronisation: waiting on events and threads, mutexes, condition
   variables and address arbitration, with deadlock reports.
+- **Threaded cores**: with a window (or `--threaded`), each of the four
+  guest cores runs on its own host thread, in real time, so a program's
+  threads run in parallel as on the console; guest atomics and
+  exclusives hold between host threads, and the OS layer is safe to call
+  from every core. Without a window the deterministic scheduler stays
+  the default, so the self-test and unattended runs repeat exactly.
 - **IPC**: the message format (CMIF, CMIF domains and TIPC), named
   ports, client sessions, svcSendSyncRequest and the service manager sm:,
   with unknown services and commands reported by name.
@@ -75,7 +81,11 @@ signed div/mod = 97 99
 ```
 
 Add `--stats` to see the instruction count and speed; `kestrel selftest`
-reports speed for the whole suite.
+reports speed for the whole suite. `--threaded` runs each guest core on
+its own host thread in real time (runs then do not repeat exactly), as a
+window always does unless `--single-thread`, and `kestrel selftest
+--threaded --repeat 20` runs every test program that way twenty times,
+to look for races on your machine.
 
 ### The SD card
 
@@ -91,6 +101,8 @@ differently are refused. Games can be run from any folder.
 ### The window and controls
 
 A homebrew program opens a window (`--headless` runs it without one).
+In a window it runs in real time with each guest core on its own host
+thread (`--single-thread` keeps every core on one host thread).
 The window shows what the program draws into its framebuffer (there is
 no GPU yet, so programs that render with it show nothing), and takes
 your keyboard and gamepads and gives them to the program as a Switch

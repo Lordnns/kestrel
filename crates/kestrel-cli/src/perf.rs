@@ -3,19 +3,18 @@
 //! up to 120 frames a second (`PLAN.md` section 1).
 
 use kestrel_hle::display::{Frame, Screen};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Passes frames on and records the host time each was shown.
 pub struct Timed {
-    pub times: Rc<RefCell<Vec<Instant>>>,
+    pub times: Arc<Mutex<Vec<Instant>>>,
     pub inner: Option<Box<dyn Screen>>,
 }
 
 impl Screen for Timed {
     fn present(&mut self, frame: &Frame) {
-        self.times.borrow_mut().push(Instant::now());
+        self.times.lock().unwrap().push(Instant::now());
         if let Some(inner) = &mut self.inner {
             inner.present(frame);
         }

@@ -26,7 +26,7 @@ pub struct Frame {
 }
 
 /// Where frames go: the window, or a test that keeps them.
-pub trait Screen {
+pub trait Screen: Send {
     fn present(&mut self, frame: &Frame);
 }
 

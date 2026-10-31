@@ -78,7 +78,7 @@ pub enum Controller {
 
 /// Where hid gets the controller's state each time it samples it. `sample`
 /// is hid's sample count, from 0, so a script can depend on it.
-pub trait Source {
+pub trait Source: Send {
     fn controller(&self) -> Controller;
     fn sample(&mut self, sample: u64) -> Pad;
 }
