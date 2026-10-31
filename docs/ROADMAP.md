@@ -1023,8 +1023,8 @@ The CPU gaps the owner chose to close before phase 3 are closed on branch
 `claude/bold-euler-pjl3cr` (2026-10-31, "CPU gaps before phase 3": a unit
 test for every instruction, half precision, the dot product, the crypto
 extension, then CRC32 and CASP), waiting for review; once merged, a
-release tag runs CI on it, including the new `gen-int-vectors.py
---check`. CPU features left for the owner to decide: LDAPR (FEAT_LRCPC),
+manual CI run or a release tag checks it on every platform, including
+the new `gen-int-vectors.py --check`. CPU features left for the owner to decide: LDAPR (FEAT_LRCPC),
 the non-hint pointer authentication instructions (PACIA, AUTIA, RETAA,
 LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as undefined; they
 are later or optional features, to check against the Cortex-A78C's
