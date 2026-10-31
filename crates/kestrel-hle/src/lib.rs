@@ -8,6 +8,7 @@
 //! Switchbrew's "SVC" page). Behaviour is implemented from that public
 //! documentation and from observing homebrew, never from console firmware.
 
+pub mod cores;
 pub mod display;
 pub mod homebrew;
 pub mod input;

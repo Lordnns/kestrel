@@ -36,6 +36,9 @@ use kestrel_cpu::{Clock, CpuState};
 /// (`PLAN.md` section 3); the tests and expected output that check core 4
 /// is refused change with it.
 pub const CORES: u32 = 4;
+/// `Scheduler::current` while no thread is in a system call, when guest
+/// cores run on host threads (`crate::cores`).
+pub(crate) const NO_THREAD: usize = usize::MAX;
 /// The main thread's core, and the one ProcessorId -2 picks. Kestrel's
 /// choice.
 pub const DEFAULT_CORE: u32 = 0;
@@ -104,8 +107,11 @@ pub struct Thread {
     pub wait: Option<Wait>,
     /// svcCancelSynchronization came while the thread was not waiting.
     pub cancelled: bool,
+    /// A guest core on a host thread is running it (`crate::cores`): its
+    /// registers are with that core, not in `cpu`.
+    pub running: bool,
     /// Turn order among threads of equal priority on a core.
-    turn: u64,
+    pub(crate) turn: u64,
 }
 
 /// Every thread of the process.
@@ -264,6 +270,7 @@ impl Process {
             object,
             wait: None,
             cancelled: false,
+            running: false,
             turn,
         });
         Ok(h)
@@ -482,16 +489,18 @@ impl Process {
 
     /// Drop exited threads no handle names, other than the running one.
     fn reap(&mut self) {
-        let current = self.sched.threads[self.sched.current].id;
+        let current = self.sched.threads.get(self.sched.current).map(|t| t.id);
         self.sched
             .threads
-            .retain(|t| t.id == current || t.object.is_some() || t.state != State::Exited);
-        self.sched.current = self
-            .sched
-            .threads
-            .iter()
-            .position(|t| t.id == current)
-            .expect("the running thread is kept");
+            .retain(|t| Some(t.id) == current || t.object.is_some() || t.state != State::Exited);
+        if let Some(current) = current {
+            self.sched.current = self
+                .sched
+                .threads
+                .iter()
+                .position(|t| t.id == current)
+                .expect("the running thread is kept");
+        }
     }
 
     /// Make thread `next` the running one.
