@@ -60,11 +60,13 @@ qemu for Linux ARM64.
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 | Phase 2 acceptance | done | the four standard examples (hello-world, read-controls, sdmc, barrier), built from source in the pinned devkitPro container (libnx 4.12.0), run in kestrel with scripted presses, and their last frames read back with libnx's font and checked against their sources (`scripts/build-examples.sh`, `run-examples.sh`, `check-examples.py`): 4/4 on every native CI job (Linux, Windows and macOS, x86_64 and aarch64) on `v0.1.17`, which was all green; every unimplemented call stops with its name and number and is logged |
 
-### Phase 3: Native execution on ARM hosts: **in progress** (memory arena done)
+### Phase 3: Native execution on ARM hosts: **in progress** (memory arena done; the rest waits for the Windows milestone)
 
-Starts on macOS once phase 2's threads and synchronisation are done
-(`PLAN.md` phase 3 priority). The owner had the memory arena refactor done
-first, on Linux (2026-10-30; "Phase 3 notes").
+The owner had the memory arena refactor done first, on Linux (2026-10-30;
+"Phase 3 notes"). Since 2026-10-31 the rest waits for the Windows x86_64
+milestone, and ARM hosts start with the in-process fallback ("Plan
+changes (2026-10-31, the Windows milestone)"). The differential tester
+moved to the CPU track, for the recompiler first.
 
 | Task | Status | Evidence |
 |------|--------|----------|
@@ -149,6 +151,21 @@ The owner's decision of 2026-10-30 to close the CPU gaps before phase 3
 |---------------------|---------|
 | Phase 1A: half precision no longer stops as unsupported "for now"; it is added before phase 3 | `float.rs`, the scalar and NEON floating-point decoders |
 | Phase 1B: the crypto extension, with the dot product, is added before phase 3 rather than when a program needs it | the NEON decoders |
+
+### Plan changes (2026-10-31, the Windows milestone)
+
+The owner's decisions of 2026-10-31. What changed in `PLAN.md` and what
+it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Section 1: the product target is Windows x86_64 only until the Windows milestone (a game the owner owns playable from start to gameplay at full speed on Windows x86_64); the goal is full emulation at up to 120 fps, as soon as possible | the order of all work |
+| Section 3, "Platform priority": the other platforms are frozen, not dropped: existing features keep working and passing CI on all six native targets; new features are built for Windows x86_64, and Linux x86_64 runs them where testing needs it (cloud sessions, lavapipe); on macOS and ARM a new feature compiles and stops with "not yet supported on this platform", never a build error | every new feature from now on; `create_backend(Jit)` off x86_64 |
+| Section 3: two main tracks in parallel, the CPU track (differential tester, then the x86_64 recompiler) and the graphics track (5A then 5B, Vulkan, lavapipe on Linux, real GPUs on Windows); phases 4 and 5 no longer wait for phase 3 | phases 3, 4 and 5; the "Next task" below |
+| Section 3: after the milestone, platforms in this order: macOS ARM, Linux x86_64, Windows ARM, macOS x86_64, Linux ARM; ARM hosts start with phase 3's in-process fallback (guest code run directly, rewriting svc, system and thread registers, x18 and counter reads), because GitHub's macOS ARM runners return HV_UNSUPPORTED from hv_vm_create and its Linux ARM runners have no /dev/kvm; hypervisor backends wait for Mac hardware | phase 3 (its order and first backend) |
+| Section 3's machine table corrected: the owner has no ARM machine; their machines are x86_64 (a Windows PC, a Windows bare-metal server, Debian bare metal, Proxmox) | gameplay testing; ARM hosts tested only on CI |
+| Phase 4 provisions: kestrel's own x86_64 encoder (no new dependency), every encoding checked against llvm-mc; the Windows x64 calling convention first, System V for Linux testing; executable memory never writable and executable at once; an interpreter fallback for anything not translated; integer, branches, loads and stores first, then floating point and NEON through the interpreter's routines where simpler; zero divergences at every step. Acceptance is now Windows x86_64 (and Linux x86_64 for testing) | the recompiler |
+| Phase 5: 5A then 5B in parallel with phase 4 | the graphics track |
 
 ### CPU gaps before phase 3 (owner, 2026-10-30)
 
@@ -995,41 +1012,41 @@ to check.
 
 ## Next task
 
-Phase 2 is accepted (`v0.1.17`, 2026-10-30), the clock follows the
-owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
-window, 52 instructions a tick otherwise), and guest memory is the
-phase 3 arena (2026-10-30, "Phase 3 notes"). Both passed CI on every
-platform (a manual run on the arena's branch, 2026-10-31); a release tag
-is needed only to publish packages. Ask the owner which comes next; the
-candidates:
+The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
+Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
 
-1. Phase 3 on Linux KVM and Windows (the native backend), now that
-   phase 2 is accepted and the arena is done; phase 3 on macOS needs a
-   session on the owner's Mac. Design it for the real-time goal
-   (`PLAN.md` section 1): guest counter reads from kestrel's clock, one
-   host thread per guest core, the arena mapped as `docs/ARCHITECTURE.md`
-   ("Memory") describes.
-2. A licence-notices file in the release packages, which now bundle
-   MIT/Apache crates (winit, softbuffer, gilrs and their dependencies).
-3. More homebrew: run other public homebrew in kestrel and fix what the
-   unimplemented-call log names (`user/logs/unimplemented.log`).
-4. Later input tasks the owner wants (2026-10-30): the other
-   NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
-   players, and real Joy-Con motion, rumble and pairing over their own
-   protocol. A Wii Remote is not a Switch controller type; it can only be
-   mapped as a host gamepad.
+1. The CPU track, in this order:
+   - A. The differential tester, backend-agnostic: the interpreter and
+     another backend side by side on the counted clock, reporting the
+     first divergence (registers, flags, memory writes, system calls);
+     proven with a deliberately faulty interpreter variant.
+   - B. The x86_64 recompiler (phase 4) behind `create_backend(Jit)`: an
+     intermediate representation between the ARM64 decoder and x86_64
+     code generation, blocks cached by guest address and invalidated
+     through the memory's change count, executable memory per OS (never
+     writable and executable at once), the Windows x64 calling
+     convention first and System V for Linux testing, the interpreter as
+     the fallback for anything not translated; integer, branches, loads
+     and stores first, then floating point and NEON. Every step passes
+     the differential tester with zero divergences on every self-test
+     program, and the self-test passes on the Jit backend.
+   - C. Per-backend speed in the self-test output, and a performance
+     measurement for runs (frame times: average, 1% low, worst;
+     instructions per second).
+2. The graphics track: phase 5A, then 5B, on Vulkan (lavapipe on Linux,
+   real GPUs on Windows).
 
-The CPU gaps the owner chose to close before phase 3 are closed on branch
-`claude/bold-euler-pjl3cr` (2026-10-31, "CPU gaps before phase 3": a unit
-test for every instruction, half precision, the dot product, the crypto
-extension, then CRC32 and CASP), waiting for review; once merged, a
-manual CI run or a release tag checks it on every platform, including
-the new `gen-int-vectors.py --check`. CPU features left for the owner to decide: LDAPR (FEAT_LRCPC),
-the non-hint pointer authentication instructions (PACIA, AUTIA, RETAA,
-LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as undefined; they
-are later or optional features, to check against the Cortex-A78C's
-documentation before adding. The hint-space PAC instructions (PACIASP
-and the like) already run as NOP.
+Other candidates, when the owner asks for them: a licence-notices file in
+the release packages (they bundle MIT/Apache crates: winit, softbuffer,
+gilrs and their dependencies); more homebrew, fixing what
+`user/logs/unimplemented.log` names; the later input tasks (other
+NpadStyleTag controllers, several players, real Joy-Con motion, rumble
+and pairing). CPU features left for the owner to decide: LDAPR
+(FEAT_LRCPC), the non-hint pointer authentication instructions (PACIA,
+AUTIA, RETAA, LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as
+undefined; check them against the Cortex-A78C's documentation before
+adding. The hint-space PAC instructions (PACIASP and the like) already
+run as NOP.
 
 Each service so far followed the same steps; keep them:
 
@@ -1217,7 +1234,11 @@ differential tester; the memory arena is done.
 
 ### Order after that
 
-1. Phase 3 on Linux KVM and Windows (phase 2 is accepted).
+1. The Windows x86_64 milestone (the two tracks above, then phase 6 on
+   the owner's Windows machines).
+2. Then the other platforms, in the owner's order: macOS ARM, Linux
+   x86_64, Windows ARM, macOS x86_64, Linux ARM; ARM hosts with phase 3's
+   in-process fallback first.
 
 Owner decisions pending in `PLAN.md` section 7 (strategy, API-level
 graphics, code reuse) do not block any of the above; ask before phase 5.
