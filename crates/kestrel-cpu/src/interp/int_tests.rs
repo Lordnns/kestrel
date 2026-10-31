@@ -50,6 +50,12 @@ fn run(case: &Case) -> Vec<String> {
     s.v = V;
     s.flags = Flags::from_nzcv((case.nzcv_in as u64) << 28);
     s.exclusive_addr = case.excl_in;
+    // A monitor set before the case was set by a load-exclusive that read
+    // what memory holds there now: the value the store-exclusive's
+    // compare-and-swap expects.
+    if let Some(a) = case.excl_in {
+        s.exclusive_value = m.read128(a).unwrap_or(0);
+    }
     s.fpcr = FPCR;
     s.fpsr = FPSR;
     s.tpidr_el0 = TPIDR;

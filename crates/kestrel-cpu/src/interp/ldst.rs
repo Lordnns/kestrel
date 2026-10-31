@@ -4,6 +4,8 @@
 
 use super::bits::*;
 use super::{Ctx, Flow, Step};
+use std::sync::atomic::fence;
+use std::sync::atomic::Ordering::{Acquire, Release, SeqCst};
 
 pub fn exec(c: &mut Ctx) -> Step {
     let i = c.insn;
@@ -225,9 +227,22 @@ fn pair(c: &mut Ctx) -> Step {
 
 /// LDXR/STXR, LDAXR/STLXR, LDAR/STLR, LDXP/STXP, CAS and CASP.
 ///
-/// The interpreter runs one guest thread at a time, so the exclusive monitor
-/// only needs to remember the last LDXR address; a store-exclusive succeeds
-/// if it targets that address. Multi-core scheduling will tighten this.
+/// Guest cores may run on several host threads at once (`PLAN.md` section
+/// 3, "Time and cores"), so these reach memory through the host's
+/// compare-and-swap. The exclusive monitor is the usual one for that: a
+/// load-exclusive remembers the address and the value it read, and the
+/// store-exclusive succeeds if a compare-and-swap from that value
+/// succeeds, so a store by another core or by the kernel in between makes
+/// it fail and the guest retry. Kestrel's choice, as in other emulators
+/// that share one monitor between host threads: a store that writes the
+/// value back unchanged in between does not (Arm allows a monitor to be
+/// cleared by fewer events than a real one, never more). A thread switch
+/// clears the monitor.
+///
+/// Acquire and release map to host fences around the relaxed accesses:
+/// acquire after a load, release before a store, and a full fence after a
+/// plain store-release, so a later load-acquire cannot pass it, as Arm's
+/// release consistency requires.
 fn exclusive(c: &mut Ctx) -> Step {
     let i = c.insn;
     let size = field(i, 31, 30);
@@ -236,6 +251,7 @@ fn exclusive(c: &mut Ctx) -> Step {
     let l = bit(i, 22);
     let o1 = bit(i, 21);
     let rs = field(i, 20, 16);
+    let o0 = bit(i, 15);
     let rt2 = field(i, 14, 10);
     let rn = field(i, 9, 5);
     let rt = field(i, 4, 0);
@@ -247,9 +263,18 @@ fn exclusive(c: &mut Ctx) -> Step {
             if l {
                 let v = load(c, addr, bytes)?;
                 c.s.set_xr(rt, v);
+                if o0 {
+                    fence(Acquire);
+                }
             } else {
                 let v = c.s.xr(rt);
+                if o0 {
+                    fence(Release);
+                }
                 store(c, addr, v, bytes)?;
+                if o0 {
+                    fence(SeqCst);
+                }
             }
         }
         // Single-register exclusive.
@@ -258,63 +283,69 @@ fn exclusive(c: &mut Ctx) -> Step {
                 let v = load(c, addr, bytes)?;
                 c.s.set_xr(rt, v);
                 c.s.exclusive_addr = Some(addr);
-            } else {
-                let ok = c.s.exclusive_addr == Some(addr);
-                if ok {
-                    let v = c.s.xr(rt);
-                    store(c, addr, v, bytes)?;
+                c.s.exclusive_value = u128::from(v);
+                if o0 {
+                    fence(Acquire);
                 }
+            } else {
+                let ok = c.s.exclusive_addr == Some(addr) && {
+                    let (seen, new) = (c.s.exclusive_value as u64, c.s.xr(rt));
+                    swap_if(c, addr, bytes, seen, new)?.is_ok()
+                };
                 c.s.exclusive_addr = None;
                 c.s.set_xr(rs, (!ok) as u64);
             }
         }
         // CASP, CASPA, CASPL, CASPAL (FEAT_LSE): bit 30 picks 32- or 64-bit
-        // registers; Rs and Rt name even-numbered pairs.
+        // registers; Rs and Rt name even-numbered pairs, the first at the
+        // lower address. One compare-and-swap of both.
         (false, true) if size < 2 => {
             if rt2 != 0b11111 || rs & 1 != 0 || rt & 1 != 0 {
                 return Err(c.undef());
             }
-            let bytes = 4u32 << size;
-            let old = [load(c, addr, bytes)?, load(c, addr + bytes as u64, bytes)?];
-            let mask = ones(bytes * 8);
-            if old == [c.s.xr(rs) & mask, c.s.xr(rs + 1) & mask] {
-                let (a, b) = (c.s.xr(rt), c.s.xr(rt + 1));
-                store(c, addr, a, bytes)?;
-                store(c, addr + bytes as u64, b, bytes)?;
-            }
-            c.s.set_xr(rs, old[0]);
-            c.s.set_xr(rs + 1, old[1]);
+            let bits = 32 << size;
+            let pair = |a: u64, b: u64| u128::from(a & ones(bits)) | u128::from(b) << bits;
+            let current = pair(c.s.xr(rs), c.s.xr(rs + 1));
+            let new = pair(c.s.xr(rt), c.s.xr(rt + 1));
+            let old = match swap_pair_if(c, addr, bits * 2, current, new)? {
+                Ok(v) | Err(v) => v,
+            };
+            c.s.set_xr(rs, old as u64 & ones(bits));
+            c.s.set_xr(rs + 1, (old >> bits) as u64);
         }
         // Pair exclusive (sizes 32 and 64 only).
         (false, true) => {
+            let bits = bytes * 8;
             if l {
                 let a = load(c, addr, bytes)?;
                 let b = load(c, addr + bytes as u64, bytes)?;
                 c.s.set_xr(rt, a);
                 c.s.set_xr(rt2, b);
                 c.s.exclusive_addr = Some(addr);
-            } else {
-                let ok = c.s.exclusive_addr == Some(addr);
-                if ok {
-                    let (a, b) = (c.s.xr(rt), c.s.xr(rt2));
-                    store(c, addr, a, bytes)?;
-                    store(c, addr + bytes as u64, b, bytes)?;
+                c.s.exclusive_value = u128::from(a) | u128::from(b) << bits;
+                if o0 {
+                    fence(Acquire);
                 }
+            } else {
+                let ok = c.s.exclusive_addr == Some(addr) && {
+                    let new = u128::from(c.s.xr(rt) & ones(bits)) | u128::from(c.s.xr(rt2)) << bits;
+                    let seen = c.s.exclusive_value;
+                    swap_pair_if(c, addr, bits * 2, seen, new)?.is_ok()
+                };
                 c.s.exclusive_addr = None;
                 c.s.set_xr(rs, (!ok) as u64);
             }
         }
-        // CAS / CASA / CASL / CASAL (single register; CASP not yet).
+        // CAS / CASA / CASL / CASAL (single register).
         (true, true) => {
             if rt2 != 0b11111 {
                 return Err(c.undef());
             }
-            let old = load(c, addr, bytes)?;
-            let mask = ones(bytes * 8);
-            if old == c.s.xr(rs) & mask {
-                let v = c.s.xr(rt);
-                store(c, addr, v, bytes)?;
-            }
+            let current = c.s.xr(rs) & ones(bytes * 8);
+            let new = c.s.xr(rt);
+            let old = match swap_if(c, addr, bytes, current, new)? {
+                Ok(v) | Err(v) => v,
+            };
             c.s.set_xr(rs, old);
         }
     }
@@ -322,6 +353,8 @@ fn exclusive(c: &mut Ctx) -> Step {
 }
 
 /// ARMv8.1 LSE atomics: LDADD, LDCLR, LDEOR, LDSET, LD{S,U}{MAX,MIN}, SWP.
+/// Each is a compare-and-swap loop on the host, so it is atomic between
+/// guest cores on different host threads.
 fn atomic(c: &mut Ctx) -> Step {
     let i = c.insn;
     let bytes = 1u32 << field(i, 31, 30);
@@ -332,36 +365,91 @@ fn atomic(c: &mut Ctx) -> Step {
     let rt = field(i, 4, 0);
     let addr = c.s.xsp(field(i, 9, 5));
     let mask = ones(bits);
-    let old = load(c, addr, bytes)?;
     let val = c.s.xr(rs) & mask;
     let s = |v: u64| sext(v, bits);
-    let new = match (o3, opc) {
-        (false, 0b000) => old.wrapping_add(val),
-        (false, 0b001) => old & !val,
-        (false, 0b010) => old ^ val,
-        (false, 0b011) => old | val,
-        (false, 0b100) => {
-            if s(old) >= s(val) {
-                old
-            } else {
-                val
+    let apply = |old: u64| -> Option<u64> {
+        let new = match (o3, opc) {
+            (false, 0b000) => old.wrapping_add(val),
+            (false, 0b001) => old & !val,
+            (false, 0b010) => old ^ val,
+            (false, 0b011) => old | val,
+            (false, 0b100) => {
+                if s(old) >= s(val) {
+                    old
+                } else {
+                    val
+                }
             }
-        }
-        (false, 0b101) => {
-            if s(old) <= s(val) {
-                old
-            } else {
-                val
+            (false, 0b101) => {
+                if s(old) <= s(val) {
+                    old
+                } else {
+                    val
+                }
             }
+            (false, 0b110) => old.max(val),
+            (false, 0b111) => old.min(val),
+            (true, 0b000) => val,
+            _ => return None,
+        };
+        Some(new & mask)
+    };
+    let mut old = load(c, addr, bytes)?;
+    loop {
+        let new = apply(old).ok_or_else(|| c.undef())?;
+        match swap_if(c, addr, bytes, old, new)? {
+            Ok(_) => break,
+            Err(seen) => old = seen,
         }
-        (false, 0b110) => old.max(val),
-        (false, 0b111) => old.min(val),
-        (true, 0b000) => val,
-        _ => return Err(c.undef()),
-    } & mask;
-    store(c, addr, new, bytes)?;
+    }
     c.s.set_xr(rt, old);
     Ok(Flow::Next)
+}
+
+/// Replace the `bytes`-wide value at `addr` with `new` if it is `current`,
+/// on the host's compare-and-swap: `Ok(current)`, or `Err(seen)` with the
+/// value found. Misaligned addresses fault, as Arm's atomics do.
+fn swap_if(
+    c: &Ctx,
+    addr: u64,
+    bytes: u32,
+    current: u64,
+    new: u64,
+) -> Result<Result<u64, u64>, crate::Exit> {
+    fn widen<T: Into<u64>>(r: Result<T, T>) -> Result<u64, u64> {
+        r.map(Into::into).map_err(Into::into)
+    }
+    let m = c.m;
+    let r = match bytes {
+        1 => m
+            .compare_exchange8(addr, current as u8, new as u8)
+            .map(widen),
+        2 => m
+            .compare_exchange16(addr, current as u16, new as u16)
+            .map(widen),
+        4 => m
+            .compare_exchange32(addr, current as u32, new as u32)
+            .map(widen),
+        _ => m.compare_exchange64(addr, current, new),
+    };
+    r.map_err(|f| c.fault(f))
+}
+
+/// [`swap_if`] for a pair of registers as one `bits`-wide value, 64 or 128.
+fn swap_pair_if(
+    c: &Ctx,
+    addr: u64,
+    bits: u32,
+    current: u128,
+    new: u128,
+) -> Result<Result<u128, u128>, crate::Exit> {
+    if bits == 64 {
+        swap_if(c, addr, 8, current as u64, new as u64)
+            .map(|r| r.map(u128::from).map_err(u128::from))
+    } else {
+        c.m.compare_exchange128(addr, current, new)
+            .map_err(|f| c.fault(f))
+    }
 }
 
 // ---- memory helpers -------------------------------------------------------

@@ -132,6 +132,8 @@ pub(crate) fn execute(c: &mut Ctx) -> Step {
 }
 
 #[cfg(test)]
+mod cores_tests;
+#[cfg(test)]
 mod fp_tests;
 #[cfg(test)]
 mod int_tests;

@@ -45,8 +45,14 @@ pub fn exec(c: &mut Ctx) -> Step {
                 c.s.exclusive_addr = None;
                 Ok(Flow::Next)
             }
-            // DSB, DMB, ISB, SB: one guest thread, nothing to order.
-            (0b0011, 0b100..=0b111) => Ok(Flow::Next),
+            // DSB and DMB order this core's accesses against other cores'
+            // on other host threads: a full host fence. ISB and SB order
+            // nothing another core sees.
+            (0b0011, 0b100 | 0b101) => {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                Ok(Flow::Next)
+            }
+            (0b0011, 0b110 | 0b111) => Ok(Flow::Next),
             // MSR (immediate) PSTATE fields and anything else.
             _ => Err(c.undef()),
         };
