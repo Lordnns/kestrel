@@ -60,14 +60,15 @@ qemu for Linux ARM64.
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 | Phase 2 acceptance | done | the four standard examples (hello-world, read-controls, sdmc, barrier), built from source in the pinned devkitPro container (libnx 4.12.0), run in kestrel with scripted presses, and their last frames read back with libnx's font and checked against their sources (`scripts/build-examples.sh`, `run-examples.sh`, `check-examples.py`): 4/4 on every native CI job (Linux, Windows and macOS, x86_64 and aarch64) on `v0.1.17`, which was all green; every unimplemented call stops with its name and number and is logged |
 
-### Phase 3: Native execution on ARM hosts: **not started**
+### Phase 3: Native execution on ARM hosts: **in progress** (memory arena done)
 
 Starts on macOS once phase 2's threads and synchronisation are done
-(`PLAN.md` phase 3 priority).
+(`PLAN.md` phase 3 priority). The owner had the memory arena refactor done
+first, on Linux (2026-10-30; "Phase 3 notes").
 
 | Task | Status | Evidence |
 |------|--------|----------|
-| Memory arena refactor | not started | `Memory` is a `BTreeMap` of `Vec<u8>` regions |
+| Memory arena refactor | done (2026-10-30; CI green on every platform, manual run 5 on the branch) | `kestrel_core::arena` (one host range, 2 MiB aligned, committed as used), `Memory` as a lock-free two-level page table over it, `Send + Sync`; compare-and-swap, `translate` and `epoch` for the fast backends; the self-test's output unchanged; the hypervisor and recompiler constraints in `docs/ARCHITECTURE.md`, "Memory" |
 | Native backend | not started | `create_backend(Native)` returns "not implemented yet" |
 | Differential tester | not started | none |
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
@@ -830,18 +831,89 @@ Gaps:
   a second instead of 60 (measured on the owner's PC with hello-world).
   The fast backends of phases 3 and 4 close the gap.
 
+### Phase 3 notes
+
+The memory arena refactor (owner's decision, 2026-10-30: do it now, on
+Linux, before phase 3 on macOS; a refactor with no behaviour change,
+designed for the real-time goal: six guest cores on host threads, the
+arena mapped into a hypervisor VM, a recompiler with guard pages).
+
+What was built (`docs/ARCHITECTURE.md`, "Memory", has the design and what
+the native backend and the recompiler must do with it):
+- `kestrel_core::host`: reserve and commit host address space (`mmap` and
+  `mprotect` on Linux and macOS, `VirtualAlloc` on Windows, declared
+  directly, so the core crates still use std only; `std::alloc` on other
+  targets).
+- `kestrel_core::Arena`: guest physical memory, one host range aligned to
+  2 MiB, committed in 2 MiB steps, handed out in 4 KiB frames.
+- `kestrel_core::Memory`: a two-level page table from guest pages to
+  frames, beside the OS layer's regions; every method takes `&self`;
+  accesses take no lock and use host atomics; compare-and-swap,
+  `translate` and `epoch` for the fast backends.
+- Callers did not change, apart from `let mut` bindings the `&self`
+  methods no longer need (one in a `kestrel-cpu` test). `kestrel-cpu` is
+  otherwise untouched: a separate session works on it, and the
+  `CpuBackend` trait moves to `&Memory` with the first threaded backend.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Arena size | 16 GiB of host address space per process (the Switch 2's 12 GiB and room); only what the guest uses is committed. `TOTAL_MEMORY` stays 1 GiB for now |
+| Alignment and commit step | 2 MiB: a multiple of every host page size (4, 16, 64 KiB) and a stage-2 block |
+| Address space | 39 bits (Switchbrew's largest, AddressSpace64Bit); mapping above stops as `MemFault::OutOfRange` |
+| Freed frames | back to a free list, zeroed when handed out again; committed memory is not returned to the host while the process lives |
+| Running out of arena | `MemFault::OutOfMemory`, which the memory calls already turn into their result codes |
+| Guest accesses | relaxed host atomics: aligned ones in one access, unaligned byte by byte, 128 bits as two 64-bit halves |
+| Atomic accesses not aligned to their size | `MemFault::Unaligned` (Arm faults them) |
+| svcMapMemory and shared memory | unchanged: bytes are copied, not shared; the arena allows sharing frames later |
+
+Verified (Linux x86_64 host):
+- The self-test's output is the same as before, line for line (27/27,
+  32,583,559 instructions), and the interpreter is faster: 102 to 110
+  MIPS against 73 to 82 before, alternating runs of both builds (no
+  B-tree search per access).
+- The same self-test, built for aarch64 Linux and run under qemu-user,
+  and built for Windows (x86_64-pc-windows-gnu) and run under Wine:
+  27/27, the same output (only the header naming the host differs). The
+  core crate's tests pass in both, so the `mmap` and `VirtualAlloc` paths
+  ran.
+- `scripts/check-optimised.sh` (every program at `-O3 -march=armv8.2-a`):
+  13/13; the four libnx examples (`build-examples.sh` in the pinned
+  container, `run-examples.sh`): 4/4.
+- Six host threads on one `Memory`: 120,000 compare-and-swap increments
+  all land and no aligned 64-bit value is read torn, 20 runs out of 20.
+  Mutation checks: a compare-and-swap made of a load and a store, an
+  aligned write split in two, and unmapping without freeing frames each
+  fail a test.
+
+CI (manual run of `ci.yml` on the branch, run 5, 2026-10-31,
+https://github.com/Lordnns/kestrel/actions/runs/41149930809):
+all 11 jobs green. The six native jobs (Linux, Windows and macOS, x86_64
+and aarch64) build, test, lint, pass the self-test and the four libnx
+examples, so the arena's host code ran natively: macOS's `mmap` on
+Apple Silicon's 16 KiB pages and on Intel, and Windows' `VirtualAlloc`
+on x86_64 and ARM64. The same run is the first CI check of the clock
+(52 instructions a tick), which this branch builds on.
+
+Not verified (no ARM host with a hypervisor here): the hypervisor and
+recompiler constraints in `docs/ARCHITECTURE.md` are for phases 3 and 4
+to check.
+
 ## Next task
 
-Phase 2 is accepted (`v0.1.17`, 2026-10-30), and the clock follows the
+Phase 2 is accepted (`v0.1.17`, 2026-10-30), the clock follows the
 owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
-window, 52 instructions a tick otherwise). The first release with the
-new clock should be tagged so CI runs the self-test and the examples on
-every platform. Then ask the owner which comes next; the candidates:
+window, 52 instructions a tick otherwise), and guest memory is the
+phase 3 arena (2026-10-30, "Phase 3 notes"). Both passed CI on every
+platform (a manual run on the arena's branch, 2026-10-31); a release tag
+is needed only to publish packages. Ask the owner which comes next; the
+candidates:
 
 1. Phase 3 on Linux KVM and Windows (the native backend), now that
-   phase 2 is accepted; phase 3 on macOS needs a session on the owner's
-   Mac. Design it for the real-time goal (`PLAN.md` section 1): guest
-   counter reads from kestrel's clock, one host thread per guest core.
+   phase 2 is accepted and the arena is done; phase 3 on macOS needs a
+   session on the owner's Mac. Design it for the real-time goal
+   (`PLAN.md` section 1): guest counter reads from kestrel's clock, one
+   host thread per guest core, the arena mapped as `docs/ARCHITECTURE.md`
+   ("Memory") describes.
 2. A licence-notices file in the release packages, which now bundle
    MIT/Apache crates (winit, softbuffer, gilrs and their dependencies).
 3. More homebrew: run other public homebrew in kestrel and fix what the
@@ -1033,8 +1105,8 @@ Gaps:
   next vsync), layer position and size.
 
 Phase 3 on macOS (needs a session on the owner's Mac, since
-Hypervisor.framework is macOS-only): the memory arena refactor, the
-native backend, and the differential tester.
+Hypervisor.framework is macOS-only): the native backend and the
+differential tester; the memory arena is done.
 
 ### Order after that
 

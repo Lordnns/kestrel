@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn neighbours_of_the_same_kind_merge() {
-        let mut m = Memory::new();
+        let m = Memory::new();
         m.map_tagged(LO, 0x2000, Perm::RX, tag(state::CODE), "a")
             .unwrap();
         m.map_tagged(LO + 0x2000, 0x1000, Perm::RX, tag(state::CODE), "b")
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn gaps_are_free_inside_the_address_space_and_inaccessible_outside() {
-        let mut m = Memory::new();
+        let m = Memory::new();
         m.map_tagged(0x20_0000, 0x1000, Perm::RW, tag(state::CODE_DATA), "elf")
             .unwrap();
         m.map_tagged(LO + 0x10000, 0x1000, Perm::RW, tag(state::NORMAL), "x")

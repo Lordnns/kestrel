@@ -627,7 +627,7 @@ mod tests {
     fn a_new_process_reports_the_type_of_each_mapping() {
         use memory::state;
         let base = layout::NRO_BASE;
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map(base, 0x2000, Perm::RX, "text").unwrap();
         mem.map(base + 0x2000, 0x1000, Perm::R, "rodata").unwrap();
         mem.map(base + 0x3000, 0x2000, Perm::RW, "data").unwrap();

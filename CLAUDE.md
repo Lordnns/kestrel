@@ -11,15 +11,20 @@ sessions learned. The plan and the status live elsewhere; read them first:
    and "## Next task". It is the single record of progress; keep it
    current in the same commits as the work, not in this file.
 
-## Where things stand (2026-10-30)
+## Where things stand (2026-10-31)
 
 - Phases 0, 1 and 2 are done. Phase 2 was accepted on `v0.1.17`: the four
   standard libnx examples (hello-world, read-controls, sdmc, barrier)
   pass on all six native CI jobs.
 - The clock follows the owner's decision of 2026-10-30 (`PLAN.md`
   section 3): the host's clock with a window, one tick every 52
-  instructions otherwise. It needs a release tag so CI checks it on
-  every platform.
+  instructions otherwise.
+- Phase 3's memory arena refactor is done (owner's decision of
+  2026-10-30, on Linux before macOS): guest memory is one host arena
+  with a lock-free page table, ready for six cores on host threads, a
+  hypervisor VM and a recompiler (`docs/ARCHITECTURE.md`, "Memory").
+  It and the clock passed CI on all six native jobs (a manual run on
+  the arena's branch, 2026-10-31).
 - The owner has not yet picked the next task. The candidates, from the
   ROADMAP's "Next task":
   1. phase 3 on Linux KVM and Windows (phase 3 on macOS needs a session
@@ -45,7 +50,10 @@ sessions learned. The plan and the status live elsewhere; read them first:
 - CI runs only from the Release workflow on a version tag (`v0.1.x`) or a
   manual run, never on plain pushes. After a push, the owner tags a
   release and reports the run (often as a screenshot). Say when a tag is
-  needed to verify something.
+  needed to verify something. A branch can be checked without a tag:
+  Actions, CI, Run workflow, choose the branch (or `gh workflow run
+  ci.yml --ref <branch>`); the session can follow it with the GitHub
+  tools (`actions_list`, `get_job_logs`).
 - The owner may close a session and start a new one at any point: the
   repository must always say where things stand (ROADMAP "Next task").
 
@@ -143,6 +151,17 @@ Co-Authored-By line from the session's attribution instructions.
 - Finding why a libnx program stops: `--trace --max-steps N` and map the
   last addresses to symbols with `llvm-nm` on the example's `.elf` in
   `target/examples/switch-examples-*/...` (NROs load at 0x8000000).
+- On a Linux cloud machine, other hosts can be run, not only
+  type-checked: `apt-get install qemu-user gcc-aarch64-linux-gnu
+  libc6-dev-arm64-cross wine64 gcc-mingw-w64-x86-64`, `rustup target add
+  aarch64-unknown-linux-gnu x86_64-pc-windows-gnu`, then set
+  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc`,
+  `..._RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"` and
+  `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine`, and use
+  `--no-default-features` for `kestrel-cli`. Docker may need
+  `sudo dockerd &`; if the proxy refuses codeload.github.com, `git clone`
+  switch-examples, fetch the pinned commit, and `git archive` it into
+  `target/examples/switch-examples-<commit>` before `build-examples.sh`.
 
 ## Tooling pitfalls
 
