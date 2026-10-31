@@ -378,7 +378,7 @@ fn emulate(
     if !o.presses.is_empty() {
         proc.input = Some(Box::new(unattended::Scripted(o.presses.clone())));
     }
-    let last_frame = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let last_frame = Arc::new(std::sync::Mutex::new(None));
     if o.save_frame.is_some() {
         proc.screen = Some(Box::new(unattended::Keep {
             last: last_frame.clone(),
@@ -406,7 +406,7 @@ fn emulate(
     let stop = proc.run(backend.as_mut(), max_steps);
     let elapsed = t0.elapsed();
     if let Some(path) = &o.save_frame {
-        match &*last_frame.borrow() {
+        match &*last_frame.lock().unwrap() {
             Some(frame) => std::fs::write(path, unattended::png(frame))
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?,
             None => eprintln!("note: the program showed no frame to save"),

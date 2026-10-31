@@ -10,8 +10,7 @@ use kestrel_cpu::{create_backend, BackendKind};
 use kestrel_hle::display::{Frame, Screen};
 use kestrel_hle::input::{button, Controller, Pad, Source, STICK_MAX};
 use kestrel_hle::{Process, Stop};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct Case {
@@ -76,12 +75,12 @@ pub fn crc32(data: &[u8]) -> u32 {
 /// The frames a program shows, as lines the self-test adds to its output:
 /// each frame's size and the CRC-32 of its pixels as little-endian
 /// 0x00RRGGBB words (modelled in scripts/gen-expected.py).
-struct FrameLog(Rc<RefCell<Vec<String>>>);
+struct FrameLog(Arc<Mutex<Vec<String>>>);
 
 impl Screen for FrameLog {
     fn present(&mut self, frame: &Frame) {
         let bytes: Vec<u8> = frame.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
-        let mut log = self.0.borrow_mut();
+        let mut log = self.0.lock().unwrap();
         let line = format!(
             "frame {}: {}x{}, crc32 {:#010x}",
             log.len() + 1,
@@ -262,7 +261,7 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
         proc.services.fs.sd = Some(sd.clone());
     }
     proc.input = case.input.map(|make| make());
-    let frames = Rc::new(RefCell::new(Vec::new()));
+    let frames = Arc::new(Mutex::new(Vec::new()));
     proc.screen = Some(Box::new(FrameLog(frames.clone())));
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
@@ -272,7 +271,7 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
         let _ = std::fs::remove_dir_all(&sd);
     }
     let mut output = proc.debug_output_str();
-    for line in frames.borrow().iter() {
+    for line in frames.lock().unwrap().iter() {
         output.push_str(line);
         output.push('\n');
     }

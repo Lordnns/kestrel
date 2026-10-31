@@ -26,6 +26,7 @@ pub mod thread;
 use kestrel_core::{Arena, Memory, Perm, DEFAULT_ARENA_SIZE};
 use kestrel_cpu::{CpuBackend, CpuState, Exit};
 use kestrel_loader::Loaded;
+use std::sync::Arc;
 
 /// The process layout: one fixed 39-bit address space ("AddressSpace64Bit"
 /// on Switchbrew's "SVC" page), reported through svcGetInfo. The heap and
@@ -128,7 +129,9 @@ pub enum Stop {
 
 /// One emulated process.
 pub struct Process {
-    pub mem: Memory,
+    /// Guest memory, shared with the guest cores, which use it without
+    /// the kernel's lock when they run on host threads.
+    pub mem: Arc<Memory>,
     /// The running thread's registers.
     pub cpu: CpuState,
     pub handles: kernel::HandleTable,
@@ -185,7 +188,7 @@ impl Process {
         mem.map_tagged(STACK_TOP - STACK_SIZE, STACK_SIZE, Perm::RW, stack, "stack")
             .map_err(|e| e.to_string())?;
         let mut p = Process {
-            mem,
+            mem: Arc::new(mem),
             cpu: CpuState::default(),
             handles: kernel::HandleTable::default(),
             sched: thread::Scheduler::default(),
@@ -225,7 +228,7 @@ impl Process {
     pub fn load(file: &[u8], name: &str, args: &[String]) -> Result<Self, String> {
         let arena = Arena::new(DEFAULT_ARENA_SIZE)
             .map_err(|e| format!("cannot reserve address space for guest memory: {e}"))?;
-        let mut mem = Memory::with_arena(std::sync::Arc::new(arena));
+        let mut mem = Memory::with_arena(Arc::new(arena));
         if kestrel_loader::is_nro(file) {
             let nro = kestrel_loader::load_nro(file, layout::NRO_BASE, &mut mem)
                 .map_err(|e| e.to_string())?;
@@ -336,5 +339,14 @@ impl Process {
 
     pub fn debug_output_str(&self) -> String {
         String::from_utf8_lossy(&self.debug_output).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod send_check {
+    #[test]
+    fn a_process_can_move_between_host_threads() {
+        fn send<T: Send>() {}
+        send::<super::Process>();
     }
 }
