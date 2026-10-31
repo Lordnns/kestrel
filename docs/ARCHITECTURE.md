@@ -70,8 +70,9 @@ owner's Mac; then Linux and Windows.
 
 `crates/kestrel-cpu/src/jit/`, built only on Windows and Linux x86_64
 (`build.rs` sets `jit_host`); elsewhere `create_backend(Jit)` says the
-platform is not supported yet. `--backend jit` selects it; `auto` still
-picks the interpreter until the owner makes the recompiler the default.
+platform is not supported yet. It is what `auto` picks there (the
+owner's decision of 2026-10-31, once CI passed on Windows x86_64);
+`--backend interp` picks the interpreter.
 
 ```
 guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs ─► dispatcher (mod.rs)

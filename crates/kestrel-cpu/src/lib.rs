@@ -5,7 +5,7 @@
 //!
 //! | Host       | Backend today  | Planned fast path                          |
 //! |------------|----------------|--------------------------------------------|
-//! | x86_64     | `interp`, `jit` (Windows, Linux) | `jit`: ARM64 -> x86_64 dynamic recompiler |
+//! | x86_64     | `jit` on Windows and Linux (`auto`), `interp` elsewhere | `jit`: ARM64 -> x86_64 dynamic recompiler |
 //! | aarch64    | `interp`       | `native`: run guest code directly under    |
 //! |            |                | KVM / Hypervisor.framework / WHP           |
 //!
@@ -132,19 +132,22 @@ pub fn create_backend(kind: BackendKind) -> Result<(Box<dyn CpuBackend>, Option<
     match kind {
         BackendKind::Interp => Ok((Box::new(interp::Interpreter::new()), None)),
         BackendKind::Auto => {
-            // The recompiler becomes the default when the owner says so;
-            // until then it is chosen with `--backend jit`.
-            let note = if cfg!(jit_host) {
-                Some("using the interpreter; the x86_64 recompiler is --backend jit".to_string())
-            } else {
-                planned_fast_backend().map(|k| {
+            // The recompiler is the default where it is built (the owner's
+            // decision of 2026-10-31, once CI passed on Windows x86_64).
+            #[cfg(jit_host)]
+            return Ok((Box::new(jit::Jit::new()?), None));
+            #[cfg(not(jit_host))]
+            {
+                let note = planned_fast_backend().map(|k| {
                     format!(
-                        "{k:?} backend for {} is not implemented yet; using the interpreter",
+                        "{k:?} backend is not yet supported on this platform ({} {}); \
+                         using the interpreter",
+                        std::env::consts::OS,
                         kestrel_core::host_arch()
                     )
-                })
-            };
-            Ok((Box::new(interp::Interpreter::new()), note))
+                });
+                Ok((Box::new(interp::Interpreter::new()), note))
+            }
         }
         BackendKind::Native => {
             if cfg!(target_arch = "aarch64") {

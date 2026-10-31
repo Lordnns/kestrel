@@ -38,7 +38,8 @@ sessions learned. The plan and the status live elsewhere; read them first:
   `claude/modest-albattani-tr25g6`): the differential tester (`kestrel
   diff`) and the first x86_64 recompiler (`--backend jit`, Windows and
   Linux x86_64): self-test 27/27, zero divergences, about 5 times the
-  interpreter's speed. `auto` is still the interpreter.
+  interpreter's speed. `auto` picks it on Windows and Linux x86_64
+  (owner, 2026-10-31); `--backend interp` for the interpreter.
 
 ## How the owner works
 

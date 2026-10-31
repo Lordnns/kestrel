@@ -7,7 +7,7 @@ use kestrel_testsuite::{run_case, CASES};
 fn every_guest_program_matches_expected_output() {
     let mut failures = Vec::new();
     for case in CASES {
-        let out = run_case(case, BackendKind::Auto).expect("case should load");
+        let out = run_case(case, BackendKind::Interp).expect("case should load");
         if let Some(why) = out.failure_reason(case) {
             failures.push(format!("{}: {why}", case.name));
         }

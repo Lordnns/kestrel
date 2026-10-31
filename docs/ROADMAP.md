@@ -85,7 +85,7 @@ moved to the CPU track, for the recompiler first.
 | Differential tester | done (2026-10-31) | `kestrel_testsuite::diff`, `kestrel diff`; "Phase 4 notes" |
 | IR between the ARM64 decoder and x86_64 code generation | done | `jit/ir.rs`, `jit/frontend.rs` |
 | kestrel's own x86_64 encoder, checked against llvm-mc | done | `jit/x64/asm.rs`; 5,359 cases from `scripts/gen-x64-vectors.py` |
-| Executable memory per OS, never writable and executable at once | done (Linux run; Windows built and run under Wine, not yet on Windows itself) | `jit/code.rs` |
+| Executable memory per OS, never writable and executable at once | done (Linux; Windows under Wine and natively on `windows-2022`, CI run 9) | `jit/code.rs` |
 | Windows x64 and System V calling conventions | done | both run in the Linux tests |
 | Blocks cached by guest address, checked through the memory's change count | done | `Jit::block`, `Jit::valid` |
 | Interpreter fallback per instruction | done | `Op::Interp` |
@@ -95,7 +95,8 @@ moved to the CPU track, for the recompiler first.
 | Speed: computed-jump lookup in generated code, guest registers in host registers, lazy flags | not started | "Next task" |
 | One host thread per guest core | not started | `PLAN.md` section 3, "Time and cores" |
 | Performance measurement for runs | done (2026-10-31) | `kestrel run --stats`: instructions per second, and frame times (average, 1% low, worst) |
-| Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 in both conventions; CI on Windows x86_64 pending | "Phase 4 notes" |
+| Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 and Windows x86_64 (CI run 9, 2026-10-31); floating point and NEON still go through the interpreter | "Phase 4 notes" |
+| The recompiler as the default | done (owner, 2026-10-31, after CI run 9) | `auto` picks it on Windows and Linux x86_64 |
 
 ### Phases 5 to 7: **not started**
 
@@ -1074,7 +1075,7 @@ cache and dispatcher, the interpreter fallback.
 | Code memory | 64 MiB per backend; when full, every translation is dropped and made again |
 | Self-modifying code | each block keeps its guest words; when `Memory::epoch` moves (a mapping or permission changed) they are fetched and compared before it runs again; blocks on writable and executable pages are compared every time |
 | A backend given another process's memory | drops every translation |
-| The default backend | still the interpreter (`auto`); `--backend jit` selects the recompiler. Making it the default is the owner's call |
+| The default backend | the recompiler where it is built (`auto`; the owner's decision of 2026-10-31, after CI run 9 passed on Windows x86_64); `--backend interp` picks the interpreter, which the self-test also runs |
 
 Verified (Linux x86_64 host, this session):
 - Every one of the 494 integer vectors (`int_vectors.rs`, expected values
@@ -1087,8 +1088,14 @@ Verified (Linux x86_64 host, this session):
 - Windows: the same build for `x86_64-pc-windows-gnu`, run under Wine
   (VirtualAlloc, VirtualProtect, FlushInstructionCache, the Windows
   convention): self-test 27/27 on the recompiler, zero divergences, every
-  recompiler and testsuite test passes. Not yet run on Windows itself;
-  the CI job on `windows-2022` will be the first. (Under Wine an
+  recompiler and testsuite test passes. Then natively: CI run 9 (manual,
+  on the branch, 2026-10-31,
+  https://github.com/Lordnns/kestrel/actions/runs/41161345370), all 11
+  jobs green; on `windows-2022` (MSVC) `cargo test` passes (the
+  recompiler's tests in both conventions included), the self-test passes
+  27/27 on the recompiler at 358.6 MIPS, and `kestrel diff --backend jit`
+  finds zero divergences on all 27 programs; the same on `ubuntu-24.04`.
+  The owner then made the recompiler `auto`'s choice. (Under Wine an
   interpreter test, `fp_tests::flush_to_zero`, fails on a double FMA
   edge case, on the code before this work too: mingw's or Wine's `fma`,
   not kestrel's; CI on Windows with MSVC passes it.)
@@ -1146,10 +1153,8 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      remaining steps, in this order; each must keep the differential
      tester at zero divergences on every self-test program (`kestrel diff
      --backend jit`, and `cargo test`, which runs both conventions):
-     1. Check the first CI run on `windows-2022` (a manual run of
-        `ci.yml` on the branch, or a tag): the recompiler has run on
-        Windows only under Wine so far. Then ask the owner whether
-        `auto` should pick the recompiler on Windows and Linux x86_64.
+     1. Done (2026-10-31): CI run 9 passed on `windows-2022`, and
+        `auto` now picks the recompiler on Windows and Linux x86_64.
      2. Translate what still runs in the interpreter, most frequent
         first (measure with a count per encoding in `jit::interp`):
         LDXR/STXR and the other exclusives (as a host compare-and-swap
