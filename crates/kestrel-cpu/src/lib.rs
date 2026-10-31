@@ -5,7 +5,7 @@
 //!
 //! | Host       | Backend today  | Planned fast path                          |
 //! |------------|----------------|--------------------------------------------|
-//! | x86_64     | `interp`       | `jit`: ARM64 -> x86_64 dynamic recompiler  |
+//! | x86_64     | `interp`, `jit` (Windows, Linux) | `jit`: ARM64 -> x86_64 dynamic recompiler |
 //! | aarch64    | `interp`       | `native`: run guest code directly under    |
 //! |            |                | KVM / Hypervisor.framework / WHP           |
 //!
@@ -132,12 +132,18 @@ pub fn create_backend(kind: BackendKind) -> Result<(Box<dyn CpuBackend>, Option<
     match kind {
         BackendKind::Interp => Ok((Box::new(interp::Interpreter::new()), None)),
         BackendKind::Auto => {
-            let note = planned_fast_backend().map(|k| {
-                format!(
-                    "{k:?} backend for {} is not implemented yet; using the interpreter",
-                    kestrel_core::host_arch()
-                )
-            });
+            // The recompiler becomes the default when the owner says so;
+            // until then it is chosen with `--backend jit`.
+            let note = if cfg!(jit_host) {
+                Some("using the interpreter; the x86_64 recompiler is --backend jit".to_string())
+            } else {
+                planned_fast_backend().map(|k| {
+                    format!(
+                        "{k:?} backend for {} is not implemented yet; using the interpreter",
+                        kestrel_core::host_arch()
+                    )
+                })
+            };
             Ok((Box::new(interp::Interpreter::new()), note))
         }
         BackendKind::Native => {
@@ -151,14 +157,15 @@ pub fn create_backend(kind: BackendKind) -> Result<(Box<dyn CpuBackend>, Option<
             }
         }
         BackendKind::Jit => {
-            if cfg!(target_arch = "x86_64") {
-                Err("JIT backend is planned for x86_64 hosts but not implemented yet".into())
-            } else {
-                Err(format!(
-                    "JIT backend targets x86_64 hosts; this is {}",
-                    kestrel_core::host_arch()
-                ))
-            }
+            #[cfg(jit_host)]
+            return Ok((Box::new(jit::Jit::new()?), None));
+            #[cfg(not(jit_host))]
+            Err(format!(
+                "the JIT backend is not yet supported on this platform ({} {}); \
+                 it runs on Windows and Linux x86_64",
+                std::env::consts::OS,
+                kestrel_core::host_arch()
+            ))
         }
     }
 }

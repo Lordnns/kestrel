@@ -205,6 +205,10 @@ built integer-only, and built with floating point and NEON allowed
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 
+`kestrel selftest --backend jit` runs the same programs on the x86_64
+recompiler (Windows and Linux x86_64; `kestrel info` says whether this
+build has it).
+
 `kestrel diff --backend <name>` is the differential tester: it runs every
 test program (or the ones named after the options) on the interpreter and
 on the named backend side by side, on the counted clock, and reports the

@@ -518,6 +518,33 @@ mod tests {
         }
     }
 
+    /// The recompiler, in both calling conventions, with blocks as long
+    /// as they come and with one instruction each.
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(target_os = "windows", target_os = "linux")
+    ))]
+    #[test]
+    fn the_recompiler_agrees_with_the_interpreter_on_every_case() {
+        use kestrel_cpu::jit::{x64::Abi, Jit};
+        for abi in [Abi::SysV, Abi::Win64] {
+            for max in [64, 1] {
+                let jit = move || -> Box<dyn CpuBackend> {
+                    let mut j = Jit::with_abi(abi).unwrap();
+                    j.set_max_block(max);
+                    Box::new(j)
+                };
+                for c in crate::CASES {
+                    let r = diff_case(c, &interp, &jit).unwrap();
+                    if let Some(d) = r.divergence {
+                        panic!("{} ({abi:?}, blocks of {max}): {d}", c.name);
+                    }
+                    assert_eq!(r.stop, Stop::Exited, "{}", c.name);
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_wrong_register_is_found_at_its_instruction() {
         // Deep enough that the first pass's chunks of 100,000 must be

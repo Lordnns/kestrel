@@ -27,7 +27,8 @@ const USAGE: &str = "\
 kestrel - experimental ARM64 console emulator
 
 USAGE:
-    kestrel selftest [-v]            Run the built-in ARM64 test programs
+    kestrel selftest [-v] [--backend <b>]
+                                     Run the built-in ARM64 test programs
     kestrel diff [--backend <b>] [case...]
                                      Run the test programs on the interpreter
                                      and backend <b> side by side and report
@@ -126,16 +127,25 @@ fn info() {
     println!("host architecture : {}", kestrel_core::host_arch());
     println!("host OS           : {}", std::env::consts::OS);
     println!("portable backend  : interp (available)");
-    match kestrel_cpu::planned_fast_backend() {
-        Some(k) => println!("fast backend      : {k:?} (planned, not implemented yet)"),
-        None => println!("fast backend      : none planned for this host"),
+    match kestrel_cpu::create_backend(BackendKind::Jit) {
+        Ok(_) => println!("fast backend      : jit (x86_64 recompiler; --backend jit)"),
+        Err(e) => match kestrel_cpu::planned_fast_backend() {
+            Some(BackendKind::Jit) | None => println!("fast backend      : none ({e})"),
+            Some(k) => println!("fast backend      : {k:?} (planned, not implemented yet)"),
+        },
     }
 }
 
 fn selftest(args: &[String]) -> Result<ExitCode, String> {
-    let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
-    if let Some(bad) = args.iter().find(|a| *a != "-v" && *a != "--verbose") {
-        return Err(format!("unknown selftest option '{bad}'"));
+    let mut verbose = false;
+    let mut kind = BackendKind::Auto;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-v" | "--verbose" => verbose = true,
+            "--backend" => kind = it.next().ok_or("--backend needs a value")?.parse()?,
+            bad => return Err(format!("unknown selftest option '{bad}'")),
+        }
     }
     let cases = kestrel_testsuite::CASES;
     println!(
@@ -150,7 +160,7 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
     let mut total_time = 0f64;
     let mut backend = "?";
     for case in cases {
-        let out = kestrel_testsuite::run_case(case, BackendKind::Auto)?;
+        let out = kestrel_testsuite::run_case(case, kind)?;
         backend = out.backend;
         total_insns += out.instructions;
         total_time += out.elapsed.as_secs_f64();

@@ -66,12 +66,57 @@ to `kestrel-hle`. Guest memory is already the arena such a VM needs ("Memory"
 below, with what the backend must do with it). macOS comes first, on the
 owner's Mac; then Linux and Windows.
 
-### JIT (x86_64 hosts, planned)
+### JIT (x86_64 recompiler; Windows and Linux)
 
-Translate guest basic blocks to x86_64, cache by guest PC, invalidate on
-writes to code pages (`CpuBackend::invalidate`). Exclusives and memory
-ordering need care because x86 has a stronger memory model than ARM. Guest
-memory accesses go to the arena directly ("Memory" below).
+`crates/kestrel-cpu/src/jit/`, built only on Windows and Linux x86_64
+(`build.rs` sets `jit_host`); elsewhere `create_backend(Jit)` says the
+platform is not supported yet. `--backend jit` selects it; `auto` still
+picks the interpreter until the owner makes the recompiler the default.
+
+```
+guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs ─► dispatcher (mod.rs)
+              (ARM64 decode)  (host-free)   (x86_64 code,  (W^X host  (cache by guest PC,
+                                            x64/asm.rs)    memory)    exact budgets)
+```
+
+- **IR** (`ir.rs`): a block is a list of operations on values set once
+  (constants, guest register reads and writes, integer arithmetic with
+  Arm's AddWithCarry and flags, extensions, conditions, selects, loads
+  and stores, and `Interp`), ending in a terminator (jump, computed jump,
+  conditional branch, SVC, BRK). Nothing in it names a host register or
+  instruction, so another host's code generator can read it.
+- **Frontend** (`frontend.rs`): decodes up to 64 instructions, ending at
+  a branch, mirroring the interpreter's files (the reference): the same
+  order of loads, stores and register writes, so a fault part-way leaves
+  the same state. Anything it does not translate becomes `Op::Interp`,
+  which runs that one instruction in the interpreter from inside the
+  block, so every program runs; branch-group instructions handed over
+  this way end the block.
+- **Code generation** (`x64/mod.rs`): one host function per block,
+  `fn(state, ctx) -> code`, in either calling convention: Windows x64
+  (the product's) or System V. Both run on any x86_64 host, so the Linux
+  tests run the Windows convention too. Guest registers and flags stay in
+  `CpuState` (RBX); IR values get RBP, R13-R15 (callee-saved in both
+  conventions) or stack slots; NZCV come from the host's flags after
+  `adc` (x86's SF, ZF, CF, OF are Arm's N, Z, C, V for AddWithCarry).
+  Memory accesses call helpers (`Memory::read*`/`write*`) for now; a
+  fault stops the block at the faulting instruction.
+- **Encoder** (`x64/asm.rs`): kestrel's own (no dependency), from the
+  Intel SDM; `scripts/gen-x64-vectors.py` checks every form it emits
+  against llvm-mc (5,359 cases, `x64/asm/vectors.rs`).
+- **Executable memory** (`code.rs`): `mmap`/`mprotect` on Linux,
+  `VirtualAlloc`/`VirtualProtect`/`FlushInstructionCache` on Windows;
+  pages are read-write while a block is copied in and read-execute
+  before it runs, never both.
+- **Dispatcher** (`mod.rs`): looks the block up by guest PC and runs it.
+  It keeps the `CpuBackend` contract exactly: a block longer than what is
+  left of the budget is translated again cut to fit (cached separately),
+  so the recompiler retires exactly the instructions the interpreter
+  would, and the scheduler, the counted clock and the differential tester
+  see the same counts. Blocks keep the guest words they were made from;
+  when `Memory::epoch` moves the words are checked again before the block
+  runs, and blocks on writable and executable pages are checked every
+  time.
 
 ### Correctness
 

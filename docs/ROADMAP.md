@@ -78,11 +78,25 @@ moved to the CPU track, for the recompiler first.
 | Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
 | One host thread per guest core (six) | not started | `PLAN.md` section 3, "Time and cores"; the interpreter's scheduler runs every core on one host thread |
 
-### Phases 4 to 7: **not started**
+### Phase 4: x86_64 recompiler: **in progress** (Windows and Linux x86_64)
 
-- Phase 4 x86_64 recompiler: `create_backend(Jit)` returns "not implemented
-  yet"; it runs each guest core on its own host thread, as phase 3 does
-  (`PLAN.md` section 3, "Time and cores").
+| Task | Status | Evidence |
+|------|--------|----------|
+| Differential tester | done (2026-10-31) | `kestrel_testsuite::diff`, `kestrel diff`; "Phase 4 notes" |
+| IR between the ARM64 decoder and x86_64 code generation | done | `jit/ir.rs`, `jit/frontend.rs` |
+| kestrel's own x86_64 encoder, checked against llvm-mc | done | `jit/x64/asm.rs`; 5,359 cases from `scripts/gen-x64-vectors.py` |
+| Executable memory per OS, never writable and executable at once | done (Linux run; Windows built and run under Wine, not yet on Windows itself) | `jit/code.rs` |
+| Windows x64 and System V calling conventions | done | both run in the Linux tests |
+| Blocks cached by guest address, checked through the memory's change count | done | `Jit::block`, `Jit::valid` |
+| Interpreter fallback per instruction | done | `Op::Interp` |
+| Integer, branches, loads and stores translated | done | 99.3% of the self-test's instructions run translated |
+| Floating point and NEON translated | not started | they run through `Op::Interp` |
+| Speed: block chaining, inline memory accesses, register allocation of guest registers | not started | "Next task" |
+| One host thread per guest core | not started | `PLAN.md` section 3, "Time and cores" |
+| Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 in both conventions; CI on Windows x86_64 pending | "Phase 4 notes" |
+
+### Phases 5 to 7: **not started**
+
 - Phase 5 graphics (5A display, 5B Maxwell GPU level, 5C Ampere GPU level,
   5D NVN API level), phase 6 commercial software, phase 7 polish: no code.
 
@@ -1043,6 +1057,50 @@ memory comparison fails the memory test.
 Limit: a wrong value overwritten before the next comparison point (a dead
 flag) leaves no trace in the state and is not reported, since the
 program is not affected; a program that uses it shows it.
+
+The x86_64 recompiler, first steps (2026-10-31; `docs/ARCHITECTURE.md`,
+"JIT", has the design): IR, frontend, code generation in both calling
+conventions, kestrel's own encoder, executable memory per OS, the block
+cache and dispatcher, the interpreter fallback.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Block length | at most 64 instructions, ending at a branch; a block longer than the budget left is translated again cut to fit, so the recompiler retires exactly what the interpreter would |
+| Guest state | registers and NZCV in `CpuState` (memory), read and written by every operation; IR values in RBP, R13-R15 or stack slots |
+| Memory accesses | calls to `Memory::read*`/`write*` (the arena's own checks); inline page-table walks come next |
+| Code memory | 64 MiB per backend; when full, every translation is dropped and made again |
+| Self-modifying code | each block keeps its guest words; when `Memory::epoch` moves (a mapping or permission changed) they are fetched and compared before it runs again; blocks on writable and executable pages are compared every time |
+| A backend given another process's memory | drops every translation |
+| The default backend | still the interpreter (`auto`); `--backend jit` selects the recompiler. Making it the default is the owner's call |
+
+Verified (Linux x86_64 host, this session):
+- Every one of the 494 integer vectors (`int_vectors.rs`, expected values
+  from the Python models) runs as a one-instruction block, in the System V
+  and the Windows convention.
+- The encoder matches llvm-mc on all 5,359 cases.
+- The self-test: 27/27 on `--backend jit`; `kestrel diff --backend jit`:
+  zero divergences on all 27 programs, and the same in `cargo test` in
+  both conventions, with blocks of up to 64 and of 1 instruction.
+- Windows: the same build for `x86_64-pc-windows-gnu`, run under Wine
+  (VirtualAlloc, VirtualProtect, FlushInstructionCache, the Windows
+  convention): self-test 27/27 on the recompiler, zero divergences, every
+  recompiler and testsuite test passes. Not yet run on Windows itself;
+  the CI job on `windows-2022` will be the first. (Under Wine an
+  interpreter test, `fp_tests::flush_to_zero`, fails on a double FMA
+  edge case, on the code before this work too: mingw's or Wine's `fma`,
+  not kestrel's; CI on Windows with MSVC passes it.)
+- Mutation check: setting C from the host's carry inverted makes `kestrel
+  diff` report `cmp x0, #2` in algos and `cmp x12, #7` in hbthreads as
+  the first divergence, with NZCV named.
+- Speed (self-test, Linux x86_64 cloud machine, one run each): 254 MIPS
+  on the recompiler against 62 on the interpreter. Straight-line code
+  gains most: sha256 527 MIPS (14.6 instructions a block), bigint 592;
+  branchy code less: algos 268 (5.2 a block), hbthreads 182 (3.7),
+  where returning to the dispatcher after every block dominates.
+- What still runs in the interpreter: 0.7% of the self-test's
+  instructions (223,459 of 32,583,559): exclusives (LDXR/STXR in the
+  thread programs' spin loops), CLZ/REV/RBIT, system registers, floating
+  point and NEON.
 
 ## Next task
 
