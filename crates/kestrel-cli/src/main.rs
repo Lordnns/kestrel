@@ -2,6 +2,7 @@
 
 #[cfg(feature = "window")]
 mod input_config;
+mod perf;
 mod unattended;
 #[cfg(feature = "window")]
 mod window;
@@ -43,7 +44,9 @@ RUN OPTIONS:
                                          or none with a window)
     --trace                              Print every executed instruction
     --regs                               Dump registers when the program stops
-    --stats                              Print instruction count and speed
+    --stats                              Print instruction count and speed,
+                                         and frame times (average, 1% low,
+                                         worst) when the program shows frames
     --sd <folder>                        The folder that is the SD card
                                          (default: user/sdmc next to kestrel)
     --headless                           No window for a homebrew NRO; the
@@ -191,7 +194,46 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
         "{passed}/{} passed  ({total_insns} guest instructions, {mips:.1} MIPS on the {backend} backend)",
         cases.len()
     );
-    Ok(if passed == cases.len() {
+    // Without --backend, the other backends this build has run the same
+    // programs too, so the report shows each one's speed (and a fast
+    // backend that fails fails the self-test).
+    let mut all_passed = passed == cases.len();
+    if kind == BackendKind::Auto {
+        let others: Vec<BackendKind> = [BackendKind::Interp, BackendKind::Jit, BackendKind::Native]
+            .into_iter()
+            .filter(|&k| create_backend(k).is_ok_and(|(b, _)| b.name() != backend))
+            .collect();
+        if !others.is_empty() {
+            println!();
+            println!("Speed by backend (the same programs):");
+            println!(
+                "  {backend:<7} {passed:>2}/{}  {mips:>7.1} MIPS",
+                cases.len()
+            );
+        }
+        for k in others {
+            let (mut ok, mut insns, mut time, mut name) = (0, 0u64, 0f64, "?");
+            for case in cases {
+                let out = kestrel_testsuite::run_case(case, k)?;
+                name = out.backend;
+                insns += out.instructions;
+                time += out.elapsed.as_secs_f64();
+                if out.passed {
+                    ok += 1;
+                } else {
+                    println!(
+                        "  FAIL  {} on {name}: {}",
+                        case.name,
+                        out.failure_reason(case).unwrap_or_default()
+                    );
+                }
+            }
+            all_passed &= ok == cases.len();
+            let mips = insns as f64 / time.max(1e-9) / 1e6;
+            println!("  {name:<7} {ok:>2}/{}  {mips:>7.1} MIPS", cases.len());
+        }
+    }
+    Ok(if all_passed {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
@@ -459,6 +501,13 @@ fn emulate(
             inner: proc.screen.take(),
         }));
     }
+    let frame_times = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    if o.stats {
+        proc.screen = Some(Box::new(perf::Timed {
+            times: frame_times.clone(),
+            inner: proc.screen.take(),
+        }));
+    }
     let max_steps = o
         .max_steps
         .unwrap_or(if windowed { u64::MAX } else { 10_000_000_000 });
@@ -499,6 +548,9 @@ fn emulate(
             proc.svc_count,
             elapsed.as_secs_f64()
         );
+        if let Some(summary) = perf::Summary::of(&frame_times.borrow()) {
+            eprintln!("[{}] {}", backend.name(), summary.describe());
+        }
     }
     match stop {
         Stop::Exited => Ok(ExitCode::SUCCESS),

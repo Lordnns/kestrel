@@ -207,7 +207,11 @@ built integer-only, and built with floating point and NEON allowed
 
 `kestrel selftest --backend jit` runs the same programs on the x86_64
 recompiler (Windows and Linux x86_64; `kestrel info` says whether this
-build has it).
+build has it). Without `--backend`, the self-test also runs the programs
+on every other backend the build has and ends with each one's speed.
+`kestrel run --stats` adds frame times for a program that shows frames:
+the average, the 1% low (the 99th-percentile frame time) and the worst,
+as host time between frames.
 
 `kestrel diff --backend <name>` is the differential tester: it runs every
 test program (or the ones named after the options) on the interpreter and

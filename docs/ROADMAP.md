@@ -74,7 +74,7 @@ moved to the CPU track, for the recompiler first.
 | Native backend | not started | `create_backend(Native)` returns "not implemented yet" |
 | Differential tester | done (2026-10-31, CPU track) | `kestrel_testsuite::diff`, `kestrel diff --backend <b>`; "Phase 4 notes" |
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
-| Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
+| Per-backend speed in self-test | done (2026-10-31) | `kestrel selftest` runs every backend the build has and prints each one's MIPS; `--backend` picks one |
 | Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
 | One host thread per guest core (six) | not started | `PLAN.md` section 3, "Time and cores"; the interpreter's scheduler runs every core on one host thread |
 
@@ -94,6 +94,7 @@ moved to the CPU track, for the recompiler first.
 | Speed: block chaining, inline memory accesses | done | "Phase 4 notes" |
 | Speed: computed-jump lookup in generated code, guest registers in host registers, lazy flags | not started | "Next task" |
 | One host thread per guest core | not started | `PLAN.md` section 3, "Time and cores" |
+| Performance measurement for runs | done (2026-10-31) | `kestrel run --stats`: instructions per second, and frame times (average, 1% low, worst) |
 | Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 in both conventions; CI on Windows x86_64 pending | "Phase 4 notes" |
 
 ### Phases 5 to 7: **not started**
@@ -1111,6 +1112,14 @@ Verified (Linux x86_64 host, this session):
   through `invalidate`). Mutation checks: dropping the chained jump's
   budget check, or the inline walk's page-crossing check, each fails a
   test.
+- The four libnx examples (built in the pinned container, run by
+  `run-examples.sh` with `--backend jit`): 4/4. hello-world headless on
+  the counted clock with `--stats`, 503 million instructions and 243
+  frames: interpreter 51 MIPS, 25.3 fps average, 1% low 14.1 fps, worst
+  75.8 ms; recompiler 207 MIPS, 103.6 fps, 1% low 75.6 fps, worst
+  22.7 ms (the console redraws every frame through the libnx console,
+  so this is mostly guest code; the fps is host time between frames,
+  not the console's 60 Hz pacing, which only a window's host clock has).
 - What still runs in the interpreter: 0.7% of the self-test's
   instructions (223,459 of 32,583,559): exclusives (LDXR/STXR in the
   thread programs' spin loops), CLZ/REV/RBIT, system registers, floating
@@ -1127,19 +1136,52 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      on the counted clock, reporting the first divergence (registers,
      flags, memory writes, system calls); proven with a deliberately
      faulty interpreter variant.
-   - B. The x86_64 recompiler (phase 4) behind `create_backend(Jit)`: an
-     intermediate representation between the ARM64 decoder and x86_64
-     code generation, blocks cached by guest address and invalidated
-     through the memory's change count, executable memory per OS (never
-     writable and executable at once), the Windows x64 calling
-     convention first and System V for Linux testing, the interpreter as
-     the fallback for anything not translated; integer, branches, loads
-     and stores first, then floating point and NEON. Every step passes
-     the differential tester with zero divergences on every self-test
-     program, and the self-test passes on the Jit backend.
-   - C. Per-backend speed in the self-test output, and a performance
-     measurement for runs (frame times: average, 1% low, worst;
-     instructions per second).
+   - B. The x86_64 recompiler (phase 4) behind `create_backend(Jit)`.
+     Done (2026-10-31, "Phase 4 notes"): the IR, the frontend, kestrel's
+     encoder checked against llvm-mc, code generation in the Windows x64
+     and System V conventions, executable memory per OS, the block cache
+     with the memory's change count, the interpreter fallback, integer,
+     branches, loads and stores, chaining and inline memory accesses;
+     self-test 27/27 and zero divergences in both conventions. The
+     remaining steps, in this order; each must keep the differential
+     tester at zero divergences on every self-test program (`kestrel diff
+     --backend jit`, and `cargo test`, which runs both conventions):
+     1. Check the first CI run on `windows-2022` (a manual run of
+        `ci.yml` on the branch, or a tag): the recompiler has run on
+        Windows only under Wine so far. Then ask the owner whether
+        `auto` should pick the recompiler on Windows and Linux x86_64.
+     2. Translate what still runs in the interpreter, most frequent
+        first (measure with a count per encoding in `jit::interp`):
+        LDXR/STXR and the other exclusives (as a host compare-and-swap
+        of the value LDXR saw, `docs/ARCHITECTURE.md`, "Memory"), CLZ,
+        REV, RBIT, MRS/MSR of TPIDR_EL0, NZCV, FPCR and FPSR; counter
+        reads need the retired count flushed first, as `Op::Interp`
+        does.
+     3. Floating point and NEON: first as calls to the interpreter's own
+        routines (`float.rs`, the NEON lane helpers) with operands in
+        `CpuState::v`, so results stay identical on every host; then
+        host SSE where the Arm rules allow (round-to-nearest arithmetic
+        on finite values, with the NaN and flush-to-zero handling of
+        `float.rs` around it).
+     4. Speed: computed jumps (RET, BR, BLR) looked up in generated code
+        (a return-address stack or a small PC-indexed table) instead of
+        returning to the dispatcher; guest registers kept in host
+        registers inside a block and written back at exits and calls;
+        NZCV only computed when read or at a block's exit (lazy flags).
+        Measure with `kestrel selftest` (three runs) and `kestrel run
+        --stats` on the libnx examples.
+     5. One host thread per guest core (`PLAN.md` section 3, "Time and
+        cores"), once the parallel session's thread-safe OS layer is in:
+        one `Jit` per core or a shared, locked cache; the link cells
+        assume the memory's change count cannot move inside one `run`,
+        which another core breaks, so links must then be checked or
+        reset when the OS layer changes mappings.
+     6. `kestrel diff` on any program (an NRO path, not only the
+        self-test's), to run the libnx examples and later homebrew side
+        by side.
+   - C. Done (2026-10-31): per-backend speed in the self-test output,
+     and `kestrel run --stats` with frame times (average, 1% low, worst)
+     and instructions per second.
 2. The graphics track: phase 5A, then 5B, on Vulkan (lavapipe on Linux,
    real GPUs on Windows).
 
