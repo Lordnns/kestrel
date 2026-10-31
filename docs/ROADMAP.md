@@ -1211,7 +1211,7 @@ cache and dispatcher, the interpreter fallback.
 | Block length | at most 64 instructions, ending at a branch; a block longer than the budget left is translated again cut to fit, so the recompiler retires exactly what the interpreter would |
 | Guest state | registers and NZCV in `CpuState` (memory), read and written by every operation; IR values in RBP, R13-R15 or stack slots |
 | Memory accesses | an inline page-table walk (`Memory::raw_tables`) and a direct arena access; the `Memory` helper for anything unmapped, not permitted, crossing a page or beyond the table |
-| Chaining | blocks with at most 24 stack slots share one frame and jump into each other's bodies through link cells (data, not patched code); a chained jump needs room for 64 instructions in the budget, else the block returns to the dispatcher; links reset when the memory's change count moved and on `invalidate`; computed jumps always return to the dispatcher |
+| Chaining | blocks with at most 24 stack slots share one frame and jump into each other's bodies through link cells (data, not patched code); a chained jump needs room for 64 instructions in the budget, else the block returns to the dispatcher; a chained jump is taken only while the memory's change count is the one its links were made at (another core may move it), and the dispatcher resets every link when it moved and on `invalidate`; computed jumps always return to the dispatcher |
 | Code memory | 64 MiB per backend; when full, every translation is dropped and made again |
 | Self-modifying code | each block keeps its guest words; when `Memory::epoch` moves (a mapping or permission changed) they are fetched and compared before it runs again; blocks on writable and executable pages are compared every time |
 | A backend given another process's memory | drops every translation |
@@ -1316,12 +1316,11 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         Measure with `kestrel selftest` (three runs) and `kestrel run
         --stats` on the libnx examples.
      5. One host thread per guest core: done with the threaded cores
-        (one `Jit` per core). Left: the link cells assume the memory's
-        change count cannot move inside one `run`, which another core's
-        system call can now do, so a chained block may run stale code
-        for up to the rest of its slice (19,200 instructions) after
-        another core changes a mapping under it; check or reset links
-        when the OS layer changes mappings. And each core translates its
+        (one `Jit` per core). Chained jumps check the memory's change
+        count (done 2026-10-31: another core's mapping change used to
+        leave a chained block running stale code for the rest of its
+        slice; a test with two host threads now covers it, and dropping
+        the check fails it). Left: each core translates its
         own copy of the code (a shared cache would save the time and
         memory). When exclusives are translated (step 2), keep them a
         compare-and-swap of the value LDXR saw, as the interpreter's.

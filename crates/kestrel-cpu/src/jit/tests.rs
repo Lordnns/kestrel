@@ -204,3 +204,28 @@ fn an_access_crossing_into_a_page_elsewhere_in_the_arena_is_whole() {
         assert_eq!(m.read64(0x50_0000).unwrap(), 0x5555_5555_5555_5555);
     }
 }
+
+#[test]
+fn a_chained_loop_sees_code_another_core_rewrote() {
+    // One core spins in a block chained to itself; another rewrites the
+    // block's code and then maps a page elsewhere, which moves the
+    // memory's change count, as a system call on another core does. The
+    // spinning core must leave the chain, check the code again and stop
+    // at the BRK, well before its budget runs out.
+    let (mut s, m) = setup(&[0x1400_0000]); // b .
+    let m = std::sync::Arc::new(m);
+    let other = {
+        let m = m.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            m.poke_bytes(CODE, &BRK.to_le_bytes()).unwrap();
+            m.map(0x60_0000, 0x1000, Perm::RW, "elsewhere").unwrap();
+        })
+    };
+    let exit = Jit::new().unwrap().run(&mut s, &m, 5_000_000_000);
+    other.join().unwrap();
+    assert_eq!((exit, s.pc), (Exit::Breakpoint(0), CODE));
+    // Soon after the change, not when the budget ran low (a chain that
+    // ignores the change count stops only then, after 5 billion).
+    assert!(s.retired < 1_000_000_000, "{} instructions", s.retired);
+}

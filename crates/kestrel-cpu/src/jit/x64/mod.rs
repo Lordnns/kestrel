@@ -99,6 +99,8 @@ pub struct Layout {
     /// for a whole block below, and where the last exit's link cell goes.
     pub limit: i32,
     pub link: i32,
+    /// In the context: the memory's change count the links were made at.
+    pub link_epoch: i32,
 }
 
 /// Stack slots every block's frame has room for, so a block can jump
@@ -891,7 +893,10 @@ impl Gen<'_> {
     /// A chained exit through the link cell whose address is in R8: jump
     /// to the code the cell names (the next block's body, or the unlinked
     /// stub, which records the cell), unless the budget has less than a
-    /// whole block left, which the dispatcher then handles exactly.
+    /// whole block left, which the dispatcher then handles exactly, or the
+    /// memory's change count moved since the links were made (another
+    /// core changed a mapping), after which the dispatcher checks the
+    /// next block's code again.
     fn chain(&mut self) {
         let retired = self.st(self.l.retired);
         self.a.load(W64, RAX, retired);
@@ -899,8 +904,13 @@ impl Gen<'_> {
             .alu_ri(Alu::Add, W64, RAX, super::frontend::MAX_INSNS as i32);
         self.a.alu_rm(Alu::Cmp, W64, RAX, M(CTX, self.l.limit));
         let back = self.a.jcc(Cc::A);
+        self.a.mov_ri(RAX, self.tables.epoch);
+        self.a.load(W64, RAX, M(RAX, 0));
+        self.a.alu_rm(Alu::Cmp, W64, RAX, M(CTX, self.l.link_epoch));
+        let moved = self.a.jcc(Cc::Ne);
         self.a.jmp_m(M(R8, 0));
         self.a.bind(back);
+        self.a.bind(moved);
         self.a.mov_ri(RAX, RET_JUMP);
     }
 }

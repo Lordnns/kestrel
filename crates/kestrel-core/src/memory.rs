@@ -166,6 +166,9 @@ const TOP_ENTRIES: usize = 1 << (ADDRESS_BITS - PAGE_BITS - LEAF_BITS);
 pub struct RawTables {
     pub top: u64,
     pub arena: u64,
+    /// Where [`Memory::epoch`]'s count is: a `u64` generated code may read
+    /// (atomically, as any aligned 8-byte load on the hosts it runs on).
+    pub epoch: u64,
 }
 
 pub const TABLE_TOP_SHIFT: u32 = PAGE_BITS + LEAF_BITS;
@@ -518,6 +521,7 @@ impl Memory {
         RawTables {
             top: self.table.top.as_ptr() as u64,
             arena: self.arena.ptr(0) as u64,
+            epoch: self.epoch.as_ptr() as u64,
         }
     }
 

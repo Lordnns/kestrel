@@ -52,6 +52,9 @@ pub struct JitCtx {
     /// The link cell of the last chained exit taken, for the dispatcher to
     /// link; 0 after other exits.
     link: usize,
+    /// The memory's change count the links were made at: a chained jump
+    /// is taken only while the count is still this.
+    link_epoch: u64,
 }
 
 /// Link cells are handed out from chunks of this many.
@@ -125,9 +128,10 @@ pub struct Jit {
     cells_used: usize,
     /// Cells pointing at a block, to reset when links must go.
     linked: Vec<*mut usize>,
-    /// The memory's change count the links were made at. Within one
-    /// `run` it cannot move (only the OS layer maps memory, between
-    /// runs), so a linked block stays valid while it is the same.
+    /// The memory's change count the links were made at. Another guest
+    /// core's system call can move it at any time (`kestrel_hle::cores`),
+    /// so generated code compares it before every chained jump, and the
+    /// dispatcher resets the links when it has moved.
     link_epoch: u64,
     pub stats: Stats,
 }
@@ -159,6 +163,7 @@ impl Jit {
             v: flags + std::mem::offset_of!(crate::Flags, v) as i32,
             faulted: std::mem::offset_of!(JitCtx, faulted) as i32,
             limit: std::mem::offset_of!(JitCtx, limit) as i32,
+            link_epoch: std::mem::offset_of!(JitCtx, link_epoch) as i32,
             link: std::mem::offset_of!(JitCtx, link) as i32,
         };
         let mut jit = Jit {
@@ -358,12 +363,6 @@ impl CpuBackend for Jit {
         }
         let state: *mut CpuState = state;
         let mem: *const Memory = mem;
-        // SAFETY: as below.
-        let epoch = unsafe { (*mem).epoch() };
-        if epoch != self.link_epoch {
-            self.unlink_all();
-            self.link_epoch = epoch;
-        }
         let mut ctx = JitCtx {
             state,
             mem,
@@ -372,6 +371,7 @@ impl CpuBackend for Jit {
             exit: None,
             limit: start.saturating_add(max_steps),
             link: 0,
+            link_epoch: self.link_epoch,
         };
         loop {
             // SAFETY: generated code and helpers touch the state and memory
@@ -379,6 +379,15 @@ impl CpuBackend for Jit {
             let (pc, used) = unsafe { ((*state).pc, (*state).retired - start) };
             if used >= max_steps {
                 return Exit::StepLimit;
+            }
+            // A mapping or permission changed since the links were made
+            // (here, or on another core): they may lead to stale code.
+            let epoch = unsafe { (*mem).epoch() };
+            if epoch != self.link_epoch {
+                self.unlink_all();
+                self.link_epoch = epoch;
+                ctx.link_epoch = epoch;
+                ctx.link = 0;
             }
             let (entry, body) = match self.block(unsafe { &*mem }, pc, max_steps - used) {
                 Ok(b) => b,
