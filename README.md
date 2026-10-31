@@ -281,7 +281,8 @@ The plan of record, with its rules and acceptance criteria, is
    applet and input setup services are done): time, filesystem and the
    other first OS services, from public documentation.
 2. `native` backend on aarch64 hosts, starting on macOS, developed alongside
-   the OS services; then a `jit` backend on x86_64.
+   the OS services; then a `jit` backend on x86_64. Both run on the guest
+   memory arena, which is done.
 3. Graphics at two levels: GPU emulation with shader translation to Vulkan
    for any software, and graphics-API-level translation for commercial games.
 4. Running software owners have legally obtained, tested locally only.

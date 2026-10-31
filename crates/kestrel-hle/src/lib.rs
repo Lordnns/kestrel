@@ -62,7 +62,8 @@ pub mod layout {
     pub const LOADER_RETURN: u64 = 0x7c_0000_0000;
 
     /// Memory the process may use (svcGetInfo TotalMemorySize). Kept
-    /// small while guest memory is backed by ordinary host allocations.
+    /// at 1 GiB for now; the guest memory arena has room for more
+    /// (`kestrel_core::DEFAULT_ARENA_SIZE`).
     pub const TOTAL_MEMORY: u64 = 0x4000_0000;
     /// The program ID reported for every program: "kestrel" in ASCII, so it
     /// cannot be mistaken for a real title.

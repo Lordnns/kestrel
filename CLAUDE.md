@@ -20,6 +20,12 @@ sessions learned. The plan and the status live elsewhere; read them first:
   section 3): the host's clock with a window, one tick every 52
   instructions otherwise. It needs a release tag so CI checks it on
   every platform.
+- Phase 3's memory arena refactor is done (owner's decision of
+  2026-10-30, on Linux before macOS): guest memory is one host arena
+  with a lock-free page table, ready for six cores on host threads, a
+  hypervisor VM and a recompiler (`docs/ARCHITECTURE.md`, "Memory"). It
+  too needs a release tag: its macOS and Windows code ran only in
+  cargo check, qemu and Wine here.
 - The owner has not yet picked the next task. The candidates, from the
   ROADMAP's "Next task":
   1. phase 3 on Linux KVM and Windows (phase 3 on macOS needs a session
@@ -143,6 +149,17 @@ Co-Authored-By line from the session's attribution instructions.
 - Finding why a libnx program stops: `--trace --max-steps N` and map the
   last addresses to symbols with `llvm-nm` on the example's `.elf` in
   `target/examples/switch-examples-*/...` (NROs load at 0x8000000).
+- On a Linux cloud machine, other hosts can be run, not only
+  type-checked: `apt-get install qemu-user gcc-aarch64-linux-gnu
+  libc6-dev-arm64-cross wine64 gcc-mingw-w64-x86-64`, `rustup target add
+  aarch64-unknown-linux-gnu x86_64-pc-windows-gnu`, then set
+  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc`,
+  `..._RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"` and
+  `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine`, and use
+  `--no-default-features` for `kestrel-cli`. Docker may need
+  `sudo dockerd &`; if the proxy refuses codeload.github.com, `git clone`
+  switch-examples, fetch the pinned commit, and `git archive` it into
+  `target/examples/switch-examples-<commit>` before `build-examples.sh`.
 
 ## Tooling pitfalls
 
