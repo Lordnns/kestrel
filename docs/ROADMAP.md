@@ -161,7 +161,7 @@ which has half precision, the dot product and the crypto extension.
 |------|--------|----------|
 | 1. A unit test for every implemented instruction | done | `scripts/gen-int-vectors.py` writes `interp/int_vectors.rs`: 478 one-instruction cases (data processing immediate and register, branches, system registers and hints, single, SIMD-register, pair and literal loads and stores, exclusives, acquire/release, CAS, the LSE atomics, FMOV to and from general registers), run by `interp/int_tests.rs`; with the NEON vectors, every interpreter line except undefined-encoding paths runs under `cargo test -p kestrel-cpu` (measured with `-C instrument-coverage`) |
 | 2. Half precision (FP16) | done | `Fmt::H` in `float.rs`, computed exactly in integers (every rounding mode, FPCR.FZ16); the scalar floating-point group with `ftype` 11 (arithmetic, FMA, compares, selects, FMOV, round-to-integral, conversions to and from single, double and integers), the FP16 three-same and two-register-misc groups (vector and scalar), across lanes, scalar pairwise, by element, fixed-point conversion, FMOV (vector), FCVTN/FCVTL to and from half; 240 cases in `neon_vectors.rs` (groups `fp16_same`, `fp16_misc`, `fp16_other`, `fp16_scalar`) |
-| 3. DotProd (SDOT, UDOT) | not started | undefined |
+| 3. DotProd (SDOT, UDOT) | done | vector (three same extra, opcode 0010) and by element (opcode 1110, index H:L), 2S and 4S, in `neon/int.rs`; 11 cases in `neon_vectors.rs` (group `dot`); flipping the signedness fails all 11 |
 | 4. Crypto (AES, SHA1, SHA2, 64-bit PMULL) | not started | undefined |
 
 How the integer vectors work: each case is one instruction at
@@ -199,6 +199,11 @@ fails 4 and 1 cases. Kestrel's choice: the alternative half-precision
 format (FPCR.AHP) is not modelled; conversions to or from half
 precision under it stop as `Unmodelled::AltHalfPrecision` (half-precision
 arithmetic ignores AHP, as the pseudocode's FPUnpack does).
+
+The C test programs rebuilt with `GUEST_OPT="-O3
+-march=armv8.2-a+fp16+dotprod+crypto"` (`scripts/check-optimised.sh`)
+still give the expected output, 13/13, but clang 18 emits none of the new
+instructions for them, so the unit vectors are what covers them.
 
 Not reached by any CPU unit test, though the instructions are tested:
 some value paths of `float.rs` (FRECPE and FRSQRTE of subnormals and of
@@ -262,10 +267,10 @@ also run natively on real ARM CPUs by `scripts/check-host.sh` (task 1D).
 Remaining gaps:
 
 - Half precision: done (2026-10-31, "CPU gaps before phase 3").
+- DotProd (SDOT, UDOT): done (2026-10-31, "CPU gaps before phase 3").
 - Not implemented, so they stop as undefined: the crypto extension (AES,
-  SHA, 64-bit PMULL), DotProd (SDOT, UDOT; optional in Armv8.2), both
-  being added before phase 3 ("CPU gaps before phase 3"), and the Armv8.3+
-  complex, BFloat16 and Int8 matrix forms.
+  SHA, 64-bit PMULL), being added before phase 3 ("CPU gaps before
+  phase 3"), and the Armv8.3+ complex, BFloat16 and Int8 matrix forms.
 - As for scalar FP: directed FPCR rounding for host-computed lanes is
   reported as unsupported, and FPSR exception flags other than QC are not
   set.

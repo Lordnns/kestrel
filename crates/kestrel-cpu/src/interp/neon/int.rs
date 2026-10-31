@@ -137,6 +137,16 @@ fn rdm(a: u64, b: u64, d: u64, es: u32, sub: bool) -> (u64, bool) {
 pub fn three_same_extra(c: &mut Ctx, scalar: bool) -> Step {
     let i = c.insn;
     let (q, u, size, opc) = (bit(i, 30), bit(i, 29), field(i, 23, 22), field(i, 14, 11));
+    if opc == 0b0010 {
+        // SDOT, UDOT (FEAT_DotProd): byte group e of Vm with byte group e
+        // of Vn.
+        if scalar || size != 2 {
+            return Err(c.undef());
+        }
+        let m = vreg(c, rm(i));
+        dot(c, u, q, |e| get(m, 32, e));
+        return Ok(Flow::Next);
+    }
     if !u || opc > 1 || !(size == 1 || size == 2) {
         return Err(c.undef());
     }
@@ -153,6 +163,23 @@ pub fn three_same_extra(c: &mut Ctx, scalar: bool) -> Step {
     write(c, rd(i), r, bits);
     set_qc(c, qc);
     Ok(Flow::Next)
+}
+
+/// SDOT and UDOT: each 32-bit lane of Vd gains the sum of the four products
+/// of byte group e of Vn with the bytes of `group(e)`, wrapping.
+fn dot(c: &mut Ctx, unsigned: bool, q: bool, group: impl Fn(u32) -> u64) {
+    let i = c.insn;
+    let (n, d) = (vreg(c, rn(i)), vreg(c, rd(i)));
+    let bits = if q { 128 } else { 64 };
+    let mut r = 0u128;
+    for e in 0..bits / 32 {
+        let g = group(e);
+        let sum: i128 = (0..4)
+            .map(|k| ext(get(n, 8, 4 * e + k), 8, unsigned) * ext(g >> (8 * k), 8, unsigned))
+            .sum();
+        put(&mut r, 32, e, get(d, 32, e).wrapping_add(sum as u64));
+    }
+    write(c, rd(i), r, bits);
 }
 
 /// Two-register miscellaneous.
@@ -552,6 +579,17 @@ pub fn by_element(c: &mut Ctx, scalar: bool) -> Step {
     let (q, u, size, opc) = (bit(i, 30), bit(i, 29), field(i, 23, 22), field(i, 15, 12));
     if matches!((u, opc), (false, 0b0001 | 0b0101 | 0b1001) | (true, 0b1001)) {
         return vfp::by_element(c, scalar);
+    }
+    if opc == 0b1110 {
+        // SDOT, UDOT (by element): every byte group of Vn with the one
+        // group of Vm at index H:L.
+        if scalar || size != 2 {
+            return Err(c.undef());
+        }
+        let index = (field(i, 11, 11) << 1) | field(i, 21, 21);
+        let group = get(vreg(c, rm(i)), 32, index);
+        dot(c, u, q, |_| group);
+        return Ok(Flow::Next);
     }
     let long = matches!(opc, 0b0010 | 0b0110 | 0b1010 | 0b0011 | 0b0111 | 0b1011);
     let ok = match (u, opc) {

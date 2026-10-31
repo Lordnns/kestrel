@@ -7,8 +7,8 @@
 //! Coverage today: integer data processing, branches, loads/stores
 //! (including pairs, exclusives, SIMD registers and structures), system
 //! registers, scalar half, single and double precision floating point, and
-//! Advanced SIMD (NEON) with half precision, without the crypto and
-//! dot-product extensions. Anything else raises `Exit::Undefined` (or
+//! Advanced SIMD (NEON) with half precision and the dot product, without
+//! the crypto extension. Anything else raises `Exit::Undefined` (or
 //! `Exit::Unsupported`) so the gap is visible instead of silently wrong.
 
 mod bits;

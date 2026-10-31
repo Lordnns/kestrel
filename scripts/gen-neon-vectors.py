@@ -518,6 +518,20 @@ def m_elem_long(asm, kind, signed):
     wr(d, pack(out, es2), es2 if scal else 128)
 
 
+def m_dot(asm, signed):
+    """SDOT, UDOT: each 32-bit lane adds the four products of its byte group
+    of Vn with a byte group of Vm (its own, or the indexed one)."""
+    mn, regs, arrs, idx, _, _ = parse(asm)
+    d, n, m = regs[:3]
+    bits = ARR[arrs[0]][1]
+    a, b, acc = lanes(ST.v[n], 8), lanes(ST.v[m], 8), lanes(ST.v[d], 32)
+    out = []
+    for e in range(bits // 32):
+        g = idx[0] if idx else e
+        out.append(acc[e] + sum(val(a[4 * e + j], 8, signed) * val(b[4 * g + j], 8, signed) for j in range(4)))
+    wr(d, pack(out, 32), bits)
+
+
 # ---- copies, permutes, immediates --------------------------------------------
 
 
@@ -1010,6 +1024,8 @@ def model(asm):
     if base in ("tbl", "tbx"):
         return m_tbl(asm, base == "tbx")
     # Integer.
+    if base in ("sdot", "udot"):
+        return m_dot(asm, base == "sdot")
     if index:
         if base[0] in "su" and base[1:] in ("mull", "mlal", "mlsl"):
             return m_elem_long(asm, base[1:], base[0] == "s")
@@ -1520,6 +1536,14 @@ GROUPS = {
     ],
 }
 
+# The dot product (FEAT_DotProd).
+GROUPS["dot"] = [
+    "sdot v0.4s, v1.16b, v2.16b", "udot v0.4s, v1.16b, v2.16b", "sdot v0.2s, v4.8b, v5.8b",
+    "udot v0.2s, v4.8b, v5.8b", "sdot v3.4s, v4.16b, v4.16b", "udot v0.4s, v31.16b, v6.16b",
+    "sdot v0.2s, v1.8b, v2.4b[3]", "udot v0.4s, v1.16b, v31.4b[1]", "sdot v0.4s, v3.16b, v20.4b[2]",
+    "udot v0.2s, v5.8b, v4.4b[0]", "sdot v0.4s, v4.16b, v5.4b[1]",
+]
+
 RP, RM, RZ = 1 << 22, 2 << 22, 3 << 22
 C_FZ, C_DN, C_FZ16 = 1 << 24, 1 << 25, 1 << 19
 NZ, ZZ, CZ = 0b1000, 0b0100, 0b0010  # NZCV inputs: N, Z, C
@@ -1624,7 +1648,7 @@ def assemble(lines):
         src, obj = os.path.join(tmp, "v.s"), os.path.join(tmp, "v.o")
         with open(src, "w") as fh:
             fh.write("".join(line + "\n" for line in lines))
-        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+fp16", "-c", src,
+        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+fp16+dotprod", "-c", src,
                         "-o", obj], check=True)
         dis = subprocess.run([os.environ.get("OBJDUMP", "llvm-objdump"), "-d", obj], check=True, capture_output=True,
                              text=True).stdout

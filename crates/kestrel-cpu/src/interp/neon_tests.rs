@@ -182,6 +182,11 @@ fn structure_loads_and_stores() {
 }
 
 #[test]
+fn dot_product() {
+    group("dot");
+}
+
+#[test]
 fn half_precision_three_same() {
     group("fp16_same");
 }
@@ -222,6 +227,7 @@ fn every_case_belongs_to_a_group() {
         "fp16_misc",
         "fp16_other",
         "fp16_scalar",
+        "dot",
     ];
     for c in CASES {
         assert!(
@@ -236,7 +242,7 @@ fn every_case_belongs_to_a_group() {
 /// Encodings from clang (`-march=armv8.2-a+fp16+dotprod+crypto`) and
 /// llvm-objdump.
 #[test]
-fn alternative_half_precision_and_unimplemented_extensions_are_reported() {
+fn alternative_half_precision_and_undefined_encodings_are_reported() {
     // FPCR.AHP: conversions between half and single precision stop.
     for (insn, asm) in [
         (0x0e216820, "fcvtn v0.4h, v1.4s"),
@@ -252,9 +258,9 @@ fn alternative_half_precision_and_unimplemented_extensions_are_reported() {
         };
         assert_eq!(exit, want, "{asm}");
     }
-    // DotProd (optional in Armv8.2) and AES are not implemented.
+    // The dot product only has 32-bit lanes; AES is not implemented.
     for (insn, asm) in [
-        (0x4e829420, "sdot v0.4s, v1.16b, v2.16b"),
+        (0x4e429420, "sdot with size 01"),
         (0x4e284820, "aese v0.16b, v1.16b"),
     ] {
         let (mut s, mut m) = setup(&[insn]);
