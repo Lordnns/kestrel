@@ -247,6 +247,26 @@ impl Outcome {
 /// an empty SD card, a new folder in the system's temporary directory that
 /// is removed afterwards, so every run starts the same.
 pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
+    run(case, backend, false)
+}
+
+/// Cases whose output, in real time (`run_case_threaded`), depends on the
+/// host keeping up: hbdisplay queues two buffers and expects both still
+/// pending less than one 60 Hz vsync (16.7 ms) later; hbinput prints the
+/// newest controller state and expects it still the newest less than one
+/// 5 ms hid sample later. Both hold on a host running natively with time
+/// to spare, not under an emulator such as qemu.
+pub const HOST_SPEED: &[&str] = &["hbdisplay", "hbinput"];
+
+/// Run one case with each guest core on its own host thread and the
+/// host's clock (`Process::run_threaded`), as a game runs in real time.
+/// Runs do not repeat exactly; a case passes when its output does not
+/// depend on how the cores interleave, as a console program's must not.
+pub fn run_case_threaded(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
+    run(case, backend, true)
+}
+
+fn run(case: &Case, backend: BackendKind, threaded: bool) -> Result<Outcome, String> {
     let nro = kestrel_loader::is_nro(case.file);
     let file_name = format!("{}.{}", case.name, if nro { "nro" } else { "elf" });
     let mut proc = Process::load(case.file, &file_name, &case.args())?;
@@ -265,7 +285,14 @@ pub fn run_case(case: &Case, backend: BackendKind) -> Result<Outcome, String> {
     proc.screen = Some(Box::new(FrameLog(frames.clone())));
     let (mut cpu, _) = create_backend(backend)?;
     let t0 = Instant::now();
-    let stop = proc.run(cpu.as_mut(), MAX_STEPS);
+    let stop = if threaded {
+        let cores = (0..kestrel_hle::thread::CORES)
+            .map(|_| create_backend(backend).map(|(b, _)| b))
+            .collect::<Result<_, _>>()?;
+        proc.run_threaded(cores, MAX_STEPS)
+    } else {
+        proc.run(cpu.as_mut(), MAX_STEPS)
+    };
     let elapsed = t0.elapsed();
     if nro {
         let _ = std::fs::remove_dir_all(&sd);

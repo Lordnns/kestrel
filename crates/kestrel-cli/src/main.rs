@@ -27,7 +27,10 @@ const USAGE: &str = "\
 kestrel - experimental ARM64 console emulator
 
 USAGE:
-    kestrel selftest [-v]            Run the built-in ARM64 test programs
+    kestrel selftest [-v] [--threaded [--repeat <n>]]
+                                     Run the built-in ARM64 test programs;
+                                     --threaded runs each guest core on its
+                                     own host thread, <n> times each
     kestrel extract <dir>            Write the built-in test programs to <dir>
     kestrel run <program.elf|program.nro> [options] [-- args...]
     kestrel info                     Show host and backend information
@@ -41,6 +44,9 @@ RUN OPTIONS:
     --stats                              Print instruction count and speed
     --sd <folder>                        The folder that is the SD card
                                          (default: user/sdmc next to kestrel)
+    --threaded                           Each guest core on its own host
+                                         thread, in real time on the host's
+                                         clock (runs do not repeat)
     --headless                           No window for a homebrew NRO; the
                                          window maps keys and gamepads as
                                          user/config/input.cfg says
@@ -63,6 +69,7 @@ struct Opts {
     regs: bool,
     stats: bool,
     sd: Option<PathBuf>,
+    threaded: bool,
     headless: bool,
     presses: Vec<unattended::Press>,
     save_frame: Option<PathBuf>,
@@ -80,6 +87,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         regs: false,
         stats: false,
         sd: None,
+        threaded: false,
         headless: false,
         presses: Vec::new(),
         save_frame: None,
@@ -101,6 +109,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--regs" => o.regs = true,
             "--stats" => o.stats = true,
             "--sd" => o.sd = Some(it.next().ok_or("--sd needs a folder")?.into()),
+            "--threaded" => o.threaded = true,
             "--headless" => o.headless = true,
             "--press" => o
                 .presses
@@ -129,9 +138,26 @@ fn info() {
 }
 
 fn selftest(args: &[String]) -> Result<ExitCode, String> {
-    let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
-    if let Some(bad) = args.iter().find(|a| *a != "-v" && *a != "--verbose") {
-        return Err(format!("unknown selftest option '{bad}'"));
+    let (mut verbose, mut threaded, mut repeat) = (false, false, 1u32);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-v" | "--verbose" => verbose = true,
+            "--threaded" => threaded = true,
+            "--repeat" => {
+                repeat = it
+                    .next()
+                    .ok_or("--repeat needs a count")?
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or("--repeat needs a count of at least 1")?
+            }
+            bad => return Err(format!("unknown selftest option '{bad}'")),
+        }
+    }
+    if repeat > 1 && !threaded {
+        return Err("--repeat is for --threaded runs; the others repeat exactly".into());
     }
     let cases = kestrel_testsuite::CASES;
     println!(
@@ -140,17 +166,41 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
         std::env::consts::OS,
         kestrel_core::host_arch()
     );
+    if threaded {
+        println!(
+            "threaded: each of {} guest cores on its own host thread, on the host's clock, {repeat} run(s) of each program",
+            kestrel_hle::thread::CORES
+        );
+    }
     println!();
     let mut passed = 0;
     let mut total_insns = 0u64;
     let mut total_time = 0f64;
     let mut backend = "?";
     for case in cases {
-        let out = kestrel_testsuite::run_case(case, BackendKind::Auto)?;
+        let mut failed = 0;
+        let mut out: Option<kestrel_testsuite::Outcome> = None;
+        for _ in 0..repeat {
+            let run = if threaded {
+                kestrel_testsuite::run_case_threaded(case, BackendKind::Auto)?
+            } else {
+                kestrel_testsuite::run_case(case, BackendKind::Auto)?
+            };
+            total_insns += run.instructions;
+            total_time += run.elapsed.as_secs_f64();
+            // The first failure is the one shown.
+            let keep = match &out {
+                None => true,
+                Some(o) => o.passed && !run.passed,
+            };
+            failed += !run.passed as u32;
+            if keep {
+                out = Some(run);
+            }
+        }
+        let out = out.expect("at least one run");
         backend = out.backend;
-        total_insns += out.instructions;
-        total_time += out.elapsed.as_secs_f64();
-        let status = if out.passed { "PASS" } else { "FAIL" };
+        let status = if failed == 0 { "PASS" } else { "FAIL" };
         println!(
             "  {status}  {:<11} {:>12} instr  {:>7.3}s  {:>6.1} MIPS   {}",
             case.name,
@@ -159,6 +209,12 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
             out.mips(),
             case.description
         );
+        if threaded && failed > 0 && kestrel_testsuite::HOST_SPEED.contains(&case.name) {
+            println!("        -> in real time, this program's output needs a host that keeps up");
+        }
+        if repeat > 1 && failed > 0 {
+            println!("        -> {failed} of {repeat} runs failed; the first:");
+        }
         if let Some(why) = out.failure_reason(case) {
             println!("        -> {why}");
         }
@@ -167,7 +223,7 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
                 println!("        | {line}");
             }
         }
-        if out.passed {
+        if failed == 0 {
             passed += 1;
         }
     }
@@ -365,9 +421,10 @@ fn emulate(
     proc.services.fs.program = program;
     // With a window someone is using the program: it runs on the host's
     // clock, in real time, for as long as they like (the owner's decision
-    // of 2026-10-30). Without one, time is counted, so runs repeat.
+    // of 2026-10-30). Without one, time is counted, so runs repeat, unless
+    // the cores run on host threads, which is always real time.
     let windowed = window.is_some();
-    if windowed {
+    if windowed || o.threaded {
         proc.cpu.clock = kestrel_cpu::Clock::host();
     }
     if let Some((input, screen, interrupt)) = window {
@@ -389,21 +446,37 @@ fn emulate(
         .max_steps
         .unwrap_or(if windowed { u64::MAX } else { 10_000_000_000 });
 
-    let mut backend: Box<dyn CpuBackend> = if o.trace {
-        if !matches!(o.backend, BackendKind::Auto | BackendKind::Interp) {
-            return Err("--trace is only supported by the interpreter".into());
+    if o.trace && !matches!(o.backend, BackendKind::Auto | BackendKind::Interp) {
+        return Err("--trace is only supported by the interpreter".into());
+    }
+    let mut note = None;
+    let mut make_backend = || -> Result<Box<dyn CpuBackend>, String> {
+        if o.trace {
+            return Ok(Box::new(Interpreter { trace: true }));
         }
-        Box::new(Interpreter { trace: true })
-    } else {
-        let (b, note) = create_backend(o.backend)?;
-        if let Some(n) = note {
-            eprintln!("note: {n}");
-        }
-        b
+        let (b, n) = create_backend(o.backend)?;
+        note = note.take().or(n);
+        Ok(b)
     };
+    // One backend per guest core with --threaded, each on its own host
+    // thread; otherwise one runs every core in turn.
+    let mut backends = vec![make_backend()?];
+    if o.threaded {
+        for _ in 1..kestrel_hle::thread::CORES {
+            backends.push(make_backend()?);
+        }
+    }
+    if let Some(n) = note {
+        eprintln!("note: {n}");
+    }
+    let backend_name = backends[0].name();
 
     let t0 = Instant::now();
-    let stop = proc.run(backend.as_mut(), max_steps);
+    let stop = if o.threaded {
+        proc.run_threaded(backends, max_steps)
+    } else {
+        proc.run(backends[0].as_mut(), max_steps)
+    };
     let elapsed = t0.elapsed();
     if let Some(path) = &o.save_frame {
         match &*last_frame.lock().unwrap() {
@@ -420,8 +493,7 @@ fn emulate(
         let n = proc.instructions();
         let mips = n as f64 / elapsed.as_secs_f64().max(1e-9) / 1e6;
         eprintln!(
-            "[{}] {n} instructions, {} SVCs in {:.3}s ({mips:.1} MIPS)",
-            backend.name(),
+            "[{backend_name}] {n} instructions, {} SVCs in {:.3}s ({mips:.1} MIPS)",
             proc.svc_count,
             elapsed.as_secs_f64()
         );
