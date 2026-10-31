@@ -1,12 +1,15 @@
-"""Arm floating-point semantics for single and double precision, in Python.
+"""Arm floating-point semantics for half, single and double precision, in Python.
 
 Shared by the test generators (gen-expected.py, gen-neon-vectors.py). Values
 are raw bit patterns; arithmetic is exact (fractions) and rounded here
 (FPRound), following the pseudocode of the Arm Architecture Reference Manual
 (DDI 0487). Nothing here comes from kestrel.
 
-Set FZ and DN (FPCR.FZ, FPCR.DN) at module level before calling; rounding
-modes are passed explicitly: "ne", "p", "m", "z", "a" (ties away), "odd".
+Set FZ, FZ16 and DN (FPCR.FZ, FPCR.FZ16, FPCR.DN) at module level before
+calling; FZ16 governs half precision, FZ the other formats. Rounding modes
+are passed explicitly: "ne", "p", "m", "z", "a" (ties away), "odd".
+Conversions to and from half precision ignore FZ16 (FPUnpackCV and
+FPRoundCV clear it).
 """
 
 import math
@@ -14,6 +17,7 @@ import struct
 from fractions import Fraction as Fr
 
 FZ = False
+FZ16 = False
 DN = False
 
 
@@ -39,6 +43,11 @@ def f64(x):
     return struct.unpack("<Q", struct.pack("<d", x))[0]
 
 
+def f16(x):
+    """Bits of a host float rounded to half precision."""
+    return struct.unpack("<H", struct.pack("<e", x))[0]
+
+
 
 class Fmt:
     def __init__(self, w, e, f):
@@ -50,15 +59,23 @@ class Fmt:
         self.quiet = 1 << (f - 1)
 
 
-FS, FD = Fmt(32, 8, 23), Fmt(64, 11, 52)
-FMT = {32: FS, 64: FD}
+FH, FS, FD = Fmt(16, 5, 10), Fmt(32, 8, 23), Fmt(64, 11, 52)
+FMT = {16: FH, 32: FS, 64: FD}
 
 
-def cls(b, f):
+def flushes(f, cv=False):
+    """Whether subnormals of format f flush to zero: FZ16 for half precision
+    (never in conversions), FZ otherwise."""
+    if f is FH:
+        return FZ16 and not cv
+    return FZ
+
+
+def cls(b, f, cv=False):
     """(kind, sign, exact value), flushing subnormal inputs under FZ (FPUnpack)."""
     sign = (b >> (f.w - 1)) & 1
     ex, fr = (b >> f.f) & f.emaxf, b & ((1 << f.f) - 1)
-    if FZ and ex == 0:
+    if flushes(f, cv) and ex == 0:
         fr = 0
     if ex == f.emaxf:
         if fr == 0:
@@ -75,7 +92,7 @@ def cls(b, f):
 
 def flush(b, f):
     """The operand as FPUnpack sees it: subnormals become signed zero under FZ."""
-    if FZ and (b >> f.f) & f.emaxf == 0:
+    if flushes(f) and (b >> f.f) & f.emaxf == 0:
         return b & f.sign
     return b
 
@@ -89,7 +106,7 @@ def inf(f, sign):
     return (sign << (f.w - 1)) | (f.emaxf << f.f)
 
 
-def enc(v, f, mode="ne", zsign=0):
+def enc(v, f, mode="ne", zsign=0, cv=False):
     """Round the exact value v to format f (FPRound)."""
     if v == 0:
         return zsign << (f.w - 1)
@@ -99,7 +116,7 @@ def enc(v, f, mode="ne", zsign=0):
     if Fr(2) ** e > m:
         e -= 1
     emin = 1 - f.bias
-    if FZ and e < emin:
+    if flushes(f, cv) and e < emin:
         # Flush-to-zero judges the exact value, before rounding.
         return sign << (f.w - 1)
     q = max(e, emin) - f.f
@@ -143,7 +160,12 @@ def nans(f, *ops):
     return None
 
 
-def f_add(a, b, f):
+def zero_sign(mode):
+    """The sign of an exact zero sum: negative only when rounding to -inf."""
+    return 1 if mode == "m" else 0
+
+
+def f_add(a, b, f, mode="ne"):
     n = nans(f, a, b)
     if n is not None:
         return n
@@ -154,22 +176,22 @@ def f_add(a, b, f):
         return inf(f, sa)
     if kb == "inf":
         return inf(f, sb)
-    if ka == "zero" and kb == "zero":
-        return enc(0, f, zsign=sa & sb)
-    return enc(va + vb, f)
+    if ka == "zero" and kb == "zero" and sa == sb:
+        return enc(0, f, zsign=sa)
+    return enc(va + vb, f, mode, zsign=zero_sign(mode))
 
 
 def f_neg(x, f):
     return x ^ f.sign
 
 
-def f_sub(a, b, f):
+def f_sub(a, b, f, mode="ne"):
     if nans(f, a, b) is not None:
         return nans(f, a, b)
-    return f_add(a, f_neg(b, f), f)
+    return f_add(a, f_neg(b, f), f, mode)
 
 
-def f_mul(a, b, f):
+def f_mul(a, b, f, mode="ne"):
     n = nans(f, a, b)
     if n is not None:
         return n
@@ -181,20 +203,20 @@ def f_mul(a, b, f):
         return inf(f, s)
     if "zero" in (ka, kb):
         return s << (f.w - 1)
-    return enc(va * vb, f)
+    return enc(va * vb, f, mode)
 
 
-def f_mulx(a, b, f):
+def f_mulx(a, b, f, mode="ne"):
     n = nans(f, a, b)
     if n is not None:
         return n
     (ka, sa, _), (kb, sb, _) = cls(a, f), cls(b, f)
     if (ka, kb) in (("inf", "zero"), ("zero", "inf")):
         return ((sa ^ sb) << (f.w - 1)) | enc(Fr(2), f)
-    return f_mul(a, b, f)
+    return f_mul(a, b, f, mode)
 
 
-def f_div(a, b, f):
+def f_div(a, b, f, mode="ne"):
     n = nans(f, a, b)
     if n is not None:
         return n
@@ -206,10 +228,10 @@ def f_div(a, b, f):
         return inf(f, s)
     if ka == "zero" or kb == "inf":
         return s << (f.w - 1)
-    return enc(va / vb, f)
+    return enc(va / vb, f, mode)
 
 
-def f_fma(acc, a, b, f):
+def f_fma(acc, a, b, f, mode="ne"):
     """FPMulAdd(acc, a, b) = acc + a*b, rounded once."""
     (kc, sc, vc), (ka, sa, va), (kb, sb, vb) = cls(acc, f), cls(a, f), cls(b, f)
     inv_prod = (ka, kb) in (("inf", "zero"), ("zero", "inf"))
@@ -227,12 +249,23 @@ def f_fma(acc, a, b, f):
     if kc == "inf":
         return inf(f, sc)
     pzero = "zero" in (ka, kb)
-    if kc == "zero" and pzero:
-        return enc(0, f, zsign=sc & sp)
-    return enc(vc + va * vb, f)
+    if kc == "zero" and pzero and sc == sp:
+        return enc(0, f, zsign=sc)
+    return enc(vc + va * vb, f, mode, zsign=zero_sign(mode))
 
 
-def f_sqrt(a, f):
+def exact_sqrt(v):
+    """sqrt(v) exactly when it is a dyadic rational, otherwise a value strictly
+    between the same neighbours 2^-60 apart, which rounds the same way."""
+    k = 60
+    t = v * Fr(4) ** k
+    s = math.isqrt(t.numerator // t.denominator)
+    if Fr(s * s) == t:
+        return Fr(s, 2**k)
+    return Fr(2 * s + 1, 2 ** (k + 1))
+
+
+def f_sqrt(a, f, mode="ne"):
     k, s, v = cls(a, f)
     if k in ("snan", "qnan"):
         return qnan(a, f)
@@ -242,6 +275,8 @@ def f_sqrt(a, f):
         return f.dnan
     if k == "inf":
         return a
+    if f is FH:
+        return enc(exact_sqrt(v), f, mode)
     # math.sqrt is correctly rounded for doubles; for singles the double
     # result rounds correctly again (53 >= 2 * 24 + 2).
     r = math.sqrt(float(v))
@@ -284,7 +319,7 @@ def f_abs(x, f):
     return x & ~f.sign & M(f.w)
 
 
-def f_recip_step(a, b, f, rsqrt):
+def f_recip_step(a, b, f, rsqrt, mode="ne"):
     a = f_neg(a, f)
     n = nans(f, a, b)
     if n is not None:
@@ -295,8 +330,8 @@ def f_recip_step(a, b, f, rsqrt):
     if "inf" in (ka, kb):
         return inf(f, sa ^ sb)
     if rsqrt:
-        return enc((3 + va * vb) / 2, f)
-    return enc(2 + va * vb, f)
+        return enc((3 + va * vb) / 2, f, mode, zsign=zero_sign(mode))
+    return enc(2 + va * vb, f, mode, zsign=zero_sign(mode))
 
 
 def round_frac(v, mode):
@@ -343,7 +378,8 @@ def f_from_int(i, es, unsigned, f, fbits=0, mode="ne"):
 
 
 def f_convert(x, src, dst, mode="ne"):
-    k, s, v = cls(x, src)
+    """FPConvert (FPUnpackCV, FPRoundCV), with FPCR.AHP clear."""
+    k, s, v = cls(x, src, cv=True)
     if k in ("snan", "qnan") and DN:
         return dst.dnan
     if k in ("snan", "qnan"):
@@ -354,7 +390,7 @@ def f_convert(x, src, dst, mode="ne"):
         return inf(dst, s)
     if k == "zero":
         return s << (dst.w - 1)
-    return enc(v, dst, mode)
+    return enc(v, dst, mode, cv=True)
 
 
 def recip_estimate_int(a):
@@ -375,7 +411,7 @@ def rsqrt_estimate_int(a):
     return (b + 1) // 2
 
 
-def f_recpe(x, f):
+def f_recpe(x, f, mode="ne"):
     k, s, v = cls(x, f)
     if k in ("snan", "qnan"):
         return qnan(x, f)
@@ -383,10 +419,12 @@ def f_recpe(x, f):
         return s << (f.w - 1)
     if k == "zero":
         return inf(f, s)
-    tiny = Fr(2) ** (-128 if f is FS else -1024)
-    if abs(v) < tiny:
-        return inf(f, s)
-    if FZ and abs(v) >= Fr(2) ** (126 if f is FS else 1022):
+    if abs(v) < Fr(2) ** -(f.bias + 1):
+        # The reciprocal overflows: infinity or the largest normal number,
+        # as the rounding mode says.
+        to_inf = {"ne": True, "a": True, "z": False, "p": not s, "m": bool(s)}[mode]
+        return inf(f, s) if to_inf else (s << (f.w - 1)) | ((f.emaxf - 1) << f.f) | ((1 << f.f) - 1)
+    if flushes(f) and abs(v) >= Fr(2) ** (f.bias - 1):
         return s << (f.w - 1)
     frac = (x & ((1 << f.f) - 1)) << (52 - f.f)
     exp = (x >> f.f) & f.emaxf
@@ -397,7 +435,7 @@ def f_recpe(x, f):
         else:
             frac = (frac << 1) & M(52)
     scaled = 256 | (frac >> 44)
-    rexp = (253 if f is FS else 2045) - exp
+    rexp = 2 * f.bias - 1 - exp
     est = recip_estimate_int(scaled)
     frac = (est & 0xFF) << 44
     if rexp == 0:
@@ -426,7 +464,7 @@ def f_rsqrte(x, f):
             exp -= 1
         frac = (frac << 1) & M(52)
     scaled = (256 | (frac >> 44)) if exp % 2 == 0 else (128 | (frac >> 45))
-    rexp = ((380 if f is FS else 3068) - exp) // 2
+    rexp = (3 * f.bias - 1 - exp) // 2
     est = rsqrt_estimate_int(scaled) & 0xFF
     return (rexp << f.f) | (est << (f.f - 8))
 

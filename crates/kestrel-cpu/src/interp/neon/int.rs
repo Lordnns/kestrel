@@ -414,7 +414,7 @@ pub fn pairwise_scalar(c: &mut Ctx) -> Step {
     }
     if matches!(field(i, 16, 12), 0b01100 | 0b01101 | 0b01111) {
         // FADDP, FMAXP, FMINP, FMAXNMP, FMINNMP (scalar, half precision)
-        return Err(c.unsupported(crate::Unmodelled::HalfPrecision));
+        return vfp::pairwise_scalar(c);
     }
     if field(i, 16, 12) != 0b11011 || field(i, 23, 22) != 3 {
         return Err(c.undef());

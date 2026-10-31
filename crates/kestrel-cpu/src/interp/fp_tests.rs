@@ -402,7 +402,10 @@ fn estimates_and_steps() {
 
 #[test]
 fn unsupported_cases_are_reported() {
-    assert_eq!(unsupported(0x1ee22820, 0), Unmodelled::HalfPrecision); // fadd h0, h1, h2
-    assert_eq!(unsupported(0x1e23c020, 0), Unmodelled::HalfPrecision); // fcvt h0, s1
+    // Conversions to and from half precision in the alternative format.
+    const AHP: u64 = 1 << 26;
+    assert_eq!(unsupported(0x1e23c020, AHP), Unmodelled::AltHalfPrecision); // fcvt h0, s1
+    assert_eq!(unsupported(0x1e63c020, AHP), Unmodelled::AltHalfPrecision); // fcvt h0, d1
+    assert_eq!(unsupported(0x1ee24020, AHP), Unmodelled::AltHalfPrecision); // fcvt s0, h1
     assert_eq!(unsupported(0x1e622820, RP), Unmodelled::FpRoundingMode); // fadd d, FPCR round to +inf
 }

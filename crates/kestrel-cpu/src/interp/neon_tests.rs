@@ -4,25 +4,31 @@
 //! `scripts/gen-neon-vectors.py`: encodings from clang and llvm-objdump,
 //! expected registers, FPSR.QC and memory from Python models written from
 //! the Arm ARM. None comes from running kestrel. Every case starts from the
-//! same registers and memory, runs one instruction and compares the whole
-//! vector file, X0..X3, FPSR.QC and the memory window.
+//! same registers and memory, with its own FPCR and NZCV, runs one
+//! instruction and compares the whole vector file, X0..X3, FPSR.QC, NZCV
+//! and the memory window. The half-precision groups also cover the scalar
+//! floating-point instructions' half-precision forms.
 
 use super::neon_vectors::{CASES, MEM, MEM_BASE, V, X};
 use super::tests::setup;
 use super::Interpreter;
-use crate::{CpuBackend, Exit};
+use crate::{CpuBackend, Exit, Flags};
 
 pub struct Case {
     pub group: &'static str,
     pub asm: &'static str,
     pub insn: u32,
     pub fpcr: u64,
+    /// NZCV before the instruction (N in bit 3 ... V in bit 0).
+    pub nzcv_in: u8,
     /// Vector registers that change, with their new value.
     pub v: &'static [(u8, u128)],
     /// General registers (X0..X3) that change.
     pub x: &'static [(u8, u64)],
     /// FPSR.QC after the instruction.
     pub qc: bool,
+    /// NZCV after the instruction.
+    pub nzcv: u8,
     /// Bytes of the memory window that change (offset from MEM_BASE).
     pub mem: &'static [(u16, u8)],
 }
@@ -35,6 +41,7 @@ fn run(case: &Case) -> Vec<String> {
     s.v = V;
     s.x[..4].copy_from_slice(&X);
     s.fpcr = case.fpcr;
+    s.flags = Flags::from_nzcv((case.nzcv_in as u64) << 28);
     m.write_bytes(MEM_BASE, &MEM).unwrap();
     let exit = Interpreter::new().run(&mut s, &mut m, 10);
     if exit != Exit::Breakpoint(0) {
@@ -62,6 +69,10 @@ fn run(case: &Case) -> Vec<String> {
     let qc = s.fpsr >> 27 & 1 != 0;
     if qc != case.qc {
         errs.push(format!("FPSR.QC = {qc}, want {}", case.qc));
+    }
+    let nzcv = (s.flags.to_nzcv() >> 28) as u8;
+    if nzcv != case.nzcv {
+        errs.push(format!("nzcv = {nzcv:04b}, want {:04b}", case.nzcv));
     }
     let mut want_mem = MEM;
     for &(k, b) in case.mem {
@@ -171,6 +182,26 @@ fn structure_loads_and_stores() {
 }
 
 #[test]
+fn half_precision_three_same() {
+    group("fp16_same");
+}
+
+#[test]
+fn half_precision_two_register_misc() {
+    group("fp16_misc");
+}
+
+#[test]
+fn half_precision_reductions_elements_conversions_and_immediates() {
+    group("fp16_other");
+}
+
+#[test]
+fn half_precision_scalar_floating_point() {
+    group("fp16_scalar");
+}
+
+#[test]
 fn every_case_belongs_to_a_group() {
     const GROUPS: &[&str] = &[
         "int_same",
@@ -187,6 +218,10 @@ fn every_case_belongs_to_a_group() {
         "fp_elem",
         "fp_fixed",
         "mem",
+        "fp16_same",
+        "fp16_misc",
+        "fp16_other",
+        "fp16_scalar",
     ];
     for c in CASES {
         assert!(
@@ -201,26 +236,19 @@ fn every_case_belongs_to_a_group() {
 /// Encodings from clang (`-march=armv8.2-a+fp16+dotprod+crypto`) and
 /// llvm-objdump.
 #[test]
-fn half_precision_and_unimplemented_extensions_are_reported() {
-    let half = [
-        (0x4e421420, "fadd v0.8h, v1.8h, v2.8h"),
-        (0x0ef8f820, "fabs v0.4h, v1.4h"),
-        (0x5e30d820, "faddp h0, v1.2h"),
-        (0x5e422420, "fcmeq h0, h1, h2"),
-        (0x5ef9d820, "frecpe h0, h1"),
-        (0x4f03fe00, "fmov v0.8h, #1.0"),
+fn alternative_half_precision_and_unimplemented_extensions_are_reported() {
+    // FPCR.AHP: conversions between half and single precision stop.
+    for (insn, asm) in [
         (0x0e216820, "fcvtn v0.4h, v1.4s"),
-        (0x4f121020, "fmla v0.8h, v1.8h, v2.h[1]"),
-        (0x0f1de420, "scvtf v0.4h, v1.4h, #3"),
-        (0x4e30c820, "fmaxnmv h0, v1.8h"),
-    ];
-    for (insn, asm) in half {
+        (0x4e217820, "fcvtl2 v0.4s, v1.8h"),
+    ] {
         let (mut s, mut m) = setup(&[insn]);
+        s.fpcr = 1 << 26;
         let exit = Interpreter::new().run(&mut s, &mut m, 1);
         let want = Exit::Unsupported {
             pc: s.pc,
             insn,
-            what: crate::Unmodelled::HalfPrecision,
+            what: crate::Unmodelled::AltHalfPrecision,
         };
         assert_eq!(exit, want, "{asm}");
     }

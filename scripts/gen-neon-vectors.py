@@ -6,8 +6,10 @@ instruction, assembled by clang (--target=aarch64) and disassembled by
 llvm-objdump to get its encoding. The expected registers, FPSR.QC and memory
 come from the per-lane models in this file, written from the instruction
 descriptions in the Arm Architecture Reference Manual (DDI 0487). Floating
-point is computed exactly with fractions and rounded here. Nothing here runs
-kestrel.
+point, half precision (FEAT_FP16) included, is computed exactly with
+fractions and rounded here (scripts/armfp.py); the scalar floating-point
+group's half-precision forms are here too, with NZCV for the compares.
+Nothing here runs kestrel.
 
     python3 scripts/gen-neon-vectors.py            # regenerate
     python3 scripts/gen-neon-vectors.py --check    # fail if out of date
@@ -64,6 +66,7 @@ ARR = {
 SCALAR = {"b": 8, "h": 16, "s": 32, "d": 64}
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import armfp  # noqa: E402
 from armfp import *  # noqa: E402,F401,F403
 
 
@@ -91,17 +94,27 @@ V0[22] = pack([7, -100, 123456789, -1], 32)
 V0[23] = pack([-(2**53) - 1, (1 << 62) + 1], 64)
 V0[24] = pack([f32(2.5), f32(-0.5), f32(7.25), f32(-1e-3)], 32)
 V0[25] = pack([f64(-2.5), f64(0.375)], 64)
+# Half-precision lanes: normals, subnormals, signed zeros, infinities, NaNs
+# (a quiet one and a signalling one), the largest normal, ties.
+V0[26] = pack([f16(1.5), f16(-2.25), f16(1000.0), f16(0.1), 0x8000, f16(3.0), 0x0001, 0x7C00], 16)
+V0[27] = pack([f16(-0.75), f16(3.5), f16(0.002), 0x7E12, f16(2.0), f16(-3.0), 0x03FF, 0xFC00], 16)
+V0[28] = pack([0x7D01, 0x7BFF, f16(1.0), f16(-1.0), f16(1 / 3), f16(7.0), 0x0400, 0x8001], 16)
+V0[29] = pack([f16(2.5), f16(-0.5), f16(7.25), f16(-1e-3), f16(100.5), f16(6.0e4), 0x8200, 0x0000], 16)
 X0 = [0xDEAD_BEEF_DEAD_BEEF, MEM_BASE, 48, 0x8899_AABB_CCDD_EEFF]
 MEM0 = bytes((k * 37 + 11) & 0xFF for k in range(MEM_LEN))
 
 
 class State:
-    def __init__(self, fpcr):
+    def __init__(self, fpcr, nzcv=0):
         self.v = list(V0)
         self.x = list(X0)
         self.mem = bytearray(MEM0)
         self.qc = False
         self.fpcr = fpcr
+        self.nzcv = nzcv
+        armfp.FZ16 = bool(fpcr >> 19 & 1)
+        armfp.FZ = bool(fpcr >> 24 & 1)
+        armfp.DN = bool(fpcr >> 25 & 1)
 
 
 ST = None  # the state of the case being modelled
@@ -624,28 +637,28 @@ def m_fmov_imm(asm):
 # ---- floating-point lane models -----------------------------------------------
 
 FSAME = {
-    "fadd": lambda a, b, d, f: f_add(a, b, f),
-    "fsub": lambda a, b, d, f: f_sub(a, b, f),
-    "fmul": lambda a, b, d, f: f_mul(a, b, f),
-    "fdiv": lambda a, b, d, f: f_div(a, b, f),
-    "fmulx": lambda a, b, d, f: f_mulx(a, b, f),
-    "fmla": lambda a, b, d, f: f_fma(d, a, b, f),
-    "fmls": lambda a, b, d, f: f_fma(d, f_neg(a, f), b, f),
+    "fadd": lambda a, b, d, f: f_add(a, b, f, fpcr_mode()),
+    "fsub": lambda a, b, d, f: f_sub(a, b, f, fpcr_mode()),
+    "fmul": lambda a, b, d, f: f_mul(a, b, f, fpcr_mode()),
+    "fdiv": lambda a, b, d, f: f_div(a, b, f, fpcr_mode()),
+    "fmulx": lambda a, b, d, f: f_mulx(a, b, f, fpcr_mode()),
+    "fmla": lambda a, b, d, f: f_fma(d, a, b, f, fpcr_mode()),
+    "fmls": lambda a, b, d, f: f_fma(d, f_neg(a, f), b, f, fpcr_mode()),
     "fmax": lambda a, b, d, f: f_maxmin(a, b, f, True, False),
     "fmin": lambda a, b, d, f: f_maxmin(a, b, f, False, False),
     "fmaxnm": lambda a, b, d, f: f_maxmin(a, b, f, True, True),
     "fminnm": lambda a, b, d, f: f_maxmin(a, b, f, False, True),
-    "fabd": lambda a, b, d, f: f_abs(f_sub(a, b, f), f),
+    "fabd": lambda a, b, d, f: f_abs(f_sub(a, b, f, fpcr_mode()), f),
     "fcmeq": lambda a, b, d, f: M(f.w) if f_cmp(a, b, f, "eq") else 0,
     "fcmge": lambda a, b, d, f: M(f.w) if f_cmp(a, b, f, "ge") else 0,
     "fcmgt": lambda a, b, d, f: M(f.w) if f_cmp(a, b, f, "gt") else 0,
     "facge": lambda a, b, d, f: M(f.w) if f_cmp(f_abs(a, f), f_abs(b, f), f, "ge") else 0,
     "facgt": lambda a, b, d, f: M(f.w) if f_cmp(f_abs(a, f), f_abs(b, f), f, "gt") else 0,
-    "frecps": lambda a, b, d, f: f_recip_step(a, b, f, False),
-    "frsqrts": lambda a, b, d, f: f_recip_step(a, b, f, True),
+    "frecps": lambda a, b, d, f: f_recip_step(a, b, f, False, fpcr_mode()),
+    "frsqrts": lambda a, b, d, f: f_recip_step(a, b, f, True, fpcr_mode()),
 }
 FPAIR = {
-    "faddp": lambda a, b, f: f_add(a, b, f),
+    "faddp": lambda a, b, f: f_add(a, b, f, fpcr_mode()),
     "fmaxp": lambda a, b, f: f_maxmin(a, b, f, True, False),
     "fminp": lambda a, b, f: f_maxmin(a, b, f, False, False),
     "fmaxnmp": lambda a, b, f: f_maxmin(a, b, f, True, True),
@@ -674,25 +687,39 @@ def m_fmisc(asm, fn):
 
 def m_fcvt_narrow(asm, mode):
     mn, (d, n), arrs, _, _, scal = parse(asm)
-    src = lanes(ST.v[n], 64)
-    out = [f_convert(x, FD, FS, mode) for x in src]
+    big = 64 if scal else ARR[arrs[1]][0]
+    small = big // 2
+    src = lanes(ST.v[n], big)
+    out = [f_convert(x, FMT[big], FMT[small], mode) for x in src]
     if scal:
-        wr(d, out[0], 32)
+        wr(d, out[0], small)
     else:
-        wr_narrow(d, pack(out, 32), mn.endswith("2"))
+        wr_narrow(d, pack(out, small), mn.endswith("2"))
 
 
 def m_fcvtl(asm):
-    mn, (d, n), _, _, _, _ = parse(asm)
-    src = lanes(ST.v[n], 32)
-    src = src[2:] if mn.endswith("2") else src[:2]
-    wr(d, pack([f_convert(x, FS, FD) for x in src], 64), 128)
+    mn, (d, n), arrs, _, _, _ = parse(asm)
+    big = ARR[arrs[0]][0]
+    small = big // 2
+    k = 128 // big
+    src = lanes(ST.v[n], small)
+    src = src[k:] if mn.endswith("2") else src[:k]
+    wr(d, pack([f_convert(x, FMT[small], FMT[big]) for x in src], big), 128)
 
 
 def m_facross(asm, fn):
-    mn, (d, n), _, _, _, _ = parse(asm)
-    e = lanes(ST.v[n], 32)
-    wr(d, fn(fn(e[0], e[1], FS), fn(e[2], e[3], FS), FS), 32)
+    mn, (d, n), arrs, _, _, _ = parse(asm)
+    es, bits = ARR[arrs[0]]
+    f = FMT[es]
+
+    def reduce(xs):
+        """Reduce(): each half reduced, then op(lower, upper)."""
+        if len(xs) == 1:
+            return xs[0]
+        h = len(xs) // 2
+        return fn(reduce(xs[:h]), reduce(xs[h:]), f)
+
+    wr(d, reduce(lanes(ST.v[n], es, bits // es)), es)
 
 
 def m_felem(asm, fn):
@@ -798,7 +825,8 @@ _rint = lambda mode: (lambda a, f: f_rint(a, f, mode))  # noqa: E731
 _cvt = lambda mode, u: (lambda a, f: f_to_int(a, f, mode, f.w, u))  # noqa: E731
 FMISC = {
     "fabs": lambda a, f: f_abs(a, f), "fneg": lambda a, f: f_neg(a, f),
-    "fsqrt": f_sqrt, "frecpe": f_recpe, "frsqrte": f_rsqrte, "frecpx": f_recpx,
+    "fsqrt": lambda a, f: f_sqrt(a, f, fpcr_mode()), "frecpe": lambda a, f: f_recpe(a, f, fpcr_mode()),
+    "frsqrte": f_rsqrte, "frecpx": f_recpx,
     "frintn": _rint("ne"), "frintp": _rint("p"), "frintm": _rint("m"), "frintz": _rint("z"),
     "frinta": _rint("a"), "frintx": lambda a, f: f_rint(a, f, fpcr_mode()),
     "frinti": lambda a, f: f_rint(a, f, fpcr_mode()),
@@ -815,6 +843,97 @@ FCMP0 = {
     "fcmeq": lambda a, f: f_cmp(a, 0, f, "eq"), "fcmle": lambda a, f: f_cmp(0, a, f, "ge"),
     "fcmlt": lambda a, f: f_cmp(0, a, f, "gt"),
 }
+
+
+# ---- the scalar floating-point group (half-precision forms) ---------------------
+
+
+def cond_holds(cond):
+    """ConditionHolds() on the case's NZCV."""
+    codes = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"]
+    c = codes.index({"cs": "hs", "cc": "lo"}.get(cond, cond))
+    n, z, cy, v = (ST.nzcv >> 3) & 1, (ST.nzcv >> 2) & 1, (ST.nzcv >> 1) & 1, ST.nzcv & 1
+    r = [z, cy, n, v, cy and not z, n == v, n == v and not z, True][c >> 1]
+    return (not r) if (c & 1 and c != 15) else bool(r)
+
+
+def fp_nzcv(a, b, f):
+    """FPCompare as NZCV: unordered 0011, equal 0110, less 1000, greater 0010."""
+    if {cls(a, f)[0], cls(b, f)[0]} & {"snan", "qnan"}:
+        return 0b0011
+    if f_cmp(a, b, f, "eq"):
+        return 0b0110
+    return 0b0010 if f_cmp(a, b, f, "gt") else 0b1000
+
+
+def sreg(op):
+    """(register number, format) of a scalar FP register operand."""
+    return int(op[1:]), FMT[SCALAR[op[0]]]
+
+
+def m_fp_scalar(asm):
+    mn, rest = asm.split(" ", 1)
+    ops = [o.strip() for o in rest.split(",")]
+    rv = lambda op: lanes(ST.v[sreg(op)[0]], sreg(op)[1].w)[0]  # noqa: E731
+    mode = fpcr_mode()
+    if mn in ("fcmp", "fcmpe"):
+        f = sreg(ops[0])[1]
+        ST.nzcv = fp_nzcv(rv(ops[0]), 0 if ops[1] == "#0.0" else rv(ops[1]), f)
+        return
+    if mn in ("fccmp", "fccmpe"):
+        f = sreg(ops[0])[1]
+        ST.nzcv = fp_nzcv(rv(ops[0]), rv(ops[1]), f) if cond_holds(ops[3]) else int(ops[2][1:], 0)
+        return
+    d, f = sreg(ops[0])
+    if mn == "fcsel":
+        r = rv(ops[1]) if cond_holds(ops[3]) else rv(ops[2])
+    elif mn == "fcvt":
+        r = f_convert(rv(ops[1]), sreg(ops[1])[1], f, mode)
+    elif mn == "fnmul":
+        r = f_neg(f_mul(rv(ops[1]), rv(ops[2]), f, mode), f)
+    else:
+        n, m, a = rv(ops[1]), rv(ops[2]), rv(ops[3])
+        # The negations come first, as in the pseudocode.
+        neg = lambda x: f_neg(x, f)  # noqa: E731
+        a, n = {"fmadd": (a, n), "fmsub": (a, neg(n)), "fnmadd": (neg(a), neg(n)), "fnmsub": (neg(a), n)}[mn]
+        r = f_fma(a, n, m, f, mode)
+    wr(d, r, f.w)
+
+
+def m_fmov_scalar(asm):
+    mn, rest = asm.split(" ", 1)
+    dst, src = [o.strip() for o in rest.split(",")]
+    if src.startswith("#"):
+        d, f = sreg(dst)
+        wr(d, enc(Fr(src[1:]), f), f.w)
+    elif dst[0] in "wx":
+        ST.x[int(dst[1:])] = lanes(ST.v[sreg(src)[0]], sreg(src)[1].w)[0]
+    elif src[0] in "wx":
+        d, f = sreg(dst)
+        wr(d, ST.x[int(src[1:])], f.w)
+    else:
+        d, f = sreg(dst)
+        wr(d, lanes(ST.v[sreg(src)[0]], f.w)[0], f.w)
+
+
+CVT_MODE = {"n": "ne", "p": "p", "m": "m", "z": "z", "a": "a"}
+
+
+def m_cvt_gen(asm):
+    """FCVT* to a general register, SCVTF and UCVTF from one, with fbits."""
+    mn, rest = asm.split(" ", 1)
+    ops = [o.strip() for o in rest.split(",")]
+    fb = int(ops[2][1:]) if len(ops) > 2 else 0
+    if mn.startswith("fcvt"):
+        n, f = sreg(ops[1])
+        w = 32 if ops[0][0] == "w" else 64
+        x = lanes(ST.v[n], f.w)[0]
+        ST.x[int(ops[0][1:])] = f_to_int(x, f, CVT_MODE[mn[4]], w, mn[5] == "u", fb)
+    else:
+        d, f = sreg(ops[0])
+        w = 32 if ops[1][0] == "w" else 64
+        x = ST.x[int(ops[1][1:])] & M(w)
+        wr(d, f_from_int(x, w, mn[0] == "u", f, fb, fpcr_mode()), f.w)
 
 
 # ---- dispatch: the model for any assembly line --------------------------------
@@ -844,6 +963,14 @@ def model(asm):
             return m_ldst_lane(asm, base.startswith("ld"))
         return m_ldst_multi(asm, base.startswith("ld"), int(base[2]))
     # Floating point.
+    ops = [o.strip() for o in rest.split(",")]
+    if base in ("fnmul", "fmadd", "fmsub", "fnmadd", "fnmsub", "fcmp", "fcmpe", "fccmp", "fccmpe", "fcsel",
+                "fcvt"):
+        return m_fp_scalar(asm)
+    if base == "fmov" and not first.startswith("v"):
+        return m_fmov_scalar(asm)
+    if (base.startswith("fcvt") and first[0] in "wx") or (base in ("scvtf", "ucvtf") and ops[1][0] in "wx"):
+        return m_cvt_gen(asm)
     if base in ("fcvtn", "fcvtxn"):
         return m_fcvt_narrow(asm, "odd" if base == "fcvtxn" else fpcr_mode())
     if base == "fcvtl":
@@ -1393,11 +1520,101 @@ GROUPS = {
     ],
 }
 
+RP, RM, RZ = 1 << 22, 2 << 22, 3 << 22
+C_FZ, C_DN, C_FZ16 = 1 << 24, 1 << 25, 1 << 19
+NZ, ZZ, CZ = 0b1000, 0b0100, 0b0010  # NZCV inputs: N, Z, C
+
+# Half precision (FEAT_FP16). V26..V29 hold edge lanes, other registers
+# random ones; FPCR adds directed rounding, FZ16 (FZ alone must not flush
+# half precision), DN.
+GROUPS.update({
+    "fp16_same": [
+        "fadd v0.8h, v26.8h, v27.8h", "fadd v0.4h, v28.4h, v29.4h", "fsub v0.8h, v26.8h, v28.8h",
+        "fmul v0.8h, v28.8h, v28.8h", ("fmul v0.8h, v28.8h, v28.8h", RZ), "fmul v0.8h, v26.8h, v29.8h",
+        "fdiv v0.8h, v26.8h, v27.8h", "fdiv v0.8h, v28.8h, v29.8h", "fmulx v0.8h, v26.8h, v29.8h",
+        "fmla v0.8h, v26.8h, v27.8h", "fmls v28.8h, v26.8h, v29.8h", "fmax v0.8h, v26.8h, v27.8h",
+        "fmin v0.8h, v27.8h, v28.8h", "fmaxnm v0.8h, v26.8h, v27.8h", "fminnm v0.8h, v28.8h, v27.8h",
+        "fabd v0.8h, v26.8h, v29.8h", "fcmeq v0.8h, v26.8h, v26.8h", "fcmge v0.8h, v26.8h, v27.8h",
+        "fcmgt v0.4h, v28.4h, v29.4h", "facge v0.8h, v26.8h, v27.8h", "facgt v0.8h, v27.8h, v29.8h",
+        "frecps v0.8h, v26.8h, v29.8h", "frsqrts v0.8h, v27.8h, v29.8h",
+        "faddp v0.8h, v26.8h, v27.8h", "fmaxp v0.8h, v28.8h, v29.8h", "fminp v0.4h, v26.4h, v27.4h",
+        "fmaxnmp v0.8h, v27.8h, v28.8h", "fminnmp v0.8h, v26.8h, v29.8h",
+        "fmulx h0, h26, h29", "fcmeq h0, h26, h26", "fcmge h0, h27, h26", "fcmgt h0, h28, h29",
+        "facge h0, h27, h26", "facgt h0, h29, h28", "fabd h0, h26, h27", "frecps h0, h26, h29",
+        "frsqrts h0, h27, h29",
+        "fadd v0.8h, v1.8h, v2.8h", "fmul v0.8h, v7.8h, v8.8h", "fdiv v0.8h, v9.8h, v10.8h",
+        "fmla v0.8h, v11.8h, v12.8h", "fsub v0.8h, v13.8h, v14.8h", "fmls v0.8h, v26.8h, v15.8h",
+        ("fadd v0.8h, v26.8h, v27.8h", RP), ("fmul v0.8h, v1.8h, v2.8h", RM), ("fdiv v0.8h, v9.8h, v10.8h", RZ),
+        ("fmla v0.8h, v11.8h, v12.8h", RP), ("fsub v0.8h, v26.8h, v26.8h", RM), ("fadd v0.8h, v7.8h, v8.8h", RZ),
+        ("fadd v0.8h, v26.8h, v27.8h", C_FZ16), ("fadd v0.8h, v26.8h, v27.8h", C_FZ),
+        ("fmul v0.8h, v26.8h, v29.8h", C_FZ16), ("fmul v0.8h, v9.8h, v10.8h", C_FZ16),
+        ("fmaxnm v0.8h, v26.8h, v27.8h", C_DN), ("fadd v0.8h, v26.8h, v28.8h", C_DN),
+        ("fmla v0.8h, v26.8h, v27.8h", C_DN | C_FZ16), ("frecps v0.8h, v1.8h, v2.8h", RZ),
+        ("frsqrts v0.8h, v3.8h, v4.8h", RM),
+    ],
+    "fp16_misc": [
+        "fabs v0.8h, v27.8h", "fneg v0.4h, v28.4h", "fsqrt v0.8h, v26.8h", "fsqrt v0.8h, v29.8h",
+        "fsqrt v0.8h, v1.8h", ("fsqrt v0.8h, v1.8h", RP), ("fsqrt v0.8h, v2.8h", RZ),
+        "frecpe v0.8h, v26.8h", "frecpe v0.8h, v28.8h", ("frecpe v0.8h, v28.8h", RZ),
+        ("frecpe v0.8h, v29.8h", RP), ("frecpe v0.8h, v29.8h", C_FZ16), "frecpe v0.8h, v5.8h",
+        "frsqrte v0.8h, v26.8h", "frsqrte v0.8h, v28.8h", "frsqrte v0.8h, v29.8h", ("frsqrte v0.8h, v29.8h", C_FZ16),
+        "frintn v0.8h, v26.8h", "frintp v0.8h, v29.8h", "frintm v0.8h, v27.8h", "frintz v0.8h, v26.8h",
+        "frinta v0.8h, v29.8h", ("frintx v0.8h, v29.8h", RM), ("frinti v0.8h, v26.8h", RP),
+        "fcvtns v0.8h, v26.8h", "fcvtps v0.8h, v29.8h", "fcvtms v0.4h, v27.4h", "fcvtzs v0.8h, v28.8h",
+        "fcvtas v0.8h, v29.8h", "fcvtnu v0.8h, v26.8h", "fcvtpu v0.8h, v29.8h", "fcvtmu v0.8h, v28.8h",
+        "fcvtzu v0.8h, v27.8h", "fcvtau v0.8h, v29.8h", "scvtf v0.8h, v22.8h", "ucvtf v0.8h, v22.8h",
+        ("scvtf v0.8h, v1.8h", RZ), "ucvtf v0.4h, v6.4h", ("ucvtf v0.8h, v1.8h", RP),
+        "fcmgt v0.8h, v26.8h, #0.0", "fcmge v0.8h, v29.8h, #0.0", "fcmeq v0.8h, v29.8h, #0.0",
+        "fcmle v0.8h, v27.8h, #0.0", "fcmlt v0.4h, v28.4h, #0.0", ("fcmeq v0.8h, v26.8h, #0.0", C_FZ16),
+        "fcvtns h0, h26", "fcvtzu h0, h28", "fcvtas h0, h29", "scvtf h0, h22", "ucvtf h0, h1",
+        "fcmgt h0, h26, #0.0", "fcmlt h0, h27, #0.0", "fcmle h0, h28, #0.0", "frecpe h0, h26",
+        "frsqrte h0, h29", "frecpx h0, h26", "frecpx h0, h29", "frecpx h0, h28",
+    ],
+    "fp16_other": [
+        "fmaxnmv h0, v26.8h", "fminnmv h0, v27.4h", "fmaxv h0, v29.8h", "fminv h0, v28.8h", "fmaxv h0, v26.4h",
+        "fminnmv h0, v28.8h",
+        "faddp h0, v26.2h", "fmaxp h0, v27.2h", "fminp h0, v28.2h", "fmaxnmp h0, v29.2h", "fminnmp h0, v26.2h",
+        "fmul v0.8h, v26.8h, v2.h[5]", "fmla v0.4h, v27.4h, v15.h[3]", "fmls v28.8h, v29.8h, v9.h[1]",
+        "fmulx v0.8h, v26.8h, v13.h[6]", "fmul h0, h26, v2.h[7]", "fmla h29, h26, v3.h[2]",
+        "fmulx h0, h27, v8.h[4]", "fmls h0, h28, v1.h[0]", ("fmla v0.8h, v26.8h, v7.h[0]", RM),
+        "scvtf v0.8h, v22.8h, #3", "ucvtf v0.4h, v6.4h, #16", "fcvtzs v0.8h, v26.8h, #4",
+        "fcvtzu v0.8h, v29.8h, #10", "scvtf h0, h22, #1", "fcvtzs h0, h29, #8", "fcvtzu h0, h26, #2",
+        ("scvtf v0.8h, v1.8h, #5", RM),
+        "fmov v0.8h, #1.5", "fmov v0.4h, #-31.0", "fmov v0.8h, #0.125",
+        "fcvtn v0.4h, v16.4s", "fcvtn2 v0.8h, v17.4s", ("fcvtn v0.4h, v20.4s", RZ), "fcvtn v0.4h, v1.4s",
+        "fcvtl v0.4s, v26.4h", "fcvtl2 v0.4s, v27.8h", ("fcvtl v0.4s, v29.4h", C_FZ16),
+        ("fcvtl2 v0.4s, v29.8h", C_FZ16), ("fcvtn v0.4h, v24.4s", C_FZ16), ("fcvtn v0.4h, v1.4s", C_FZ),
+        ("fcvtn2 v0.8h, v2.4s", C_DN), ("fcvtl v0.4s, v28.4h", C_DN),
+    ],
+    "fp16_scalar": [
+        "fadd h0, h26, h27", "fsub h0, h1, h29", "fmul h0, h29, h29", "fdiv h0, h26, h27", "fnmul h0, h26, h29",
+        "fnmul h0, h28, h29", "fmax h0, h26, h27", "fmin h0, h26, h27", "fmaxnm h0, h1, h2", "fminnm h0, h3, h4",
+        "fmadd h0, h26, h27, h29", "fmsub h0, h26, h27, h29", "fnmadd h0, h1, h2, h3", "fnmsub h0, h7, h8, h9",
+        ("fmadd h0, h26, h29, h27", RM), ("fadd h0, h26, h27", RP), ("fdiv h0, h1, h2", RZ),
+        ("fmul h0, h7, h8", C_FZ16), "fmadd h0, h28, h26, h27", ("fmadd h0, h28, h26, h27", C_DN),
+        "fabs h0, h27", "fneg h0, h26", "fsqrt h0, h29", "fsqrt h0, h27", "fsqrt h0, h5",
+        "frintn h0, h26", "frintp h0, h27", "frintm h0, h29", "frintz h0, h1", "frinta h0, h26",
+        "frintx h0, h29", ("frinti h0, h29", RM),
+        "fmov h0, h27", "fmov h0, #-1.25", "fmov w0, h26", "fmov x0, h27", "fmov h0, w3", "fmov h0, x2",
+        "fcvt h0, s16", "fcvt h0, d18", "fcvt s0, h26", "fcvt d0, h27", ("fcvt h0, s20", RM), "fcvt d0, h6",
+        ("fcvt s0, h28", C_DN), "fcvt d0, h28", ("fcvt h0, d19", RP), ("fcvt s0, h10", C_FZ16),
+        ("fcvt h0, s1", C_FZ16),
+        "fcvtzs w0, h26", "fcvtzs x0, h28", "fcvtns w0, h29", "fcvtps x0, h27", "fcvtms w0, h27",
+        "fcvtas x0, h29", "fcvtnu w0, h26", "fcvtzu x0, h27", "fcvtau w0, h29", "fcvtpu x0, h1",
+        "fcvtmu w0, h29", "scvtf h0, w3", "ucvtf h0, x3", "scvtf h0, x0", ("ucvtf h0, w2", RZ),
+        "fcvtzs w0, h26, #4", "fcvtzu x0, h29, #12", "scvtf h0, w2, #8", "ucvtf h0, x3, #60",
+        "fcmp h26, h27", "fcmp h27, h26", "fcmp h26, h26", "fcmpe h27, #0.0", "fcmp h28, #0.0", "fcmpe h28, h26",
+        "fcmp h1, h2", ("fccmp h26, h27, #0b0101, eq", 0, ZZ), ("fccmp h26, h27, #0b0101, eq", 0, 0),
+        ("fccmpe h28, h26, #2, ne", 0, 0), ("fcsel h0, h26, h27, eq", 0, ZZ), ("fcsel h0, h26, h27, eq", 0, 0),
+        ("fcsel h0, h1, h2, mi", 0, NZ),
+    ],
+})
+
 CASES = [
-    (g, *(item if isinstance(item, tuple) else (item, 0)))
+    (g, *((item + (0,))[:3] if isinstance(item, tuple) else (item, 0, 0)))
     for g, items in GROUPS.items()
     for item in items
-]  # (group, asm, fpcr)
+]  # (group, asm, fpcr, nzcv)
 
 # ---- assembly and output -------------------------------------------------------
 
@@ -1407,7 +1624,7 @@ def assemble(lines):
         src, obj = os.path.join(tmp, "v.s"), os.path.join(tmp, "v.o")
         with open(src, "w") as fh:
             fh.write("".join(line + "\n" for line in lines))
-        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a", "-c", src,
+        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+fp16", "-c", src,
                         "-o", obj], check=True)
         dis = subprocess.run([os.environ.get("OBJDUMP", "llvm-objdump"), "-d", obj], check=True, capture_output=True,
                              text=True).stdout
@@ -1419,7 +1636,7 @@ def assemble(lines):
 
 def main():
     global ST
-    words = assemble([asm for _, asm, _ in CASES])
+    words = assemble([asm for _, asm, _, _ in CASES])
     out = []
     w = out.append
     w("// Generated by scripts/gen-neon-vectors.py. Do not edit.")
@@ -1438,8 +1655,8 @@ def main():
     w("];")
     w("")
     w("pub const CASES: &[Case] = &[")
-    for (group, asm, fpcr), insn in zip(CASES, words):
-        ST = State(fpcr)
+    for (group, asm, fpcr, nzcv), insn in zip(CASES, words):
+        ST = State(fpcr, nzcv)
         model(asm)
         v = [(k, x) for k, x in enumerate(ST.v) if x != V0[k]]
         xs = [(k, x) for k, x in enumerate(ST.x) if x != X0[k]]
@@ -1452,9 +1669,11 @@ def main():
             w(f"        fpcr: {fpcr:#x},")
         else:
             w("        fpcr: 0,")
+        w(f"        nzcv_in: {nzcv:#06b},")
         w("        v: &[%s]," % ", ".join(f"({k}, {x:#x})" for k, x in v))
         w("        x: &[%s]," % ", ".join(f"({k}, {x:#x})" for k, x in xs))
         w(f"        qc: {'true' if ST.qc else 'false'},")
+        w(f"        nzcv: {ST.nzcv:#06b},")
         w("        mem: &[%s]," % ", ".join(f"({k}, {b:#x})" for k, b in mem))
         w("    },")
     w("];")

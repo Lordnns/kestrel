@@ -20,7 +20,6 @@ pub use mem::exec as load_store;
 
 use super::bits::*;
 use super::{Ctx, Step};
-use crate::Unmodelled;
 
 /// Every Advanced SIMD data-processing encoding (bits 28..25 = x111) that is
 /// not scalar floating point. Kept out of line so the integer fast path
@@ -44,7 +43,7 @@ pub fn exec(c: &mut Ctx) -> Step {
                 (0b10, 0b1000) if scalar => int::pairwise_scalar(c),
                 (0b10, 0b1000) => int::across(c),
                 // Two-register misc, half precision.
-                (0b10, 0b1100) => Err(c.unsupported(Unmodelled::HalfPrecision)),
+                (0b10, 0b1100) => vfp::misc_half(c, scalar),
                 (0b00, _) => int::three_different(c, scalar),
                 _ => Err(c.undef()),
             };
@@ -56,8 +55,7 @@ pub fn exec(c: &mut Ctx) -> Step {
             return int::three_same_extra(c, scalar);
         }
         if bit(i, 22) && field(i, 15, 14) == 0 && bit(i, 10) {
-            // Three same, half precision.
-            return Err(c.unsupported(Unmodelled::HalfPrecision));
+            return vfp::three_same_half(c, scalar);
         }
         if !scalar && !bit(i, 15) && !bit(i, 10) {
             return if bit(i, 29) {

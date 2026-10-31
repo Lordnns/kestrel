@@ -47,7 +47,8 @@ pub enum Exit {
 /// interpreter step returns, stays small.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unmodelled {
-    HalfPrecision,
+    /// The alternative half-precision format (FPCR.AHP) in a conversion.
+    AltHalfPrecision,
     /// FPCR.RMode other than round-to-nearest in host-computed arithmetic.
     FpRoundingMode,
     /// Flush-to-zero of a double-precision fused multiply-add whose result
@@ -58,7 +59,9 @@ pub enum Unmodelled {
 impl Unmodelled {
     pub const fn describe(self) -> &'static str {
         match self {
-            Unmodelled::HalfPrecision => "half-precision floating point",
+            Unmodelled::AltHalfPrecision => {
+                "alternative half-precision format (FPCR.AHP) in a conversion"
+            }
             Unmodelled::FpRoundingMode => {
                 "FPCR rounding mode other than round-to-nearest in floating-point arithmetic"
             }

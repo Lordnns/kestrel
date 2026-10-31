@@ -139,6 +139,16 @@ on host threads is what lets the fast backends keep up with games that
 spread their work over the console's cores; a single host thread taking
 turns would cap them at one core's speed.
 
+### Plan changes (2026-10-31)
+
+The owner's decision of 2026-10-30 to close the CPU gaps before phase 3
+(below). What changed in `PLAN.md` and what it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Phase 1A: half precision no longer stops as unsupported "for now"; it is added before phase 3 | `float.rs`, the scalar and NEON floating-point decoders |
+| Phase 1B: the crypto extension, with the dot product, is added before phase 3 rather than when a program needs it | the NEON decoders |
+
 ### CPU gaps before phase 3 (owner, 2026-10-30)
 
 The owner's decision: close the CPU gaps on Linux before phase 3, keeping
@@ -150,7 +160,7 @@ which has half precision, the dot product and the crypto extension.
 | Step | Status | Evidence |
 |------|--------|----------|
 | 1. A unit test for every implemented instruction | done | `scripts/gen-int-vectors.py` writes `interp/int_vectors.rs`: 478 one-instruction cases (data processing immediate and register, branches, system registers and hints, single, SIMD-register, pair and literal loads and stores, exclusives, acquire/release, CAS, the LSE atomics, FMOV to and from general registers), run by `interp/int_tests.rs`; with the NEON vectors, every interpreter line except undefined-encoding paths runs under `cargo test -p kestrel-cpu` (measured with `-C instrument-coverage`) |
-| 2. Half precision (FP16) | not started | stops as `Unmodelled::HalfPrecision` |
+| 2. Half precision (FP16) | done | `Fmt::H` in `float.rs`, computed exactly in integers (every rounding mode, FPCR.FZ16); the scalar floating-point group with `ftype` 11 (arithmetic, FMA, compares, selects, FMOV, round-to-integral, conversions to and from single, double and integers), the FP16 three-same and two-register-misc groups (vector and scalar), across lanes, scalar pairwise, by element, fixed-point conversion, FMOV (vector), FCVTN/FCVTL to and from half; 240 cases in `neon_vectors.rs` (groups `fp16_same`, `fp16_misc`, `fp16_other`, `fp16_scalar`) |
 | 3. DotProd (SDOT, UDOT) | not started | undefined |
 | 4. Crypto (AES, SHA1, SHA2, 64-bit PMULL) | not started | undefined |
 
@@ -169,12 +179,32 @@ CNTFRQ_EL0 are kestrel's documented values (64-byte lines, 64-byte DC ZVA
 blocks, 19.2 MHz). Deliberately breaking CCMN's carry and LDSMIN's signed
 compare fails 2 and 4 cases.
 
+Half precision: the models are `scripts/armfp.py` with a 16-bit format
+(FZ16 for half precision, FZ for the others; conversions clear FZ16 as
+FPUnpackCV and FPRoundCV do), and the rounding mode now passed to the
+arithmetic models (an exact zero sum is -0 only when rounding to minus
+infinity). The square root of a half is computed exactly
+(`armfp.exact_sqrt`), and the reciprocal estimate's overflow follows the
+rounding mode. The NEON vectors gained NZCV, an input and an output per
+case, for FCMP, FCCMP and FCSEL, and four half-precision registers
+(V26..V29: subnormals, signed zeros, infinities, a quiet and a signalling
+NaN, the largest normal). Checked beyond the committed cases: the Python
+model matches numpy's float16 on 200,000 random add, subtract, multiply,
+divide and square-root operands, and kestrel matched the model on 3,600
+further random cases across rounding modes, FZ16 and DN. Writing the
+cases found a bug: SCVTF and UCVTF read 16-bit lanes as unsigned
+(`from_fixed` sign-extended only 32 and 64 bits). Deliberately using FZ
+for half precision, or +0 for exact zero sums under round-to-minus,
+fails 4 and 1 cases. Kestrel's choice: the alternative half-precision
+format (FPCR.AHP) is not modelled; conversions to or from half
+precision under it stop as `Unmodelled::AltHalfPrecision` (half-precision
+arithmetic ignores AHP, as the pseudocode's FPUnpack does).
+
 Not reached by any CPU unit test, though the instructions are tested:
 some value paths of `float.rs` (FRECPE and FRSQRTE of subnormals and of
 values whose reciprocal overflows under each rounding mode, FRECPS and
-FRSQRTS of infinity times zero, single-precision FMA under FZ). The
-Python model `armfp.f_recpe` ignores the rounding mode for overflowing
-reciprocals, so it must learn it before such cases are added.
+FRSQRTS of infinity times zero, single-precision FMA under FZ) in single
+and double precision.
 
 ### Phase 1A notes
 
@@ -189,7 +219,8 @@ pseudocode; conversions and FRINT honour every rounding mode.
 
 Remaining gaps, each reported as `Exit::Unsupported` rather than guessed:
 
-- Half precision (per the plan's provision).
+- Half precision: done since (2026-10-31, "CPU gaps before phase 3"),
+  except conversions under FPCR.AHP.
 - FPCR.RMode other than round-to-nearest for host-computed arithmetic
   (add, sub, mul, div, sqrt, FMA, FRECPS, FRSQRTS). Conversions and FRINT
   already honour it.
@@ -230,11 +261,11 @@ also run natively on real ARM CPUs by `scripts/check-host.sh` (task 1D).
 
 Remaining gaps:
 
-- Half precision stops as `Exit::Unsupported` (per the plan's provision).
+- Half precision: done (2026-10-31, "CPU gaps before phase 3").
 - Not implemented, so they stop as undefined: the crypto extension (AES,
-  SHA, 64-bit PMULL; the plan adds them only when a program needs them),
-  DotProd (SDOT, UDOT; optional in Armv8.2), and the Armv8.3+ complex,
-  BFloat16 and Int8 matrix forms.
+  SHA, 64-bit PMULL), DotProd (SDOT, UDOT; optional in Armv8.2), both
+  being added before phase 3 ("CPU gaps before phase 3"), and the Armv8.3+
+  complex, BFloat16 and Int8 matrix forms.
 - As for scalar FP: directed FPCR rounding for host-computed lanes is
   reported as unsupported, and FPSR exception flags other than QC are not
   set.

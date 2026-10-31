@@ -1,7 +1,8 @@
 //! Floating-point Advanced SIMD lanes: three same, two-register misc,
-//! across lanes, scalar pairwise, by element and fixed-point conversion.
-//! Every lane is computed by [`crate::float`]; half precision stops with an
-//! explicit unsupported error.
+//! across lanes, scalar pairwise, by element and fixed-point conversion, in
+//! half (FEAT_FP16), single and double precision. Every lane is computed by
+//! [`crate::float`]. The half-precision groups use the same operations, keyed
+//! the same way, as the single-precision ones.
 
 use super::super::bits::*;
 use super::super::{Ctx, Flow, Step};
@@ -74,13 +75,22 @@ fn same_op(key: (bool, bool, u32), a: u64, b: u64, d: u64, f: Fmt, fpcr: Fpcr) -
 /// Floating-point three same (opcodes 11000..11111).
 pub fn three_same(c: &mut Ctx, scalar: bool) -> Step {
     let i = c.insn;
-    let (q, u, hi, sz, opc) = (
-        bit(i, 30),
-        bit(i, 29),
-        bit(i, 23),
-        bit(i, 22),
-        field(i, 15, 11),
-    );
+    let (q, sz) = (bit(i, 30), bit(i, 22));
+    if sz && !q && !scalar {
+        return Err(c.undef());
+    }
+    three_same_in(c, scalar, field(i, 15, 11), fmt(sz))
+}
+
+/// Three same (FP16): the 3-bit opcode is the low part of the
+/// single-precision group's 11xxx opcode, with the same meaning.
+pub fn three_same_half(c: &mut Ctx, scalar: bool) -> Step {
+    three_same_in(c, scalar, 0b11000 | field(c.insn, 13, 11), Fmt::H)
+}
+
+fn three_same_in(c: &mut Ctx, scalar: bool, opc: u32, f: Fmt) -> Step {
+    let i = c.insn;
+    let (q, u, hi) = (bit(i, 30), bit(i, 29), bit(i, 23));
     let key = (u, hi, opc);
     let pairwise = u && matches!((hi, opc), (_, 0b11000) | (false, 0b11010) | (_, 0b11110));
     let scalar_ok = matches!(
@@ -90,9 +100,8 @@ pub fn three_same(c: &mut Ctx, scalar: bool) -> Step {
             | (true, false, 0b11100 | 0b11101)
             | (true, true, 0b11010 | 0b11100 | 0b11101)
     );
-    let f = fmt(sz);
     let fpcr = fpcr(c);
-    if (scalar && !scalar_ok) || (sz && !q && !scalar) || same_op(key, 0, 0, 0, f, fpcr).is_none() {
+    if (scalar && !scalar_ok) || same_op(key, 0, 0, 0, f, fpcr).is_none() {
         return Err(c.undef());
     }
     let es = f.width();
@@ -118,7 +127,6 @@ pub fn misc(c: &mut Ctx, scalar: bool) -> Step {
     let (q, u, opc) = (bit(i, 30), bit(i, 29), field(i, 16, 12));
     let (hi, sz) = (bit(i, 23), bit(i, 22));
     let f = fmt(sz);
-    let fpcr = fpcr(c);
     let n = vreg(c, rn(i));
     match (u, hi, opc) {
         (false, false, 0b10110 | 0b10111) | (true, false, 0b10110) => {
@@ -129,6 +137,28 @@ pub fn misc(c: &mut Ctx, scalar: bool) -> Step {
     if sz && !q && !scalar {
         return Err(c.undef());
     }
+    // URECPE and URSQRTE exist for 32-bit lanes only.
+    if sz && opc == 0b11100 && hi {
+        return Err(c.undef());
+    }
+    misc_in(c, scalar, f, n)
+}
+
+/// Two-register misc (FP16): the single-precision opcodes, without the
+/// precision conversions and the unsigned estimates.
+pub fn misc_half(c: &mut Ctx, scalar: bool) -> Step {
+    let i = c.insn;
+    if bit(i, 23) && field(i, 16, 12) == 0b11100 {
+        return Err(c.undef());
+    }
+    let n = vreg(c, rn(i));
+    misc_in(c, scalar, Fmt::H, n)
+}
+
+fn misc_in(c: &mut Ctx, scalar: bool, f: Fmt, n: u128) -> Step {
+    let i = c.insn;
+    let (q, u, hi, opc) = (bit(i, 30), bit(i, 29), bit(i, 23), field(i, 16, 12));
+    let fpcr = fpcr(c);
     let vector_only = matches!(
         (u, hi, opc),
         (_, _, 0b11000 | 0b11001) | (_, true, 0b01111) | (_, true, 0b11100) | (true, true, 0b11111)
@@ -136,7 +166,6 @@ pub fn misc(c: &mut Ctx, scalar: bool) -> Step {
     let key = (u, hi, opc);
     let invalid = (scalar && vector_only)
         || (!scalar && key == (false, true, 0b11111))
-        || (sz && opc == 0b11100 && hi)
         || misc_op(key, 0, f, fpcr).is_none();
     if invalid {
         return Err(c.undef());
@@ -201,31 +230,36 @@ fn convert_precision(c: &mut Ctx, scalar: bool, u: bool, opc: u32) -> Step {
     if (scalar && !u) || (u && !sz) {
         return Err(c.undef());
     }
-    if !sz {
-        return Err(c.unsupported(Unmodelled::HalfPrecision));
-    }
+    // sz picks single and double precision, otherwise half and single.
+    let (small, large) = if sz {
+        (Fmt::S, Fmt::D)
+    } else {
+        (Fmt::H, Fmt::S)
+    };
     let fpcr = fpcr(c);
+    if !sz && fpcr.ahp {
+        return Err(c.unsupported(Unmodelled::AltHalfPrecision));
+    }
+    let (ns, nl) = (small.width(), large.width());
+    let count = 64 / ns;
     let n = vreg(c, rn(i));
     if widen {
-        let base = if q { 2 } else { 0 };
+        let base = if q { count } else { 0 };
         let mut r = 0u128;
-        for e in 0..2 {
-            put(
-                &mut r,
-                64,
-                e,
-                fpu::convert(get(n, 32, base + e), Fmt::S, Fmt::D, fpcr),
-            );
+        for e in 0..count {
+            let x = fpu::convert(get(n, ns, base + e), small, large, fpcr);
+            put(&mut r, nl, e, x);
         }
         write(c, rd(i), r, 128);
         return Ok(Flow::Next);
     }
     let rounding = if u { Rounding::ToOdd } else { fpcr.rmode };
-    let narrow = |e| fpu::convert_rounded(get(n, 64, e), Fmt::D, Fmt::S, fpcr, rounding);
+    let narrow = |e| fpu::convert_rounded(get(n, nl, e), large, small, fpcr, rounding);
     if scalar {
-        write(c, rd(i), narrow(0) as u128, 32);
+        write(c, rd(i), narrow(0) as u128, ns);
     } else {
-        write_narrow(c, rd(i), narrow(0) | (narrow(1) << 32), q);
+        let v = (0..count).fold(0, |acc, e| acc | (narrow(e) << (ns * e)));
+        write_narrow(c, rd(i), v, q);
     }
     Ok(Flow::Next)
 }
@@ -242,7 +276,7 @@ fn reduce_op(opc: u32, hi: bool, a: u64, b: u64, f: Fmt, fpcr: Fpcr) -> Option<L
     })
 }
 
-/// FMAXNMV, FMINNMV, FMAXV, FMINV (4S only).
+/// FMAXNMV, FMINNMV, FMAXV, FMINV: 4S (U = 1), or 4H and 8H (U = 0).
 pub fn across(c: &mut Ctx) -> Step {
     let i = c.insn;
     let (q, u, hi, sz, opc) = (
@@ -252,28 +286,43 @@ pub fn across(c: &mut Ctx) -> Step {
         bit(i, 22),
         field(i, 16, 12),
     );
-    if !u {
-        return Err(c.unsupported(Unmodelled::HalfPrecision));
-    }
-    if !q || sz {
+    if sz || (u && !q) {
         return Err(c.undef());
     }
-    let (f, fpcr) = (Fmt::S, fpcr(c));
+    let f = if u { Fmt::S } else { Fmt::H };
+    let fpcr = fpcr(c);
+    let es = f.width();
     let n = vreg(c, rn(i));
-    let e = |k| get(n, 32, k);
-    // Reduce() pairs the halves recursively: op(op(e0, e1), op(e2, e3)).
-    let step = |a, b| reduce_op(opc, hi, a, b, f, fpcr).expect("FMAX/FMIN forms");
-    let r =
-        (|| step(step(e(0), e(1))?, step(e(2), e(3))?))().map_err(|what| c.unsupported(what))?;
-    write(c, rd(i), r as u128, 32);
+    let elems: Vec<u64> = (0..datasize(q, false, es) / es)
+        .map(|k| get(n, es, k))
+        .collect();
+    let r = reduce(&elems, &|a, b| {
+        reduce_op(opc, hi, a, b, f, fpcr).expect("FMAX/FMIN forms")
+    })
+    .map_err(|what| c.unsupported(what))?;
+    write(c, rd(i), r as u128, es);
     Ok(Flow::Next)
 }
 
-/// Scalar FADDP, FMAXP, FMINP, FMAXNMP, FMINNMP over two elements.
+/// Reduce(): each half reduced recursively, then op(lower, upper).
+fn reduce(elems: &[u64], op: &impl Fn(u64, u64) -> Lane) -> Lane {
+    if elems.len() == 1 {
+        return Ok(elems[0]);
+    }
+    let (lo, hi) = elems.split_at(elems.len() / 2);
+    op(reduce(lo, op)?, reduce(hi, op)?)
+}
+
+/// Scalar FADDP, FMAXP, FMINP, FMAXNMP, FMINNMP over two elements; U = 0
+/// selects half precision.
 pub fn pairwise_scalar(c: &mut Ctx) -> Step {
     let i = c.insn;
-    let (hi, sz, opc) = (bit(i, 23), bit(i, 22), field(i, 16, 12));
-    let f = fmt(sz);
+    let (u, hi, sz, opc) = (bit(i, 29), bit(i, 23), bit(i, 22), field(i, 16, 12));
+    let f = match (u, sz) {
+        (false, true) => return Err(c.undef()),
+        (false, false) => Fmt::H,
+        (true, _) => fmt(sz),
+    };
     let es = f.width();
     let n = vreg(c, rn(i));
     let Some(r) = reduce_op(opc, hi, get(n, es, 0), get(n, es, 1), f, fpcr(c)) else {
@@ -289,25 +338,22 @@ pub fn by_element(c: &mut Ctx, scalar: bool) -> Step {
     let i = c.insn;
     let (q, u, opc) = (bit(i, 30), bit(i, 29), field(i, 15, 12));
     let (hi, sz, l) = (bit(i, 23), bit(i, 22), bit(i, 21));
-    if !hi {
-        return Err(if sz {
-            c.undef()
-        } else {
-            c.unsupported(Unmodelled::HalfPrecision)
-        });
-    }
-    if sz && (l || (!q && !scalar)) {
+    if (!hi && sz) || (hi && sz && (l || (!q && !scalar))) {
         return Err(c.undef());
     }
-    let f = fmt(sz);
-    let es = f.width();
-    let index = if sz {
-        field(i, 11, 11)
-    } else {
-        (field(i, 11, 11) << 1) | field(i, 21, 21)
+    // size 00 is half precision: the index is H:L:M and Rm has four bits.
+    let (f, index, m) = match (hi, sz) {
+        (false, _) => (
+            Fmt::H,
+            field(i, 11, 11) << 2 | field(i, 21, 20),
+            field(i, 19, 16),
+        ),
+        (true, false) => (Fmt::S, field(i, 11, 11) << 1 | field(i, 21, 21), rm(i)),
+        (true, true) => (Fmt::D, field(i, 11, 11), rm(i)),
     };
+    let es = f.width();
     let fpcr = fpcr(c);
-    let b = get(vreg(c, rm(i)), es, index);
+    let b = get(vreg(c, m), es, index);
     let (n, d) = (vreg(c, rn(i)), vreg(c, rd(i)));
     let bits = datasize(q, scalar, es);
     lanes(c, bits, es, |e| {
@@ -327,7 +373,7 @@ pub fn fixed_convert(c: &mut Ctx, scalar: bool, es: u32, fbits: u32) -> Step {
     let i = c.insn;
     let (q, u, to_int) = (bit(i, 30), bit(i, 29), field(i, 15, 11) == 0b11111);
     let f = match es {
-        16 => return Err(c.unsupported(Unmodelled::HalfPrecision)),
+        16 => Fmt::H,
         32 => Fmt::S,
         64 if q || scalar => Fmt::D,
         _ => return Err(c.undef()),
