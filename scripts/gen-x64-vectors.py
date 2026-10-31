@@ -145,6 +145,7 @@ def gen():
         case(f"a.call_r({RUST[r]})", f"call {R64[r]}")
     case("a.ret()", "ret")
     case("a.stc()", "stc")
+    case("a.mfence()", "mfence")
     case("a.clc()", "clc")
     # Jumps: far enough (300 bytes of NOPs) that llvm-mc uses rel32 too.
     for cc in range(16):

@@ -52,6 +52,9 @@ pub struct JitCtx {
     /// The link cell of the last chained exit taken, for the dispatcher to
     /// link; 0 after other exits.
     link: usize,
+    /// The memory's change count the links were made at: a chained jump
+    /// is taken only while the count is still this.
+    link_epoch: u64,
 }
 
 /// Link cells are handed out from chunks of this many.
@@ -125,9 +128,10 @@ pub struct Jit {
     cells_used: usize,
     /// Cells pointing at a block, to reset when links must go.
     linked: Vec<*mut usize>,
-    /// The memory's change count the links were made at. Within one
-    /// `run` it cannot move (only the OS layer maps memory, between
-    /// runs), so a linked block stays valid while it is the same.
+    /// The memory's change count the links were made at. Another guest
+    /// core's system call can move it at any time (`kestrel_hle::cores`),
+    /// so generated code compares it before every chained jump, and the
+    /// dispatcher resets the links when it has moved.
     link_epoch: u64,
     pub stats: Stats,
 }
@@ -151,6 +155,10 @@ impl Jit {
         let layout = Layout {
             x: std::mem::offset_of!(CpuState, x) as i32,
             sp: std::mem::offset_of!(CpuState, sp) as i32,
+            tpidr: std::mem::offset_of!(CpuState, tpidr_el0) as i32,
+            tpidrro: std::mem::offset_of!(CpuState, tpidrro_el0) as i32,
+            fpcr: std::mem::offset_of!(CpuState, fpcr) as i32,
+            fpsr: std::mem::offset_of!(CpuState, fpsr) as i32,
             pc: std::mem::offset_of!(CpuState, pc) as i32,
             retired: std::mem::offset_of!(CpuState, retired) as i32,
             n: flags + std::mem::offset_of!(crate::Flags, n) as i32,
@@ -159,6 +167,7 @@ impl Jit {
             v: flags + std::mem::offset_of!(crate::Flags, v) as i32,
             faulted: std::mem::offset_of!(JitCtx, faulted) as i32,
             limit: std::mem::offset_of!(JitCtx, limit) as i32,
+            link_epoch: std::mem::offset_of!(JitCtx, link_epoch) as i32,
             link: std::mem::offset_of!(JitCtx, link) as i32,
         };
         let mut jit = Jit {
@@ -358,12 +367,6 @@ impl CpuBackend for Jit {
         }
         let state: *mut CpuState = state;
         let mem: *const Memory = mem;
-        // SAFETY: as below.
-        let epoch = unsafe { (*mem).epoch() };
-        if epoch != self.link_epoch {
-            self.unlink_all();
-            self.link_epoch = epoch;
-        }
         let mut ctx = JitCtx {
             state,
             mem,
@@ -372,6 +375,7 @@ impl CpuBackend for Jit {
             exit: None,
             limit: start.saturating_add(max_steps),
             link: 0,
+            link_epoch: self.link_epoch,
         };
         loop {
             // SAFETY: generated code and helpers touch the state and memory
@@ -379,6 +383,15 @@ impl CpuBackend for Jit {
             let (pc, used) = unsafe { ((*state).pc, (*state).retired - start) };
             if used >= max_steps {
                 return Exit::StepLimit;
+            }
+            // A mapping or permission changed since the links were made
+            // (here, or on another core): they may lead to stale code.
+            let epoch = unsafe { (*mem).epoch() };
+            if epoch != self.link_epoch {
+                self.unlink_all();
+                self.link_epoch = epoch;
+                ctx.link_epoch = epoch;
+                ctx.link = 0;
             }
             let (entry, body) = match self.block(unsafe { &*mem }, pc, max_steps - used) {
                 Ok(b) => b,
@@ -476,6 +489,71 @@ unsafe fn write(ctx: *mut JitCtx, addr: u64, v: u64, size: u32) {
     }
 }
 
+/// LDXR: a load that sets the exclusive monitor to the address and the
+/// value read, as the interpreter's `exclusive` does; a fault leaves the
+/// monitor alone.
+///
+/// # Safety
+/// As [`read`].
+unsafe fn load_exclusive(ctx: *mut JitCtx, addr: u64, size: u64) -> u64 {
+    let v = read(ctx, addr, size as u32);
+    let ctx = &mut *ctx;
+    if ctx.faulted == 0 {
+        let s = &mut *ctx.state;
+        s.exclusive_addr = Some(addr);
+        s.exclusive_value = u128::from(v);
+    }
+    v
+}
+
+/// STXR: if the monitor holds `addr`, a compare-and-swap from the value
+/// the load-exclusive read to `v`, so a store by another core in between
+/// makes it fail, as the interpreter's `exclusive` does; then clear the
+/// monitor. 0 if stored, 1 if not. A fault (unmapped, not writable, not
+/// aligned) leaves the monitor set and the status unused.
+///
+/// # Safety
+/// As [`read`].
+unsafe fn store_exclusive(ctx: *mut JitCtx, addr: u64, v: u64, size: u64) -> u64 {
+    let ctx = &mut *ctx;
+    let s = &mut *ctx.state;
+    let m = &*ctx.mem;
+    let mut ok = false;
+    if s.exclusive_addr == Some(addr) {
+        let seen = s.exclusive_value as u64;
+        let r = match size {
+            1 => m
+                .compare_exchange8(addr, seen as u8, v as u8)
+                .map(|r| r.is_ok()),
+            2 => m
+                .compare_exchange16(addr, seen as u16, v as u16)
+                .map(|r| r.is_ok()),
+            4 => m
+                .compare_exchange32(addr, seen as u32, v as u32)
+                .map(|r| r.is_ok()),
+            _ => m.compare_exchange64(addr, seen, v).map(|r| r.is_ok()),
+        };
+        match r {
+            Ok(stored) => ok = stored,
+            Err(f) => {
+                ctx.faulted = 1;
+                ctx.fault = Some(f);
+                return 0;
+            }
+        }
+    }
+    s.exclusive_addr = None;
+    (!ok) as u64
+}
+
+/// CLREX.
+///
+/// # Safety
+/// As [`read`].
+unsafe fn clear_exclusive(ctx: *mut JitCtx) {
+    (*(*ctx).state).exclusive_addr = None;
+}
+
 /// One instruction in the interpreter, from inside a block, as the
 /// interpreter's own loop runs it: 0 to go on in the block, `RET_JUMP`
 /// when it branched (the PC is set), `RET_EXIT` with the exit in the
@@ -521,6 +599,8 @@ macro_rules! helpers {
             type Read = unsafe extern $abi fn(*mut JitCtx, u64) -> u64;
             type Write = unsafe extern $abi fn(*mut JitCtx, u64, u64);
             type Step = unsafe extern $abi fn(*mut JitCtx, u64, u64) -> u64;
+            type StoreEx = unsafe extern $abi fn(*mut JitCtx, u64, u64, u64) -> u64;
+            type Clear = unsafe extern $abi fn(*mut JitCtx);
 
             unsafe extern $abi fn read1(c: *mut JitCtx, a: u64) -> u64 {
                 read(c, a, 1)
@@ -549,6 +629,15 @@ macro_rules! helpers {
             unsafe extern $abi fn step(c: *mut JitCtx, pc: u64, insn: u64) -> u64 {
                 interp(c, pc, insn as u32)
             }
+            unsafe extern $abi fn ldx(c: *mut JitCtx, a: u64, size: u64) -> u64 {
+                load_exclusive(c, a, size)
+            }
+            unsafe extern $abi fn stx(c: *mut JitCtx, a: u64, v: u64, size: u64) -> u64 {
+                store_exclusive(c, a, v, size)
+            }
+            unsafe extern $abi fn clrex(c: *mut JitCtx) {
+                clear_exclusive(c)
+            }
 
             pub fn helpers() -> Helpers {
                 Helpers {
@@ -565,6 +654,9 @@ macro_rules! helpers {
                         write8 as Write as usize,
                     ],
                     interp: step as Step as usize,
+                    load_exclusive: ldx as Step as usize,
+                    store_exclusive: stx as StoreEx as usize,
+                    clear_exclusive: clrex as Clear as usize,
                 }
             }
         }

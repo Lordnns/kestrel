@@ -10,8 +10,11 @@
 //! Translated so far: all of data processing (immediate); data
 //! processing (register) except CRC32 and the one-source group (RBIT,
 //! REV, CLZ, CLS); branches, SVC and BRK; general-purpose loads and stores
-//! (single, pair, literal; every addressing mode). Floating point, NEON,
-//! system instructions, exclusives and atomics go to the interpreter.
+//! (single, pair, literal; every addressing mode); LDAR, STLR and the
+//! single-register exclusives; hints, barriers, cache maintenance, CLREX,
+//! and MRS/MSR of the system registers kept in `CpuState`. Floating
+//! point, NEON, DC ZVA, the counters, exclusive pairs, compare-and-swap
+//! and the other atomics go to the interpreter.
 
 use super::ir::{BinOp, Block, Carry, Op, Reg, Term, Val, Width};
 use crate::interp::bits::{bit, decode_bit_masks, field, sext};
@@ -444,6 +447,10 @@ fn branch(b: &mut B, i: u32, pc: u64) -> Option<Next> {
             fallthrough: next,
         }));
     }
+    // System instructions; none ends the block.
+    if field(i, 31, 22) == 0b11_0101_0100 {
+        return system(b, i).map(|()| Next::On);
+    }
     // SVC, BRK
     if field(i, 31, 24) == 0b1101_0100 {
         let imm = field(i, 20, 5) as u16;
@@ -473,9 +480,123 @@ fn branch(b: &mut B, i: u32, pc: u64) -> Option<Next> {
     None
 }
 
+/// System instructions as `interp/system.rs` runs them: hints, ISB, SB
+/// and the cache maintenance EL0 may do are nothing (IC IVAU too:
+/// rewritten code is caught by the blocks' own checks, `jit/mod.rs`); DMB
+/// and DSB are a full host fence, which other cores on other host threads
+/// rely on; CLREX, and MRS and MSR of the registers kept in `CpuState` and
+/// the constant ID registers. DC ZVA, the counters (which need the
+/// retired count) and everything else go to the interpreter.
+fn system(b: &mut B, i: u32) -> Option<()> {
+    use crate::interp::system::*;
+    let (l, op0, rt) = (bit(i, 21), field(i, 20, 19), field(i, 4, 0));
+    let (op1, crn, crm, op2) = (
+        field(i, 18, 16),
+        field(i, 15, 12),
+        field(i, 11, 8),
+        field(i, 7, 5),
+    );
+    match op0 {
+        0 if !l && op1 == 3 && rt == 31 => match (crn, op2) {
+            (0b0010, _) | (0b0011, 0b110 | 0b111) => Some(()),
+            (0b0011, 0b100 | 0b101) => {
+                b.ops.push(Op::Fence);
+                Some(())
+            }
+            (0b0011, 0b010) => {
+                b.ops.push(Op::ClearExclusive);
+                Some(())
+            }
+            _ => None,
+        },
+        1 if !l && op1 == 3 && crn == 7 && op2 == 1 && matches!(crm, 5 | 10..=14) => Some(()),
+        2 | 3 => {
+            let reg = field(i, 19, 5);
+            let sys = match reg {
+                TPIDR_EL0 => Some(Reg::Tpidr),
+                TPIDRRO_EL0 if l => Some(Reg::TpidrRo),
+                FPCR => Some(Reg::Fpcr),
+                FPSR => Some(Reg::Fpsr),
+                _ => None,
+            };
+            if l {
+                let v = match (reg, sys) {
+                    (_, Some(r)) => b.get(r),
+                    (NZCV, _) => {
+                        let dst = b.val();
+                        b.ops.push(Op::GetNzcv { dst });
+                        dst
+                    }
+                    (CTR_EL0, _) => b.k(CTR_VALUE),
+                    (DCZID_EL0, _) => b.k(DCZID_VALUE),
+                    (CNTFRQ_EL0, _) => b.k(crate::state::COUNTER_HZ),
+                    _ => return None,
+                };
+                b.set_xr(rt, v);
+            } else {
+                let v = b.xr(rt);
+                match (reg, sys) {
+                    (_, Some(r)) => b.ops.push(Op::Set { reg: r, src: v }),
+                    (NZCV, _) => b.ops.push(Op::SetNzcv { src: v }),
+                    _ => return None,
+                }
+            }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+/// The single-register forms of `interp/ldst.rs`'s `exclusive`. LDAR and
+/// STLR are plain loads and stores: x86 keeps loads in order with later
+/// accesses and stores with earlier ones, which is acquire and release;
+/// STLR's fence after the store (sequential consistency with a later
+/// LDAR) is `Op::Fence`. LDXR/LDAXR and STXR/STLXR go through the monitor
+/// operations; STLXR's compare-and-swap is a locked x86 instruction, a
+/// full fence. Pairs and compare-and-swap go to the interpreter.
+fn exclusive(b: &mut B, i: u32) -> Option<()> {
+    let size = 1u8 << field(i, 31, 30);
+    let (l, rs, rt) = (bit(i, 22), field(i, 20, 16), field(i, 4, 0));
+    let addr = b.xsp(field(i, 9, 5));
+    match (bit(i, 23), bit(i, 21)) {
+        (true, false) if l => {
+            let v = b.load(addr, size);
+            b.set_xr(rt, v);
+        }
+        (true, false) => {
+            let v = b.xr(rt);
+            b.store(addr, v, size);
+            if bit(i, 15) {
+                b.ops.push(Op::Fence);
+            }
+        }
+        (false, false) if l => {
+            let dst = b.val();
+            b.ops.push(Op::LoadExclusive { dst, addr, size });
+            b.set_xr(rt, dst);
+        }
+        (false, false) => {
+            let src = b.xr(rt);
+            let status = b.val();
+            b.ops.push(Op::StoreExclusive {
+                status,
+                addr,
+                src,
+                size,
+            });
+            b.set_xr(rs, status);
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
 fn ldst(b: &mut B, i: u32, pc: u64) -> Option<Next> {
-    if field(i, 29, 24) == 0b00_1000 || bit(i, 26) {
-        // Exclusives and acquire/release; SIMD and FP registers.
+    if field(i, 29, 24) == 0b00_1000 {
+        return exclusive(b, i).map(|()| Next::On);
+    }
+    if bit(i, 26) {
+        // SIMD and FP registers.
         return None;
     }
     match field(i, 29, 27) {

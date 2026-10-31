@@ -10,16 +10,21 @@ const fn sysreg(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
     ((op0 - 2) << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2
 }
 
-const NZCV: u32 = sysreg(3, 3, 4, 2, 0);
-const FPCR: u32 = sysreg(3, 3, 4, 4, 0);
-const FPSR: u32 = sysreg(3, 3, 4, 4, 1);
-const TPIDR_EL0: u32 = sysreg(3, 3, 13, 0, 2);
-const TPIDRRO_EL0: u32 = sysreg(3, 3, 13, 0, 3);
-const CTR_EL0: u32 = sysreg(3, 3, 0, 0, 1);
-const DCZID_EL0: u32 = sysreg(3, 3, 0, 0, 7);
-const CNTFRQ_EL0: u32 = sysreg(3, 3, 14, 0, 0);
+pub(crate) const NZCV: u32 = sysreg(3, 3, 4, 2, 0);
+pub(crate) const FPCR: u32 = sysreg(3, 3, 4, 4, 0);
+pub(crate) const FPSR: u32 = sysreg(3, 3, 4, 4, 1);
+pub(crate) const TPIDR_EL0: u32 = sysreg(3, 3, 13, 0, 2);
+pub(crate) const TPIDRRO_EL0: u32 = sysreg(3, 3, 13, 0, 3);
+pub(crate) const CTR_EL0: u32 = sysreg(3, 3, 0, 0, 1);
+pub(crate) const DCZID_EL0: u32 = sysreg(3, 3, 0, 0, 7);
+pub(crate) const CNTFRQ_EL0: u32 = sysreg(3, 3, 14, 0, 0);
 const CNTPCT_EL0: u32 = sysreg(3, 3, 14, 0, 1);
 const CNTVCT_EL0: u32 = sysreg(3, 3, 14, 0, 2);
+
+/// CTR_EL0: 64-byte cache lines for the I and D caches.
+pub(crate) const CTR_VALUE: u64 = 0x8444_c004;
+/// DCZID_EL0: DC ZVA allowed, 64-byte blocks (log2(words) = 4).
+pub(crate) const DCZID_VALUE: u64 = 4;
 
 pub fn exec(c: &mut Ctx) -> Step {
     let i = c.insn;
@@ -86,10 +91,8 @@ pub fn exec(c: &mut Ctx) -> Step {
             FPSR => c.s.fpsr,
             TPIDR_EL0 => c.s.tpidr_el0,
             TPIDRRO_EL0 => c.s.tpidrro_el0,
-            // 64-byte cache lines for I and D caches.
-            CTR_EL0 => 0x8444_c004,
-            // DC ZVA allowed, 64-byte blocks (log2(words) = 4).
-            DCZID_EL0 => 4,
+            CTR_EL0 => CTR_VALUE,
+            DCZID_EL0 => DCZID_VALUE,
             CNTFRQ_EL0 => COUNTER_HZ,
             // The virtual offset is 0, so both counters read the same clock;
             // libnx's armGetSystemTick reads CNTPCT_EL0.

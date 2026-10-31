@@ -11,17 +11,33 @@ use kestrel_core::{Memory, Perm};
 const DATA: u64 = 0x30_0000;
 const BRK: u32 = 0xd420_0000;
 
-/// A store-exclusive fails when another core wrote a new value since the
-/// load-exclusive, and succeeds when nothing did.
+/// Makes the backend the tests run on; the recompiler's tests run them too.
+pub(crate) type Make = fn() -> Box<dyn CpuBackend + Send>;
+
+fn interp() -> Box<dyn CpuBackend + Send> {
+    Box::new(Interpreter::new())
+}
+
 #[test]
 fn another_cores_store_fails_the_store_exclusive() {
+    another_cores_store_fails_the_store_exclusive_on(interp);
+}
+
+#[test]
+fn guest_atomics_hold_between_host_threads() {
+    guest_atomics_hold_between_host_threads_on(interp);
+}
+
+/// A store-exclusive fails when another core wrote a new value since the
+/// load-exclusive, and succeeds when nothing did.
+pub(crate) fn another_cores_store_fails_the_store_exclusive_on(make: Make) {
     // ldxr x2, [x0]; stxr w3, x2, [x0]; brk #0
     let (mut a, m) = setup(&[0xc85f7c02, 0xc8037c02, BRK]);
     m.map(DATA, 0x1000, Perm::RW, "data").unwrap();
     m.write64(DATA, 5).unwrap();
     let mut b = a.clone();
     a.x[0] = DATA;
-    let mut core = Interpreter::new();
+    let mut core = make();
     assert_eq!(core.run(&mut a, &m, 1), Exit::StepLimit);
     assert_eq!(a.x[2], 5);
     // Core B: str x5, [x0]; brk #0, between A's two instructions.
@@ -32,7 +48,7 @@ fn another_cores_store_fails_the_store_exclusive() {
     )
     .unwrap();
     (b.pc, b.x[0], b.x[5]) = (0x40_0000, DATA, 6);
-    assert_eq!(Interpreter::new().run(&mut b, &m, 10), Exit::Breakpoint(0));
+    assert_eq!(make().run(&mut b, &m, 10), Exit::Breakpoint(0));
     assert_eq!(core.run(&mut a, &m, 10), Exit::Breakpoint(0));
     assert_eq!(a.x[3], 1, "the store-exclusive failed");
     assert_eq!(m.read64(DATA), Ok(6), "and did not write");
@@ -45,8 +61,7 @@ fn another_cores_store_fails_the_store_exclusive() {
 /// Four host threads, each running a guest core on the interpreter, all
 /// increment the same counters with every kind of guest atomic. No
 /// increment is lost, and 128-bit counters carry into their high half.
-#[test]
-fn guest_atomics_hold_between_host_threads() {
+pub(crate) fn guest_atomics_hold_between_host_threads_on(make: Make) {
     const THREADS: u64 = 4;
     const ROUNDS: u64 = 20_000;
     // loop: 1: ldaxr x2,[x0]; add x2,x2,#1; stlxr w3,x2,[x0]; cbnz w3,1b
@@ -79,7 +94,7 @@ fn guest_atomics_hold_between_host_threads() {
             cpu.x[1] = ROUNDS;
             (cpu.x[6], cpu.x[7], cpu.x[8], cpu.x[20]) = (ldadd, cas, pair, casp);
             s.spawn(move || {
-                let mut core = Interpreter::new();
+                let mut core = make();
                 assert_eq!(core.run(&mut cpu, m, u64::MAX), Exit::Breakpoint(0));
             });
         }

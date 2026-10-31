@@ -61,9 +61,14 @@ impl Abi {
     }
 
     fn args(self) -> [R; 3] {
+        let [a, b, c, _] = self.args4();
+        [a, b, c]
+    }
+
+    fn args4(self) -> [R; 4] {
         match self {
-            Abi::SysV => [RDI, RSI, RDX],
-            Abi::Win64 => [RCX, RDX, R8],
+            Abi::SysV => [RDI, RSI, RDX, RCX],
+            Abi::Win64 => [RCX, RDX, R8, R9],
         }
     }
 }
@@ -78,6 +83,12 @@ pub struct Helpers {
     pub write: [usize; 4],
     /// `interp(ctx, pc, insn) -> 0 (go on), RET_JUMP or RET_EXIT`.
     pub interp: usize,
+    /// `load_exclusive(ctx, addr, size) -> value`.
+    pub load_exclusive: usize,
+    /// `store_exclusive(ctx, addr, value, size) -> status`.
+    pub store_exclusive: usize,
+    /// `clear_exclusive(ctx)`.
+    pub clear_exclusive: usize,
 }
 
 /// Where host code finds things, as byte offsets.
@@ -86,6 +97,10 @@ pub struct Layout {
     /// In `CpuState`.
     pub x: i32,
     pub sp: i32,
+    pub tpidr: i32,
+    pub tpidrro: i32,
+    pub fpcr: i32,
+    pub fpsr: i32,
     pub pc: i32,
     pub retired: i32,
     /// N, Z, C and V, one byte each (0 or 1).
@@ -99,6 +114,8 @@ pub struct Layout {
     /// for a whole block below, and where the last exit's link cell goes.
     pub limit: i32,
     pub link: i32,
+    /// In the context: the memory's change count the links were made at.
+    pub link_epoch: i32,
 }
 
 /// Stack slots every block's frame has room for, so a block can jump
@@ -312,7 +329,9 @@ fn result(op: &Op) -> Option<Val> {
         | Op::IsZero { dst, .. }
         | Op::Select { dst, .. }
         | Op::GetNzcv { dst }
-        | Op::Load { dst, .. } => Some(dst),
+        | Op::Load { dst, .. }
+        | Op::LoadExclusive { dst, .. } => Some(dst),
+        Op::StoreExclusive { status, .. } => Some(status),
         _ => None,
     }
 }
@@ -326,8 +345,8 @@ fn operands(op: &Op) -> Vec<Val> {
         | Op::Extend { a, .. }
         | Op::IsZero { a, .. } => vec![a],
         Op::Select { c, a, b, .. } => vec![c, a, b],
-        Op::Load { addr, .. } => vec![addr],
-        Op::Store { addr, src, .. } => vec![addr, src],
+        Op::Load { addr, .. } | Op::LoadExclusive { addr, .. } => vec![addr],
+        Op::Store { addr, src, .. } | Op::StoreExclusive { addr, src, .. } => vec![addr, src],
         _ => Vec::new(),
     }
 }
@@ -348,6 +367,10 @@ impl Gen<'_> {
         match reg {
             Reg::X(n) => self.l.x + 8 * n as i32,
             Reg::Sp => self.l.sp,
+            Reg::Tpidr => self.l.tpidr,
+            Reg::TpidrRo => self.l.tpidrro,
+            Reg::Fpcr => self.l.fpcr,
+            Reg::Fpsr => self.l.fpsr,
         }
     }
 
@@ -642,6 +665,36 @@ impl Gen<'_> {
                 self.check_fault();
                 self.a.bind(done);
             }
+            Op::LoadExclusive { dst, addr, size } => {
+                let [a0, a1, a2] = self.abi.args();
+                self.get(a1, addr);
+                self.a.mov_ri(a2, size as u64);
+                self.a.mov_rr(W64, a0, CTX);
+                self.call(self.h.load_exclusive);
+                self.check_fault();
+                self.put(dst, RAX);
+            }
+            Op::StoreExclusive {
+                status,
+                addr,
+                src,
+                size,
+            } => {
+                let [a0, a1, a2, a3] = self.abi.args4();
+                self.get(a1, addr);
+                self.get(a2, src);
+                self.a.mov_ri(a3, size as u64);
+                self.a.mov_rr(W64, a0, CTX);
+                self.call(self.h.store_exclusive);
+                self.check_fault();
+                self.put(status, RAX);
+            }
+            Op::Fence => self.a.mfence(),
+            Op::ClearExclusive => {
+                let [a0, _, _] = self.abi.args();
+                self.a.mov_rr(W64, a0, CTX);
+                self.call(self.h.clear_exclusive);
+            }
             Op::Interp { insn } => {
                 self.retire(self.index - self.flushed);
                 self.flushed = self.index;
@@ -891,7 +944,10 @@ impl Gen<'_> {
     /// A chained exit through the link cell whose address is in R8: jump
     /// to the code the cell names (the next block's body, or the unlinked
     /// stub, which records the cell), unless the budget has less than a
-    /// whole block left, which the dispatcher then handles exactly.
+    /// whole block left, which the dispatcher then handles exactly, or the
+    /// memory's change count moved since the links were made (another
+    /// core changed a mapping), after which the dispatcher checks the
+    /// next block's code again.
     fn chain(&mut self) {
         let retired = self.st(self.l.retired);
         self.a.load(W64, RAX, retired);
@@ -899,8 +955,13 @@ impl Gen<'_> {
             .alu_ri(Alu::Add, W64, RAX, super::frontend::MAX_INSNS as i32);
         self.a.alu_rm(Alu::Cmp, W64, RAX, M(CTX, self.l.limit));
         let back = self.a.jcc(Cc::A);
+        self.a.mov_ri(RAX, self.tables.epoch);
+        self.a.load(W64, RAX, M(RAX, 0));
+        self.a.alu_rm(Alu::Cmp, W64, RAX, M(CTX, self.l.link_epoch));
+        let moved = self.a.jcc(Cc::Ne);
         self.a.jmp_m(M(R8, 0));
         self.a.bind(back);
+        self.a.bind(moved);
         self.a.mov_ri(RAX, RET_JUMP);
     }
 }
