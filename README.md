@@ -205,6 +205,12 @@ built integer-only, and built with floating point and NEON allowed
 
 `kestrel extract <dir>` writes them out as `.elf` files for `kestrel run`.
 
+`kestrel diff --backend <name>` is the differential tester: it runs every
+test program (or the ones named after the options) on the interpreter and
+on the named backend side by side, on the counted clock, and reports the
+first instruction after which their registers, flags, writable memory,
+system calls or output differ.
+
 ## Packages for testers
 
 Push a version tag and GitHub Actions builds and self-tests these, then

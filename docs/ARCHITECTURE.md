@@ -75,9 +75,29 @@ memory accesses go to the arena directly ("Memory" below).
 
 ### Correctness
 
-Faster backends are checked against the interpreter by running the same
-program on both and comparing full `CpuState` at every SVC (and, in debug
-builds, every N instructions).
+Faster backends are checked against the interpreter by the differential
+tester (`kestrel_testsuite::diff`, `kestrel diff --backend <b>`). It loads
+a test program twice, runs one copy on the interpreter and the other on
+the candidate, both on the counted clock (52 instructions a tick) so they
+see the same time, and compares them every 100,000 instructions: the
+running thread's `CpuState` (registers, flags, vector and system
+registers, the exclusive monitor, instructions retired, the clock), the
+system calls each made since the last comparison (number and X0..X7, seen
+by wrapping each backend), the memory map and every writable page, the
+output, and how each stopped. The first stretch that differs is replayed
+from the start (the counted clock makes that exact) and compared 100
+times as often, down to a single instruction, which is reported with its
+address, encoding and every difference. The tester only calls
+`CpuBackend::run` with smaller budgets, so it works for any backend; a
+backend must therefore stop after exactly the budget it is given.
+
+A wrong value overwritten before the next comparison point leaves no
+trace and is not reported; the program is not affected, and a program
+that uses the value shows it. The tester's own tests give it an
+interpreter with one deliberate bug at a time (a wrong ADD result, a wrong
+carry, a wrong stored value, a wrong system call) and check it names the
+first instruction the bug struck, and that the interpreter agrees with
+itself on every self-test program.
 
 ## Memory
 

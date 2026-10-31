@@ -72,7 +72,7 @@ moved to the CPU track, for the recompiler first.
 |------|--------|----------|
 | Memory arena refactor | done (2026-10-30; CI green on every platform, manual run 5 on the branch) | `kestrel_core::arena` (one host range, 2 MiB aligned, committed as used), `Memory` as a lock-free two-level page table over it, `Send + Sync`; compare-and-swap, `translate` and `epoch` for the fast backends; the self-test's output unchanged; the hypervisor and recompiler constraints in `docs/ARCHITECTURE.md`, "Memory" |
 | Native backend | not started | `create_backend(Native)` returns "not implemented yet" |
-| Differential tester | not started | none |
+| Differential tester | done (2026-10-31, CPU track) | `kestrel_testsuite::diff`, `kestrel diff --backend <b>`; "Phase 4 notes" |
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
 | Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
 | Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
@@ -1010,16 +1010,51 @@ Not verified (no ARM host with a hypervisor here): the hypervisor and
 recompiler constraints in `docs/ARCHITECTURE.md` are for phases 3 and 4
 to check.
 
+### Phase 4 notes
+
+The CPU track (owner, 2026-10-31): the differential tester first, then
+the x86_64 recompiler.
+
+The differential tester (`crates/kestrel-testsuite/src/diff.rs`,
+`kestrel diff --backend <b> [program...]`; `docs/ARCHITECTURE.md`,
+"Correctness", has how it works). Two copies of a self-test program run
+on the counted clock, one on the interpreter and one on the candidate,
+compared every 100,000 instructions (registers, flags, vector and system
+registers, the exclusive monitor, instructions retired, the clock, the
+running thread, system calls with X0..X7, the memory map and every
+writable page, the output, the stop); the first stretch that differs is
+replayed and narrowed down 100 times at a time to one instruction.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Comparison points | every 100,000 instructions, then every 1,000, 10 and 1 in the replays |
+| Memory compared | the memory map, and the bytes of every page mapped readable and writable; read-only pages change only through system calls, which are compared |
+| System calls | each side's backend is wrapped and records every `Exit::Svc` with X0..X7 and the instructions retired |
+| A stretch that does not diverge again in smaller steps | reported as the stretch, saying so |
+
+Verified: the interpreter against itself on all 27 self-test programs,
+zero divergences (`cargo test`, and `kestrel diff` on Linux x86_64). An
+interpreter with a deliberate bug from the nth time an instruction runs
+(an ADD result, the carry of SUBS, a value STR stores, a system call
+number) is found at exactly the first instruction the bug struck, with
+the register, flag, memory word or call named first; disabling the
+memory comparison fails the memory test.
+
+Limit: a wrong value overwritten before the next comparison point (a dead
+flag) leaves no trace in the state and is not reported, since the
+program is not affected; a program that uses it shows it.
+
 ## Next task
 
 The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
 Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
 
 1. The CPU track, in this order:
-   - A. The differential tester, backend-agnostic: the interpreter and
-     another backend side by side on the counted clock, reporting the
-     first divergence (registers, flags, memory writes, system calls);
-     proven with a deliberately faulty interpreter variant.
+   - A. Done (2026-10-31, "Phase 4 notes"): the differential tester,
+     backend-agnostic: the interpreter and another backend side by side
+     on the counted clock, reporting the first divergence (registers,
+     flags, memory writes, system calls); proven with a deliberately
+     faulty interpreter variant.
    - B. The x86_64 recompiler (phase 4) behind `create_backend(Jit)`: an
      intermediate representation between the ARM64 decoder and x86_64
      code generation, blocks cached by guest address and invalidated

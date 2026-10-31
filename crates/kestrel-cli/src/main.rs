@@ -28,6 +28,10 @@ kestrel - experimental ARM64 console emulator
 
 USAGE:
     kestrel selftest [-v]            Run the built-in ARM64 test programs
+    kestrel diff [--backend <b>] [case...]
+                                     Run the test programs on the interpreter
+                                     and backend <b> side by side and report
+                                     the first divergence (default: auto)
     kestrel extract <dir>            Write the built-in test programs to <dir>
     kestrel run <program.elf|program.nro> [options] [-- args...]
     kestrel info                     Show host and backend information
@@ -178,6 +182,66 @@ fn selftest(args: &[String]) -> Result<ExitCode, String> {
         cases.len()
     );
     Ok(if passed == cases.len() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+/// `kestrel diff`: the differential tester on the self-test programs.
+fn diff(args: &[String]) -> Result<ExitCode, String> {
+    let mut kind = BackendKind::Auto;
+    let mut names = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--backend" => kind = it.next().ok_or("--backend needs a value")?.parse()?,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown diff option '{other}'"))
+            }
+            name => names.push(name),
+        }
+    }
+    let cases: Vec<_> = kestrel_testsuite::CASES
+        .iter()
+        .filter(|c| names.is_empty() || names.contains(&c.name))
+        .collect();
+    if let Some(bad) = names
+        .iter()
+        .find(|n| !kestrel_testsuite::CASES.iter().any(|c| c.name == **n))
+    {
+        return Err(format!("no test program named '{bad}'"));
+    }
+    let (_, note) = create_backend(kind)?;
+    if let Some(note) = note {
+        eprintln!("note: {note}");
+    }
+    let reference = || -> Box<dyn CpuBackend> { Box::new(Interpreter::new()) };
+    let candidate = || {
+        create_backend(kind)
+            .expect("the backend was created above")
+            .0
+    };
+    let mut diverged = 0;
+    for case in &cases {
+        let r = kestrel_testsuite::diff::diff_case(case, &reference, &candidate)?;
+        match &r.divergence {
+            None => println!(
+                "  SAME      {:<11} {:>12} instr  {} and {}, {:?}",
+                case.name, r.instructions, r.backends.0, r.backends.1, r.stop
+            ),
+            Some(d) => {
+                diverged += 1;
+                println!("  DIVERGED  {:<11} {d}", case.name);
+            }
+        }
+    }
+    println!();
+    println!(
+        "{diverged} of {} programs diverged (counted clock, 52 instructions a tick)",
+        cases.len()
+    );
+    Ok(if diverged == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
@@ -479,6 +543,7 @@ fn main() -> ExitCode {
         Some("run") => parse(&args[1..]).and_then(run),
         Some("selftest" | "self-test" | "test") => selftest(&args[1..]),
         Some("extract") => extract(&args[1..]),
+        Some("diff") => diff(&args[1..]),
         Some("info") => {
             info();
             Ok(ExitCode::SUCCESS)
