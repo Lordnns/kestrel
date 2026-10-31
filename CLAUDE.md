@@ -26,10 +26,10 @@ sessions learned. The plan and the status live elsewhere; read them first:
   It and the clock passed CI on all six native jobs (a manual run on
   the arena's branch, 2026-10-31).
 - Threaded cores (owner's decision of 2026-10-31) are on branch
-  `claude/dazzling-gates-ecemqi`, waiting for review and a CI run:
-  `kestrel run --threaded` runs each guest core on its own host thread,
-  the OS layer behind one lock, guest atomics on host compare-and-swap
-  (ROADMAP "Phase 3 notes", "Threaded cores").
+  `claude/dazzling-gates-ecemqi` (PR #4), green on every CI job (manual
+  run 7): each guest core on its own host thread, the OS layer behind
+  one lock, guest atomics on host compare-and-swap; a window runs that
+  way by default (ROADMAP "Phase 3 notes", "Threaded cores").
 - The owner has not yet picked the next task. The candidates, from the
   ROADMAP's "Next task":
   1. phase 3 on Linux KVM and Windows (phase 3 on macOS needs a session
@@ -76,7 +76,9 @@ Each is also recorded in the ROADMAP's phase notes.
   interpreter's deterministic scheduler stays for tests. The threaded
   mode (`Process::run_threaded`) is backend-agnostic and testable on the
   interpreter; the core count is `thread::CORES`, four until the Switch
-  2's numbering is documented.
+  2's numbering is documented. A window runs threaded by default
+  (2026-10-31; `--single-thread` to opt out); without one, runs stay
+  deterministic unless `--threaded`.
 - System version 20.0.0; clock starts 2025-06-05 00:00 UTC, time zone
   UTC.
 - Portable, Dolphin-style: kestrel's `user/` folder next to the
@@ -152,8 +154,9 @@ Co-Authored-By line from the session's attribution instructions.
 ## Running things
 
 - `cargo run --release -p kestrel-cli -- run <program.nro>` opens a
-  window; `--headless` runs without one; `--threaded` puts each guest
-  core on its own host thread (real time, not repeatable);
+  window, threaded (`--single-thread` otherwise); `--headless` runs
+  without one; `--threaded` puts each guest core on its own host thread
+  there too (real time, not repeatable);
   `selftest --threaded --repeat 20` looks for races. `--press Plus@2` presses a
   button for 1 s at that time; `--save-frame shot.png` saves the last
   frame. Read the PNG to see what a program drew.

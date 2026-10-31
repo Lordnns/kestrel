@@ -74,7 +74,7 @@ first, on Linux (2026-10-30; "Phase 3 notes").
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
 | Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
 | Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
-| One host thread per guest core | done for four cores (2026-10-31), on the interpreter; CI not run yet | `Process::run_threaded` (`kestrel-hle/src/cores.rs`), `kestrel run --threaded`, `kestrel selftest --threaded`; the OS layer behind one lock; guest atomics and exclusives on host compare-and-swap; "Phase 3 notes", "Threaded cores". Six cores wait for the Switch 2's numbering (`thread::CORES`) |
+| One host thread per guest core | done for four cores (2026-10-31), on the interpreter; CI green on every job (manual run 7); a window runs threaded by default | `Process::run_threaded` (`kestrel-hle/src/cores.rs`), `kestrel run --threaded`, `kestrel selftest --threaded`; the OS layer behind one lock; guest atomics and exclusives on host compare-and-swap; "Phase 3 notes", "Threaded cores". Six cores wait for the Switch 2's numbering (`thread::CORES`) |
 
 ### Phases 4 to 7: **not started**
 
@@ -1082,9 +1082,27 @@ Verified (Linux x86_64 host, 4 CPUs):
 - `cargo check` for `aarch64-apple-darwin`, `x86_64-apple-darwin` and
   `x86_64-pc-windows-msvc`.
 
-Not verified here: native Windows, macOS and Linux ARM (a manual CI run
-of the branch checks them); a real program with a window in threaded
-mode (no display here).
+CI (manual run 7 of `ci.yml` on the branch, 2026-10-31,
+https://github.com/Lordnns/kestrel/actions/runs/41161300635): all 11
+jobs green. The six native jobs (Linux, Windows and macOS, x86_64 and
+aarch64) ran the threaded tests in `cargo test` and the examples
+threaded in `run-examples.sh` (the barrier example 5 times), so the
+threaded mode, the 128-bit compare-and-swap and the fences ran natively
+on every platform; the qemu job ran them for Linux aarch64.
+
+A window runs threaded by default (owner, 2026-10-31, once CI passed):
+`kestrel run` with a window puts each guest core on its own host thread
+unless `--single-thread`; without a window runs stay deterministic
+unless `--threaded`. Checked in a virtual X display (Xvfb) on Linux:
+the barrier example in a window, threaded by default, its frame correct
+in 11 runs out of 11; read-controls in a window with `--single-thread`,
+correct. The first runs found a race in a note: hid sampled on another
+core between the program's two calls that set its supported
+controllers, and reported the controller refused ("supports styles 0x0
+and IDs []"). Only a list the program has set now counts as refusing
+it; 8 runs since, no note.
+
+Not verified: a window on a real display, by hand (the owner's machines).
 
 Gaps and next steps:
 - Programs whose output depends on doing something within a span of real
@@ -1102,18 +1120,14 @@ Gaps and next steps:
 - A core sees preemption only at its next call or slice end (19,200
   instructions); a fast backend may want an interrupt flag so another
   core can stop it sooner. That would be an addition to `CpuBackend`.
-- `--threaded` is opt-in. Whether a window should run threaded by
-  default is the owner's call (recommended once CI passes on every
-  platform, since a window already runs on the host's clock).
 
 ## Next task
 
 Threaded cores (owner, 2026-10-31; "Phase 3 notes", "Threaded cores")
-are done on branch `claude/dazzling-gates-ecemqi`, waiting for review: a
-manual CI run of the branch, or a release tag once merged, checks them on
-every platform (`cargo test` runs the threaded tests, and
-`run-examples.sh` the examples threaded). Then the owner decides whether
-a window runs threaded by default.
+are done on branch `claude/dazzling-gates-ecemqi` (PR #4), green on
+every CI job (manual run 7), and a window now runs threaded by default;
+waiting for review and merge, then a manual run or a release tag checks
+the default on every platform.
 
 Phase 2 is accepted (`v0.1.17`, 2026-10-30), the clock follows the
 owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a

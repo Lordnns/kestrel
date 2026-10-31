@@ -308,8 +308,8 @@ By default every guest thread runs on one host thread, so runs on the
 counted clock repeat exactly: the self-test, unattended runs and the
 differential tester. Guest threads are spread over `thread::CORES` (four)
 virtual cores; each core runs its best-priority ready thread, and the
-cores take turns (with `--threaded`, each core runs on its own host
-thread instead: "Threaded cores" below):
+cores take turns (with a window or `--threaded`, each core runs on its
+own host thread instead: "Threaded cores" below):
 
 ```
 Process::run
@@ -338,8 +338,9 @@ and clears the outgoing thread's exclusive monitor.
 
 ### Threaded cores
 
-`Process::run_threaded` (`kestrel_hle::cores`; `kestrel run --threaded`,
-`kestrel selftest --threaded`) runs each of the `CORES` guest cores on its
+`Process::run_threaded` (`kestrel_hle::cores`; `kestrel run` with a
+window unless `--single-thread`, or `--threaded`; `kestrel selftest
+--threaded`) runs each of the `CORES` guest cores on its
 own host thread, with its own `CpuBackend`, on the host's clock, as the
 fast backends will for real time (`PLAN.md` section 3):
 
