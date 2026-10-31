@@ -8,7 +8,7 @@ kestrel-cli ──► kestrel-hle ──► kestrel-cpu ──► kestrel-core
 
 | Crate            | Responsibility                                                    |
 |------------------|-------------------------------------------------------------------|
-| `kestrel-core`   | Guest address space (`Memory`), permissions, faults               |
+| `kestrel-core`   | Guest memory: the host arena (`Arena`), the address space (`Memory`), permissions, faults |
 | `kestrel-cpu`    | `CpuState`, the `CpuBackend` trait, the portable interpreter      |
 | `kestrel-loader` | Executable loaders: ELF test programs, homebrew NRO               |
 | `kestrel-hle`    | Process model and supervisor-call (SVC) handling                  |
@@ -62,16 +62,16 @@ on the host CPU inside a hardware-virtualised sandbox:
 - Windows on ARM: Windows Hypervisor Platform
 
 The VM runs only guest user code. SVCs trap to the host, which forwards them
-to `kestrel-hle`. This requires `Memory` to become a host `mmap`'d arena that
-can be mapped into the VM's stage-2 tables, which is the next refactor of
-`kestrel-core`. macOS comes first, developed alongside the IPC and service
-work once threads and synchronisation exist; then Linux and Windows.
+to `kestrel-hle`. Guest memory is already the arena such a VM needs ("Memory"
+below, with what the backend must do with it). macOS comes first, on the
+owner's Mac; then Linux and Windows.
 
 ### JIT (x86_64 hosts, planned)
 
 Translate guest basic blocks to x86_64, cache by guest PC, invalidate on
 writes to code pages (`CpuBackend::invalidate`). Exclusives and memory
-ordering need care because x86 has a stronger memory model than ARM.
+ordering need care because x86 has a stronger memory model than ARM. Guest
+memory accesses go to the arena directly ("Memory" below).
 
 ### Correctness
 
@@ -81,10 +81,121 @@ builds, every N instructions).
 
 ## Memory
 
-Today: a `BTreeMap` of regions with a one-entry lookup cache. Simple and
-portable. Planned: one large reserved host range per process, guest pages
-mapped at fixed offsets so address translation is an add (interpreter/JIT)
-or a stage-2 mapping (native).
+Guest memory is one arena of host memory shared by every backend and by
+every host thread running a guest core (`PLAN.md` phase 3; done on Linux on
+2026-10-30, before phase 3 on macOS, by the owner's decision):
+
+```
+guest address ──page table──► frame offset ──+ arena base──► host address
+ (39 bits, 4 KiB pages)          (Memory)       (Arena: guest physical memory)
+```
+
+- **The arena** (`kestrel_core::arena::Arena`) is the guest's physical
+  memory: one range of host address space, reserved whole (16 GiB by
+  default, `DEFAULT_ARENA_SIZE`: address space only), its start aligned to
+  2 MiB (`ARENA_ALIGN`) and committed from the start in 2 MiB steps as
+  4 KiB frames are first handed out. The OS calls (`mmap` and `mprotect`
+  on Linux and macOS, `VirtualAlloc` on Windows, `std::alloc` elsewhere)
+  are declared in `kestrel_core::host`, so the core crates still use std
+  only. A freed frame goes back to a free list and is zeroed when handed
+  out again; committed memory stays committed while the arena lives, so a
+  late access from another core never touches memory the host took back.
+- **The address space** (`kestrel_core::Memory`) maps guest pages to
+  frames with a two-level page table (a top table of 2^18 leaves, each
+  mapping 512 pages, 2 MiB): an entry is the frame's offset in the arena,
+  the page's permission and a present bit. Beside it are the regions the
+  OS layer works with (permission, memory type and attribute, name), as
+  the memory calls create, split and change them. Splitting a region
+  moves no bytes. Addresses above 39 bits (`ADDRESS_BITS`, the largest
+  Switch address space) cannot be mapped.
+- **Concurrency.** Every `Memory` method takes `&self`, and `Memory` and
+  `Arena` are `Send + Sync`. Reads, writes and fetches take no lock: the
+  page table's entries and leaf pointers are atomics, and every byte of
+  the arena is read and written with host atomics (relaxed; plain loads
+  and stores on x86_64 and aarch64), so racing guest cores are defined
+  behaviour on the host as on the console. An aligned access is one host
+  access, which gives Arm's single-copy atomicity; an unaligned one goes
+  byte by byte; a 128-bit access is two 64-bit halves, as Armv8.0
+  defines it. Mapping and permission changes are serialised by a lock;
+  each publishes the zeroed frames before the entries that point at them.
+- **Faults.** An access spanning pages goes page by page and stops at the
+  first page that is unmapped or lacks the permission, naming its first
+  byte; the pages before it keep what a write put there.
+- **For the fast backends:** `compare_exchange8/16/32/64` (guest atomics
+  as host atomics), `translate` (a page's frame and permission) and
+  `epoch` (moves on with every mapping or permission change).
+
+Not changed by the arena: svcMapMemory still moves the bytes to the new
+address, and a shared memory object keeps its bytes while unmapped and
+copies them in and out on mapping. The arena allows real sharing (two
+pages, one frame) when a service needs it.
+
+The `CpuBackend` trait still passes `&mut Memory`: the interpreter runs one
+core at a time. The first backend that runs cores on several host threads
+changes it to `&Memory` (each core thread shares one `Memory`); until then
+`kestrel-cpu` is left as it is.
+
+### What the native backend (phase 3) must do with it
+
+None of this can be tested off an ARM host with a hypervisor; it is what
+phase 3 builds on, and what to check there.
+
+- Map the arena into the VM once, whole: guest physical (IPA) range
+  `[0, size)` to `[host_base, host_base + size)` (`hv_vm_map`,
+  `KVM_SET_USER_MEMORY_REGION`, `WHvMapGpaRange`). Both ends are multiples
+  of 2 MiB, so of every host page size (4 KiB, 16 KiB on Apple Silicon,
+  64 KiB on some aarch64 Linux kernels), and stage 2 can use 2 MiB blocks.
+  The default arena needs a 34-bit IPA space; check each hypervisor's
+  limit (Hypervisor.framework's IPA size, `KVM_CAP_ARM_VM_IPA_SIZE`).
+- The guest's own page tables in the VM (stage 1, EL1, which kestrel owns)
+  use a 4 KiB granule: each guest page points at its frame's offset with
+  its permission (AP, UXN, PXN), built from `Memory::translate`. This is
+  how 4 KiB guest pages run on a 16 KiB host: the host's page size only
+  constrains stage 2, which maps the arena as one block.
+- After any exit that may have changed mappings, compare `Memory::epoch`
+  with the value the tables were built at; rebuild what changed and
+  invalidate the VM's TLB before re-entering.
+- Only committed memory is backed. Frames handed out are always committed,
+  but the arena's tail is reserved only (`PROT_NONE`, `MEM_RESERVE`) until
+  used. Check on each OS whether a VM mapping may cover reserved pages; if
+  not, map `[0, Arena::committed())` and extend the mapping as commitment
+  grows, in 2 MiB steps, or commit the whole arena up front on that host.
+- One vCPU per guest core, each on its own host thread, all on the one
+  mapping (`PLAN.md` section 3). Guest loads, stores, exclusives and
+  atomics are then the hardware's, on the same memory the OS layer reads
+  and writes through `Memory`'s atomics, which the VM sees as stores from
+  another core.
+
+### What the recompiler (phase 4) must do with it
+
+- Always available, on any host page size: generated code walks the page
+  table as `Memory` does (top table, leaf, entry; entry layout in
+  `memory.rs`) and accesses `host_base + frame + offset`.
+- The fast path, with guard pages: reserve 2^39 bytes of host address
+  space (plus a guard tail beyond it, so base + offset cannot escape) and
+  map each guest page there as a second view of its frame, with the
+  host's permission; unmapped pages stay inaccessible. A guest access is
+  then one host access at `view + address`, and a host fault (a signal on
+  Unix, a vectored exception on Windows) goes to the slow path or becomes
+  a guest fault. This needs:
+  - the arena backed by a shareable memory object, so a frame can be
+    mapped twice: `memfd_create` on Linux, a Mach memory entry on macOS,
+    a pagefile-backed section and `MapViewOfFile3` with placeholders on
+    Windows. That change is inside `kestrel_core::host`; the API stays.
+  - host pages no larger than guest pages (4 KiB): true on x86_64 hosts,
+    where the recompiler runs. On 16 KiB hosts it takes the table path.
+  - on Windows, checking the alignment `MapViewOfFile3` requires of a
+    view's offset within the section (if it is the 64 KiB allocation
+    granularity, 4 KiB views of arbitrary frames need another way).
+  - rebuilding views when `Memory::epoch` moves, and invalidating
+    translations on writes to code pages.
+- Guest atomics: host compare-and-swap (`Memory::compare_exchange*`, or
+  the same instructions in generated code); LDXR/STXR as a compare-and-swap
+  of the value LDXR saw. That misses a store of the same value between the
+  two (which should clear the monitor), an accepted approximation for a
+  recompiler; the native backend uses the hardware's monitor. The 128-bit
+  pairs (LDXP/STXP, CASP) need a 128-bit compare-and-swap, which stable
+  Rust lacks (`AtomicU128`): `cmpxchg16b` in generated code.
 
 ## OS emulation (HLE)
 

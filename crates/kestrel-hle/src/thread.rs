@@ -721,7 +721,7 @@ mod tests {
     const SLEEP_50MS: [u32; 4] = [0xd29e1000, 0xf2a05f40, 0xd4000161, 0xd40000e1];
 
     fn sleeper() -> Process {
-        let mut p = process();
+        let p = process();
         p.mem.map(0x1000, 0x1000, Perm::RWX, "code").unwrap();
         let code: Vec<u8> = SLEEP_50MS.iter().flat_map(|i| i.to_le_bytes()).collect();
         p.mem.write_bytes(0x1000, &code).unwrap();

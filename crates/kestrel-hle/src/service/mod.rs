@@ -848,7 +848,7 @@ mod tests {
     }
 
     fn setup() -> Process {
-        let mut p = process();
+        let p = process();
         p.mem.map(STRINGS, 0x1000, Perm::RW, "strings").unwrap();
         p
     }
