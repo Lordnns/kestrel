@@ -919,10 +919,23 @@ Gaps:
 
 Phase 2 is accepted (`v0.1.17`, 2026-10-30), and the clock follows the
 owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
-window, 52 instructions a tick otherwise). The first release with the
-new clock should be tagged so CI runs the self-test and the examples on
-every platform. Then ask the owner which comes next; the candidates:
+window, 52 instructions a tick otherwise). The CPU gaps the owner chose to
+close before phase 3 are closed on branch `claude/bold-euler-pjl3cr`
+(2026-10-31, "CPU gaps before phase 3": a unit test for every
+instruction, half precision, the dot product, the crypto extension),
+waiting for review. Once it is merged, a release tag runs CI (the
+self-test and the examples on every platform, and the new
+`gen-int-vectors.py --check`) for both the new clock and the CPU work.
+Then ask the owner which comes next; the candidates:
 
+0. The remaining CPU gaps that session found (not in the owner's list,
+   so not started): CRC32 and CASP are mandatory from Armv8.1 (FEAT_CRC32,
+   FEAT_LSE), so the Cortex-A78C has them, and both stop as undefined;
+   LDAPR (FEAT_LRCPC), the non-hint pointer authentication instructions
+   (PACIA, AUTIA, RETAA, LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM)
+   are later or optional features, to check against the Cortex-A78C's
+   documentation before adding. The hint-space PAC instructions
+   (PACIASP and the like) already run as NOP.
 1. Phase 3 on Linux KVM and Windows (the native backend), now that
    phase 2 is accepted; phase 3 on macOS needs a session on the owner's
    Mac. Design it for the real-time goal (`PLAN.md` section 1): guest

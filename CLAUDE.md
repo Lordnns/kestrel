@@ -117,7 +117,10 @@ Each is also recorded in the ROADMAP's phase notes.
   `--target x86_64-pc-windows-msvc` when on Linux or macOS, so a change
   is type-checked for every CI operating system before a tag
 - `cargo test --workspace`
-- `python3 scripts/gen-expected.py --check`
+- `python3 scripts/gen-expected.py --check`, and for CPU changes
+  `python3 scripts/gen-int-vectors.py --check` and
+  `python3 scripts/gen-neon-vectors.py --check` (each instruction's test
+  case lives in one of the two; see CONTRIBUTING.md)
 - `cargo run --release -p kestrel-cli -- selftest`
 - for a change to a service or the guest programs: the program built at
   `-O3 -march=armv8.2-a` (`GUEST_OUT`, `GUEST_OPT` for
