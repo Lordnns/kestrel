@@ -29,7 +29,12 @@ use crate::{layout, Process, Stop};
 use kestrel_core::Perm;
 use kestrel_cpu::{Clock, CpuState};
 
-/// Virtual cores; svcCreateThread takes ProcessorId 0 to 3 ("SVC").
+/// Virtual cores; svcCreateThread takes ProcessorId 0 to 3 ("SVC"), the
+/// Switch 1 numbering Switchbrew documents. The code takes every core
+/// count and mask from this one number, so the Switch 2's six cores are a
+/// one-line change once their numbering is documented or observed
+/// (`PLAN.md` section 3); the tests and expected output that check core 4
+/// is refused change with it.
 pub const CORES: u32 = 4;
 /// The main thread's core, and the one ProcessorId -2 picks. Kestrel's
 /// choice.
@@ -376,7 +381,7 @@ impl Process {
         }
         let core = match core {
             -2 => DEFAULT_CORE,
-            0..=3 => core as u32,
+            c if (0..CORES as i32).contains(&c) => c as u32,
             _ => return Err(result::INVALID_CORE_ID),
         };
         self.new_thread(entry, arg, stack_top, priority as u32, core)
@@ -518,19 +523,7 @@ impl Process {
             // a thread waiting for one.
             self.vsync_tick();
             let now = self.now();
-            for i in 0..self.sched.threads.len() {
-                match self.sched.threads[i].state {
-                    State::Sleeping { until } if until <= now => {
-                        let turn = self.sched.take_turn();
-                        let t = &mut self.sched.threads[i];
-                        (t.state, t.turn) = (State::Ready, turn);
-                    }
-                    State::Waiting { until: Some(until) } if until <= now => {
-                        self.wake(i, result::TIMED_OUT, None);
-                    }
-                    _ => {}
-                }
-            }
+            self.wake_due(now);
             let first = self.current_thread().core + rotate as u32;
             for core in (0..CORES).map(|c| (first + c) % CORES) {
                 let best = self
@@ -550,57 +543,85 @@ impl Process {
                     return None;
                 }
             }
-            let wake = self
-                .sched
-                .threads
-                .iter()
-                .filter_map(|t| match t.state {
-                    State::Sleeping { until } | State::Waiting { until: Some(until) } => {
-                        Some(until)
-                    }
-                    _ => None,
-                })
-                .chain(self.services.vi.next_release())
-                .min();
-            match wake {
+            match self.next_wake() {
                 Some(until) if matches!(self.cpu.clock, Clock::Host { .. }) => {
                     self.sched.idle_until = Some(until);
                     return None;
                 }
                 Some(until) => self.cpu.clock.skip(until.saturating_sub(now)),
-                None if self.sched.threads.iter().all(|t| t.state == State::Exited) => {
-                    return Some(Stop::Exited)
-                }
-                None => {
-                    let mut why: Vec<String> = self
-                        .sched
-                        .threads
-                        .iter()
-                        .filter_map(|t| match (&t.state, &t.wait) {
-                            (State::Waiting { .. }, Some(w)) => {
-                                Some(format!("thread {:#x} {}", t.id, w.describe()))
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let created = self
-                        .sched
-                        .threads
-                        .iter()
-                        .filter(|t| t.state == State::Created)
-                        .count();
-                    if created > 0 {
-                        why.push(format!("{created} thread(s) created but never started"));
-                    }
-                    let what = if why.iter().any(|w| w.starts_with("thread")) {
-                        "deadlock, every thread waits with no timeout"
-                    } else {
-                        "no thread can run"
-                    };
-                    return Some(Stop::Error(format!("{what}: {}", why.join("; "))));
-                }
+                None => return Some(self.nothing_to_run()),
             }
         }
+    }
+
+    /// Wake the sleepers whose time has come, and end with TimedOut the
+    /// waits whose deadline passed. Returns whether any thread woke.
+    pub(crate) fn wake_due(&mut self, now: u64) -> bool {
+        let mut woke = false;
+        for i in 0..self.sched.threads.len() {
+            match self.sched.threads[i].state {
+                State::Sleeping { until } if until <= now => {
+                    let turn = self.sched.take_turn();
+                    let t = &mut self.sched.threads[i];
+                    (t.state, t.turn) = (State::Ready, turn);
+                    woke = true;
+                }
+                State::Waiting { until: Some(until) } if until <= now => {
+                    self.wake(i, result::TIMED_OUT, None);
+                    woke = true;
+                }
+                _ => {}
+            }
+        }
+        woke
+    }
+
+    /// The next clock reading at which something wakes a thread: a sleep
+    /// or a wait's timeout ending, or the display freeing a buffer.
+    pub(crate) fn next_wake(&self) -> Option<u64> {
+        self.sched
+            .threads
+            .iter()
+            .filter_map(|t| match t.state {
+                State::Sleeping { until } | State::Waiting { until: Some(until) } => Some(until),
+                _ => None,
+            })
+            .chain(self.services.vi.next_release())
+            .min()
+    }
+
+    /// Why the process stops when no thread is ready and nothing will wake
+    /// one: every thread exited, or a deadlock, or threads never started.
+    pub(crate) fn nothing_to_run(&self) -> Stop {
+        if self.sched.threads.iter().all(|t| t.state == State::Exited) {
+            return Stop::Exited;
+        }
+        let mut why: Vec<String> = self
+            .sched
+            .threads
+            .iter()
+            .filter_map(|t| match (&t.state, &t.wait) {
+                (State::Waiting { .. }, Some(w)) => {
+                    Some(format!("thread {:#x} {}", t.id, w.describe()))
+                }
+                _ => None,
+            })
+            .collect();
+        let created = self
+            .sched
+            .threads
+            .iter()
+            .filter(|t| t.state == State::Created)
+            .count();
+        if created > 0 {
+            why.push(format!("{created} thread(s) created but never started"));
+        }
+        let what = if why.iter().any(|w| w.starts_with("thread")) {
+            "deadlock, every thread waits with no timeout"
+        } else {
+            "no thread can run"
+        };
+        Stop::Error(format!("{what}: {}", why.join("; ")))
     }
 }
 

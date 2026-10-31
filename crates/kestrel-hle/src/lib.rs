@@ -163,6 +163,26 @@ pub struct Process {
     pub svc_count: u64,
 }
 
+/// How the process stops when guest code on `backend` exits with `exit`,
+/// anything but a system call or the end of its budget.
+fn guest_stop(exit: Exit, cpu: &CpuState, backend: &str) -> Stop {
+    match exit {
+        Exit::Breakpoint(imm) => Stop::Break {
+            pc: cpu.pc,
+            reason: imm as u64,
+        },
+        Exit::Undefined { pc, insn } => Stop::Error(format!(
+            "unimplemented instruction {insn:08x} at {pc:#x} (backend: {backend})"
+        )),
+        Exit::Unsupported { pc, insn, what } => Stop::Error(format!(
+            "unsupported: {} (instruction {insn:08x} at {pc:#x}, backend: {backend})",
+            what.describe()
+        )),
+        Exit::Fault { pc, fault } => Stop::Error(format!("guest fault at pc {pc:#x}: {fault}")),
+        Exit::Svc(_) | Exit::StepLimit => unreachable!("{exit:?} does not stop the process"),
+    }
+}
+
 impl Process {
     /// Create a process around an already-loaded image.
     pub fn new(mem: Memory, image: &Loaded) -> Result<Self, String> {
@@ -296,29 +316,8 @@ impl Process {
                         return stop;
                     }
                 }
-                Exit::Breakpoint(imm) => {
-                    return Stop::Break {
-                        pc: self.cpu.pc,
-                        reason: imm as u64,
-                    }
-                }
-                Exit::Undefined { pc, insn } => {
-                    return Stop::Error(format!(
-                        "unimplemented instruction {insn:08x} at {pc:#x} (backend: {})",
-                        backend.name()
-                    ))
-                }
-                Exit::Unsupported { pc, insn, what } => {
-                    return Stop::Error(format!(
-                        "unsupported: {} (instruction {insn:08x} at {pc:#x}, backend: {})",
-                        what.describe(),
-                        backend.name()
-                    ))
-                }
-                Exit::Fault { pc, fault } => {
-                    return Stop::Error(format!("guest fault at pc {pc:#x}: {fault}"))
-                }
                 Exit::StepLimit => {}
+                other => return guest_stop(other, &self.cpu, backend.name()),
             }
             // The core used up its slice: the next core gets a turn.
             if self.sched.slice_left == 0 {
