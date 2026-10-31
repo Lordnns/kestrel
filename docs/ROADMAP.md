@@ -85,9 +85,12 @@ Starts on macOS once phase 2's threads and synchronisation are done
 
 ### Deviations from the hard rules found in the audit
 
-- "Every instruction has a unit test": `interp/tests.rs` plus the 91 checks in
-  `asm_checks.S` cover most implemented instructions, but not all (for
-  example BIT/BIF, REV32, CCMN, SMADDL/UMADDL, LDSMIN/LDUMAX).
+- Fixed (2026-10-31): "Every instruction has a unit test": `interp/tests.rs`
+  plus the 91 checks in `asm_checks.S` covered most implemented
+  instructions, but not all (for example BIT/BIF, REV32, CCMN,
+  SMADDL/UMADDL, LDSMIN/LDUMAX). `scripts/gen-int-vectors.py` now tests
+  every general-purpose instruction one by one (see "CPU gaps before
+  phase 3").
 - Fixed: `system.rs` treated every MSR (immediate) and every SYS/SYSL other
   than `DC ZVA` as a no-op, and `svcOutputDebugString` truncated at 1 MiB.
   Now hints and barriers run as NOP (as the architecture defines), the EL0
@@ -135,6 +138,43 @@ so their frame timing and timeouts were far from a console's. Six cores
 on host threads is what lets the fast backends keep up with games that
 spread their work over the console's cores; a single host thread taking
 turns would cap them at one core's speed.
+
+### CPU gaps before phase 3 (owner, 2026-10-30)
+
+The owner's decision: close the CPU gaps on Linux before phase 3, keeping
+the changes inside `kestrel-cpu` and its tests and leaving how
+instructions reach memory alone (a separate branch is turning guest memory
+into the phase 3 arena). Switch 2 games are built for the Cortex-A78C,
+which has half precision, the dot product and the crypto extension.
+
+| Step | Status | Evidence |
+|------|--------|----------|
+| 1. A unit test for every implemented instruction | done | `scripts/gen-int-vectors.py` writes `interp/int_vectors.rs`: 478 one-instruction cases (data processing immediate and register, branches, system registers and hints, single, SIMD-register, pair and literal loads and stores, exclusives, acquire/release, CAS, the LSE atomics, FMOV to and from general registers), run by `interp/int_tests.rs`; with the NEON vectors, every interpreter line except undefined-encoding paths runs under `cargo test -p kestrel-cpu` (measured with `-C instrument-coverage`) |
+| 2. Half precision (FP16) | not started | stops as `Unmodelled::HalfPrecision` |
+| 3. DotProd (SDOT, UDOT) | not started | undefined |
+| 4. Crypto (AES, SHA1, SHA2, 64-bit PMULL) | not started | undefined |
+
+How the integer vectors work: each case is one instruction at
+`0x10080`, assembled by clang and read back with llvm-objdump (the script
+refuses any encoding left to a relocation). Every case starts from the
+same 31 registers (edge values, pointers into a 768-byte memory window,
+a value for a CAS that matches), SP, vector registers, FPCR, FPSR and
+TPIDR_EL0, with its own NZCV and exclusive-monitor address, runs one step,
+and compares all of them plus the next PC and the memory window. The
+models read the assembly text, not the encoding, and follow the Arm ARM
+pseudocode (AddWithCarry, ConditionHolds, ShiftReg, ExtendReg, the
+bitfield aliases, the exclusive monitor: a store-exclusive leaves the
+local monitor open whether or not it succeeded). CTR_EL0, DCZID_EL0 and
+CNTFRQ_EL0 are kestrel's documented values (64-byte lines, 64-byte DC ZVA
+blocks, 19.2 MHz). Deliberately breaking CCMN's carry and LDSMIN's signed
+compare fails 2 and 4 cases.
+
+Not reached by any CPU unit test, though the instructions are tested:
+some value paths of `float.rs` (FRECPE and FRSQRTE of subnormals and of
+values whose reciprocal overflows under each rounding mode, FRECPS and
+FRSQRTS of infinity times zero, single-precision FMA under FZ). The
+Python model `armfp.f_recpe` ignores the rounding mode for overflowing
+reciprocals, so it must learn it before such cases are added.
 
 ### Phase 1A notes
 

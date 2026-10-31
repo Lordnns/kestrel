@@ -95,6 +95,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y clang lld llvm libudev-dev pkg-config
       - name: NEON test vectors match the independent Python model
         run: python3 scripts/gen-neon-vectors.py --check
+      - name: Integer test vectors match the independent Python model
+        run: python3 scripts/gen-int-vectors.py --check
       - run: bash scripts/build-guest.sh
       - run: cargo run -q --release -p kestrel-cli -- selftest
       - name: Programs built with -O3 for Armv8.2 hit no unsupported instruction
