@@ -27,8 +27,8 @@ aarch64 hosts** (Linux, macOS, Windows) from day one.
 ## What works
 
 - **Portable ARM64 interpreter** — integer data processing, branches, all
-  load/store addressing modes, pairs, exclusives, acquire/release, CAS, ARMv8.1
-  LSE atomics, user system registers, scalar half, single and double
+  load/store addressing modes, pairs, exclusives, acquire/release, CAS and
+  CASP, ARMv8.1 LSE atomics, CRC32, user system registers, scalar half, single and double
   precision floating point (Arm NaN, default-NaN and flush-to-zero rules,
   bit-identical on every host), and Advanced SIMD (NEON) vector and scalar
   instructions with structure loads and stores, half precision, the dot

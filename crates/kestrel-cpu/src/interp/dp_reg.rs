@@ -162,6 +162,9 @@ fn cond_select(c: &mut Ctx) -> Step {
 fn two_source(c: &mut Ctx) -> Step {
     let i = c.insn;
     let sf = bit(i, 31);
+    if field(i, 15, 13) == 0b010 {
+        return crc32(c);
+    }
     let width = if sf { 64 } else { 32 };
     let a = trunc(c.s.xr(field(i, 9, 5)), sf);
     let b = trunc(c.s.xr(field(i, 20, 16)), sf);
@@ -183,6 +186,28 @@ fn two_source(c: &mut Ctx) -> Step {
         _ => return Err(c.undef()),
     };
     c.s.set_xr(field(i, 4, 0), trunc(r, sf));
+    Ok(Flow::Next)
+}
+
+/// CRC32B/H/W/X and CRC32CB/H/W/X (FEAT_CRC32, mandatory from Armv8.1):
+/// the accumulator Wn updated with the low 8 << sz bits of Rm, bit-reflected
+/// as the pseudocode's BitReverse and Poly32Mod2 have it. The X forms need
+/// sf = 1, the others sf = 0.
+fn crc32(c: &mut Ctx) -> Step {
+    let i = c.insn;
+    let sz = field(i, 11, 10);
+    if bit(i, 29) || bit(i, 31) != (sz == 3) {
+        return Err(c.undef());
+    }
+    // The reflected polynomials: CRC-32 (0x04C11DB7) and CRC-32C (0x1EDC6F41).
+    let poly: u32 = if bit(i, 12) { 0x82f6_3b78 } else { 0xedb8_8320 };
+    let mut crc = c.s.xr(field(i, 9, 5)) as u32;
+    let val = c.s.xr(field(i, 20, 16));
+    for k in 0..8u32 << sz {
+        let lsb = (crc ^ (val >> k) as u32) & 1;
+        crc = (crc >> 1) ^ if lsb != 0 { poly } else { 0 };
+    }
+    c.s.set_xr(field(i, 4, 0), crc as u64);
     Ok(Flow::Next)
 }
 

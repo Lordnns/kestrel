@@ -223,7 +223,7 @@ fn pair(c: &mut Ctx) -> Step {
     Ok(Flow::Next)
 }
 
-/// LDXR/STXR, LDAXR/STLXR, LDAR/STLR, LDXP/STXP and CAS.
+/// LDXR/STXR, LDAXR/STLXR, LDAR/STLR, LDXP/STXP, CAS and CASP.
 ///
 /// The interpreter runs one guest thread at a time, so the exclusive monitor
 /// only needs to remember the last LDXR address; a store-exclusive succeeds
@@ -268,11 +268,25 @@ fn exclusive(c: &mut Ctx) -> Step {
                 c.s.set_xr(rs, (!ok) as u64);
             }
         }
-        // Pair exclusive (sizes 32 and 64 only).
-        (false, true) => {
-            if size < 2 {
+        // CASP, CASPA, CASPL, CASPAL (FEAT_LSE): bit 30 picks 32- or 64-bit
+        // registers; Rs and Rt name even-numbered pairs.
+        (false, true) if size < 2 => {
+            if rt2 != 0b11111 || rs & 1 != 0 || rt & 1 != 0 {
                 return Err(c.undef());
             }
+            let bytes = 4u32 << size;
+            let old = [load(c, addr, bytes)?, load(c, addr + bytes as u64, bytes)?];
+            let mask = ones(bytes * 8);
+            if old == [c.s.xr(rs) & mask, c.s.xr(rs + 1) & mask] {
+                let (a, b) = (c.s.xr(rt), c.s.xr(rt + 1));
+                store(c, addr, a, bytes)?;
+                store(c, addr + bytes as u64, b, bytes)?;
+            }
+            c.s.set_xr(rs, old[0]);
+            c.s.set_xr(rs + 1, old[1]);
+        }
+        // Pair exclusive (sizes 32 and 64 only).
+        (false, true) => {
             if l {
                 let a = load(c, addr, bytes)?;
                 let b = load(c, addr + bytes as u64, bytes)?;

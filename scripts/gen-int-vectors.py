@@ -18,6 +18,7 @@ Needs clang and llvm-objdump (override with $CLANG and $OBJDUMP).
 
 import os
 import random
+import zlib
 import re
 import subprocess
 import sys
@@ -83,6 +84,10 @@ X0[22] = 0x03C0_0000  # a valid FPCR: DN, FZ, RMode = RZ
 X0[23] = 0x0800_009F  # a valid FPSR: QC, IDC and the five cumulative flags
 X0[24] = MEM_BASE + 0x19C  # not 64-byte aligned, for DC ZVA
 X0[25] = le(MEM0[0x140:0x148])  # what X16 points at, for a CAS that matches
+X0[26] = le(MEM0[0x140:0x148])  # and the pairs for a CASP that matches
+X0[27] = le(MEM0[0x148:0x150])
+X0[28] = (0xABCD << 32) | le(MEM0[0x140:0x144])  # the top half is ignored
+X0[29] = le(MEM0[0x144:0x148])
 SP0 = MEM_BASE + 0x180
 V0 = [rng.getrandbits(128) for _ in range(32)]
 FPCR0 = 0x0200_0000  # DN
@@ -461,6 +466,34 @@ def m_onesrc(mn, ops):
     wr(d, r)
 
 
+def bitrev(x, n):
+    return int(format(x & M(n), f"0{n}b")[::-1], 2)
+
+
+def crc32_model(acc, val, size, castagnoli):
+    """CRC32* from the Arm ARM: BitReverse, then Poly32Mod2, then BitReverse."""
+    poly = 0x1EDC6F41 if castagnoli else 0x04C11DB7
+    data = (bitrev(acc, 32) << size) ^ (bitrev(val, size) << 32)
+    for i in range(32 + size - 1, 31, -1):
+        if (data >> i) & 1:
+            data ^= poly << (i - 32)
+    return bitrev(data & M(32), 32)
+
+
+def crc32_selfcheck():
+    """The standard check values: CRC-32 and CRC-32C of b"123456789"."""
+    for castagnoli, want in ((False, zlib.crc32(b"123456789")), (True, 0xE3069283)):
+        crc = M(32)
+        for b in b"123456789":
+            crc = crc32_model(crc, b, 8, castagnoli)
+        assert crc ^ M(32) == want, "CRC32 model"
+
+
+def m_crc32(mn, ops):
+    size = {"b": 8, "h": 16, "w": 32, "x": 64}[mn[-1]]
+    wr(ops[0], crc32_model(rd(ops[1]), rd(ops[2]), size, mn.startswith("crc32c")))
+
+
 def m_mul(mn, ops):
     d = ops[0]
     n = width(d)
@@ -709,6 +742,20 @@ def m_excl(mn, ops):
     assert pair == (len(regs) == 2)
 
 
+def m_casp(mn, ops):
+    """CASP: compare the pair at the address with Rs, Rs+1; if both match,
+    store Rt, Rt+1; Rs, Rs+1 get the old values either way."""
+    s1, s2, t1, t2, mem = ops
+    size = reg_size(s1)
+    a = rd(mem.strip("[]"))
+    old = [mem_read(a, size), mem_read(a + size, size)]
+    if old == [rd(s1), rd(s2)]:
+        mem_write(a, size, rd(t1))
+        mem_write(a + size, size, rd(t2))
+    wr(s1, old[0])
+    wr(s2, old[1])
+
+
 def m_cas(mn, ops):
     s, t, mem = ops
     size, _ = access(mn.rstrip("al") if mn not in ("casa", "casl", "casal") else mn)
@@ -813,6 +860,10 @@ def model(asm):
         return m_sys(mn, ops)
     if mn == "fmov":
         return m_fmov(mn, ops)
+    if re.fullmatch(r"caspa?l?", mn):
+        return m_casp(mn, ops)
+    if re.fullmatch(r"crc32c?[bhwx]", mn):
+        return m_crc32(mn, ops)
     if re.fullmatch(r"cas[al]*[bh]?", mn):
         return m_cas(mn, ops)
     if re.fullmatch(r"(ld|st)(add|clr|eor|set|smax|smin|umax|umin)a?l?[bh]?|swpa?l?[bh]?", mn):
@@ -897,6 +948,9 @@ GROUPS = {
         "smull x0, w9, w9", "umaddl x0, w9, w15, x1", "umsubl x0, w7, w7, x13", "umull x0, w4, w4",
         "smnegl x0, w9, w1", "umnegl x0, w9, w1", "smulh x0, x2, x2", "smulh x0, x9, x1",
         "umulh x0, x4, x4", "umulh x0, x1, x15",
+        "crc32b w0, w1, w2", "crc32h w0, w15, w14", "crc32w w0, w4, w1", "crc32x w0, w1, x15",
+        "crc32cb w0, w1, w2", "crc32ch w0, w15, w14", "crc32cw w0, w13, w4", "crc32cx w0, w4, x1",
+        "crc32b w0, w13, w13", "crc32cx w3, w3, x3",
     ],
     "branch": [
         "b .+0x100", "b .-0x80", "bl .+0x40", "bl .-4",
@@ -974,6 +1028,8 @@ GROUPS = {
         "cas x8, x15, [x16]", "cas x25, x15, [x16]", "casa w25, w15, [x16]", "casl w8, w15, [x16]",
         "casal x25, x15, [x16]", "casb w25, w15, [x16]", "cash w25, w15, [x16]", "casab w8, w15, [x16]",
         "caslh w8, w15, [x16]", "casalb w25, w15, [x16]",
+        "casp x0, x1, x2, x3, [x16]", "casp x26, x27, x2, x3, [x16]", "caspa w28, w29, w14, w15, [x16]",
+        "caspl w0, w1, w2, w3, [x20]", "caspal x26, x27, x14, x15, [x16]", "caspal w26, w27, w2, w3, [x16]",
     ],
     "ldst_atomic": [
         "ldadd x15, x0, [x16]", "ldaddb w15, w0, [x16]", "ldaddh w15, w0, [x16]", "ldadd w15, w0, [x16]",
@@ -1010,7 +1066,7 @@ def assemble(lines):
         src, obj = os.path.join(tmp, "v.s"), os.path.join(tmp, "v.o")
         with open(src, "w") as fh:
             fh.write("".join(line + "\n" for line in lines))
-        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a", "-c",
+        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+crc", "-c",
                         src, "-o", obj], check=True)
         dis = subprocess.run([os.environ.get("OBJDUMP", "llvm-objdump"), "-dr", obj], check=True,
                              capture_output=True, text=True).stdout
@@ -1028,6 +1084,7 @@ def opt(v):
 
 def main():
     global ST
+    crc32_selfcheck()
     words = assemble([asm for _, asm, _, _ in CASES])
     out = []
     w = out.append

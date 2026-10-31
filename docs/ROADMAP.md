@@ -163,6 +163,7 @@ which has half precision, the dot product and the crypto extension.
 | 2. Half precision (FP16) | done | `Fmt::H` in `float.rs`, computed exactly in integers (every rounding mode, FPCR.FZ16); the scalar floating-point group with `ftype` 11 (arithmetic, FMA, compares, selects, FMOV, round-to-integral, conversions to and from single, double and integers), the FP16 three-same and two-register-misc groups (vector and scalar), across lanes, scalar pairwise, by element, fixed-point conversion, FMOV (vector), FCVTN/FCVTL to and from half; 240 cases in `neon_vectors.rs` (groups `fp16_same`, `fp16_misc`, `fp16_other`, `fp16_scalar`) |
 | 3. DotProd (SDOT, UDOT) | done | vector (three same extra, opcode 0010) and by element (opcode 1110, index H:L), 2S and 4S, in `neon/int.rs`; 11 cases in `neon_vectors.rs` (group `dot`); flipping the signedness fails all 11 |
 | 4. Crypto (AES, SHA1, SHA2, 64-bit PMULL) | done | `neon/crypto.rs`: AESE, AESD, AESMC, AESIMC (the S-box computed from FIPS 197's definition), SHA1C/P/M, SHA1H, SHA1SU0/SU1, SHA256H/H2, SHA256SU0/SU1; PMULL/PMULL2 1Q in `neon/int.rs`; 26 cases in `neon_vectors.rs` (group `crypto`); breaking SHA256SU1's upper words or the inverse MixColumns matrix fails 1 and 2 cases |
+| 5. CRC32 and CASP (owner, 2026-10-31) | done | CRC32B/H/W/X and CRC32CB/H/W/X (FEAT_CRC32) in `dp_reg.rs`; CASP, CASPA, CASPL, CASPAL (FEAT_LSE) in `ldst.rs`, through the same load and store helpers as CAS; 16 cases in `int_vectors.rs`, with X26..X29 holding pairs that match memory; swapping the CRC-32C polynomial for CRC-32's, or giving Rs+1 the wrong old value, fails 5 and 6 cases |
 
 How the integer vectors work: each case is one instruction at
 `0x10080`, assembled by clang and read back with llvm-objdump (the script
@@ -213,6 +214,15 @@ The C test programs rebuilt with `GUEST_OPT="-O3
 -march=armv8.2-a+fp16+dotprod+crypto"` (`scripts/check-optimised.sh`)
 still give the expected output, 13/13, but clang 18 emits none of the new
 instructions for them, so the unit vectors are what covers them.
+
+CRC32 and CASP: both are mandatory from Armv8.1, so the Cortex-A78C has
+them; the owner asked for them after the first four steps (2026-10-31).
+The CRC model follows the pseudocode literally (BitReverse, Poly32Mod2,
+BitReverse), while kestrel shifts the reflected polynomial, and the model
+must give the standard check values (CRC-32 of "123456789" as zlib
+computes it, CRC-32C 0xE3069283) every time the vectors are generated.
+CASP with an odd Rs or Rt, which the Arm ARM leaves CONSTRAINED
+UNPREDICTABLE, stops as undefined (kestrel's choice).
 
 Not reached by any CPU unit test, though the instructions are tested:
 some value paths of `float.rs` (FRECPE and FRSQRTE of subnormals and of
@@ -919,23 +929,10 @@ Gaps:
 
 Phase 2 is accepted (`v0.1.17`, 2026-10-30), and the clock follows the
 owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
-window, 52 instructions a tick otherwise). The CPU gaps the owner chose to
-close before phase 3 are closed on branch `claude/bold-euler-pjl3cr`
-(2026-10-31, "CPU gaps before phase 3": a unit test for every
-instruction, half precision, the dot product, the crypto extension),
-waiting for review. Once it is merged, a release tag runs CI (the
-self-test and the examples on every platform, and the new
-`gen-int-vectors.py --check`) for both the new clock and the CPU work.
-Then ask the owner which comes next; the candidates:
+window, 52 instructions a tick otherwise). The first release with the
+new clock should be tagged so CI runs the self-test and the examples on
+every platform. Then ask the owner which comes next; the candidates:
 
-0. The remaining CPU gaps that session found (not in the owner's list,
-   so not started): CRC32 and CASP are mandatory from Armv8.1 (FEAT_CRC32,
-   FEAT_LSE), so the Cortex-A78C has them, and both stop as undefined;
-   LDAPR (FEAT_LRCPC), the non-hint pointer authentication instructions
-   (PACIA, AUTIA, RETAA, LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM)
-   are later or optional features, to check against the Cortex-A78C's
-   documentation before adding. The hint-space PAC instructions
-   (PACIASP and the like) already run as NOP.
 1. Phase 3 on Linux KVM and Windows (the native backend), now that
    phase 2 is accepted; phase 3 on macOS needs a session on the owner's
    Mac. Design it for the real-time goal (`PLAN.md` section 1): guest
@@ -949,6 +946,18 @@ Then ask the owner which comes next; the candidates:
    players, and real Joy-Con motion, rumble and pairing over their own
    protocol. A Wii Remote is not a Switch controller type; it can only be
    mapped as a host gamepad.
+
+The CPU gaps the owner chose to close before phase 3 are closed on branch
+`claude/bold-euler-pjl3cr` (2026-10-31, "CPU gaps before phase 3": a unit
+test for every instruction, half precision, the dot product, the crypto
+extension, then CRC32 and CASP), waiting for review; once merged, a
+release tag runs CI on it, including the new `gen-int-vectors.py
+--check`. CPU features left for the owner to decide: LDAPR (FEAT_LRCPC),
+the non-hint pointer authentication instructions (PACIA, AUTIA, RETAA,
+LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as undefined; they
+are later or optional features, to check against the Cortex-A78C's
+documentation before adding. The hint-space PAC instructions (PACIASP
+and the like) already run as NOP.
 
 Each service so far followed the same steps; keep them:
 
