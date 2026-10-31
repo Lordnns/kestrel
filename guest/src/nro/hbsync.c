@@ -239,11 +239,14 @@ static void consumer(u64 me_index) {
     exit_thread();
 }
 
-// Address arbitration.
+// Address arbitration. The waiter says when it is about to wait, so the
+// main thread's 1 ms sleep only has to cover the call itself, even when
+// its core starts late (cores on a busy host's threads).
 static volatile int flag;
-static volatile u64 address_rc = 0xffff;
+static volatile u64 address_rc = 0xffff, address_ready;
 static void address_waiter(u64 unused) {
     (void)unused;
+    address_ready = 1;
     address_rc = wait_address(&flag, 2, 0, FOREVER); // WaitIfEqual 0
     exit_thread();
 }
@@ -360,6 +363,7 @@ void hb_main(const config_entry *config, u64 x1) {
     hex("wait while 0 < 1, no time: ", wait_address(&flag, 0, 1, 0));
     hex("unknown arbitration type: ", wait_address(&flag, 3, 0, 0));
     t = start(0, address_waiter, 0, 1);
+    while (!address_ready) sleep_ns(0);
     sleep_ns(1000000);
     yes_no("the address waiter is still waiting: ", address_rc == 0xffff);
     hex("signal and increment if 5: ", signal_address(&flag, 1, 5, -1));
