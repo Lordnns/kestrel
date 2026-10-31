@@ -71,6 +71,10 @@ pub enum MemFault {
     Misaligned {
         addr: u64,
     },
+    /// An atomic access not aligned to its size.
+    Unaligned {
+        addr: u64,
+    },
     /// A mapping above the address space the page table covers.
     OutOfRange {
         addr: u64,
@@ -95,6 +99,7 @@ impl fmt::Display for MemFault {
             MemFault::OutOfRange { addr } => {
                 write!(f, "mapping at {addr:#x} is outside the address space")
             }
+            MemFault::Unaligned { addr } => write!(f, "unaligned atomic access at {addr:#x}"),
             MemFault::OutOfMemory { addr } => {
                 write!(f, "no guest memory left for a mapping at {addr:#x}")
             }
@@ -248,6 +253,8 @@ pub struct Memory {
     arena: Arc<Arena>,
     table: PageTable,
     regions: Mutex<Regions>,
+    /// Counts mapping and permission changes; see [`Memory::epoch`].
+    epoch: AtomicU64,
 }
 
 impl Default for Memory {
@@ -276,6 +283,7 @@ impl Memory {
             arena,
             table: PageTable::new(),
             regions: Mutex::new(Regions::new()),
+            epoch: AtomicU64::new(0),
         }
     }
 
@@ -334,6 +342,7 @@ impl Memory {
                 name: name.to_string(),
             },
         );
+        self.epoch.fetch_add(1, Release);
         Ok(())
     }
 
@@ -441,6 +450,7 @@ impl Memory {
             let e = slot.load(Acquire);
             slot.store(entry(entry_frame(e), perm), Release);
         }
+        self.epoch.fetch_add(1, Release);
     }
 
     /// Unmap the pages of `[base, base + size)` and give their frames back
@@ -461,6 +471,23 @@ impl Memory {
         if let Some((start, len)) = run {
             self.arena.free(start, len);
         }
+        self.epoch.fetch_add(1, Release);
+    }
+
+    /// The page holding `addr` as the backends see it: its frame's offset
+    /// in the arena and its permission. A hypervisor backend builds the
+    /// VM's page tables from this, a recompiler its view of the address
+    /// space; both rebuild what changed when [`Memory::epoch`] moves.
+    pub fn translate(&self, addr: u64) -> Option<(u64, Perm)> {
+        let e = self.table.get(addr);
+        (e & PRESENT != 0).then_some((entry_frame(e), entry_perm(e)))
+    }
+
+    /// A count that moves on after every change to the mappings or their
+    /// permissions, so a backend holding its own copy of the page table
+    /// (the VM's, or a recompiler's) can tell that it must look again.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Acquire)
     }
 
     pub fn is_mapped(&self, addr: u64) -> bool {
@@ -646,6 +673,44 @@ rw_impl!(load8, read8, write8, u8, AtomicU8);
 rw_impl!(load16, read16, write16, u16, AtomicU16);
 rw_impl!(load32, read32, write32, u32, AtomicU32);
 rw_impl!(load64, read64, write64, u64, AtomicU64);
+
+// Compare-and-swap on guest memory, for guest atomics on backends that run
+// guest cores on several host threads: LSE's CAS family directly, and the
+// exclusive pairs (LDXR/STXR) as a compare-and-swap of the value the load
+// saw, the usual way to share one exclusive monitor between host threads.
+// The page needs read and write permission, like the guest's own atomics.
+macro_rules! cas_impl {
+    ($cas:ident, $t:ty, $atomic:ty) => {
+        impl Memory {
+            /// Replace the value at `addr` with `new` if it is `current`:
+            /// `Ok(Ok(current))` if it was replaced, `Ok(Err(seen))` with
+            /// the value found if not. `addr` must be aligned to the size.
+            pub fn $cas(
+                &self,
+                addr: u64,
+                current: $t,
+                new: $t,
+            ) -> Result<Result<$t, $t>, MemFault> {
+                if addr % std::mem::size_of::<$t>() as u64 != 0 {
+                    return Err(MemFault::Unaligned { addr });
+                }
+                let p = self.host(addr, Perm::RW)?;
+                // SAFETY: an aligned value in a mapped page.
+                let a = unsafe { <$atomic>::from_ptr(p.cast()) };
+                Ok(
+                    a.compare_exchange(current.to_le(), new.to_le(), AcqRel, Acquire)
+                        .map(<$t>::from_le)
+                        .map_err(<$t>::from_le),
+                )
+            }
+        }
+    };
+}
+
+cas_impl!(compare_exchange8, u8, AtomicU8);
+cas_impl!(compare_exchange16, u16, AtomicU16);
+cas_impl!(compare_exchange32, u32, AtomicU32);
+cas_impl!(compare_exchange64, u64, AtomicU64);
 
 impl Memory {
     /// A 128-bit read: two 64-bit halves when 8-byte aligned (each
@@ -872,5 +937,101 @@ mod tests {
         fn shared<T: Send + Sync>() {}
         shared::<Memory>();
         shared::<Arena>();
+    }
+
+    #[test]
+    fn backends_see_frames_permissions_and_changes() {
+        let m = Memory::new();
+        let e0 = m.epoch();
+        m.map(0x10000, 0x2000, Perm::RX, "code").unwrap();
+        let (frame, perm) = m.translate(0x11234).unwrap();
+        assert_eq!((frame % PAGE_SIZE, perm), (0, Perm::RX));
+        assert_ne!(m.translate(0x10000).unwrap().0, frame);
+        // The frame holds what the guest sees at that page.
+        m.poke_bytes(0x11234, &[0xab]).unwrap();
+        let mut b = [0];
+        unsafe { arena::load(m.arena().ptr(frame + 0x234), &mut b) };
+        assert_eq!(b, [0xab]);
+        let e1 = m.epoch();
+        assert!(e1 > e0);
+        m.update_range(0x11000, 0x1000, |p, _| *p = Perm::R)
+            .unwrap();
+        assert_eq!(m.translate(0x11000), Some((frame, Perm::R)));
+        let e2 = m.epoch();
+        assert!(e2 > e1);
+        m.read8(0x11000).unwrap();
+        assert_eq!(m.epoch(), e2, "accesses are not changes");
+        m.unmap_range(0x10000, 0x2000).unwrap();
+        assert_eq!(m.translate(0x11000), None);
+        assert!(m.epoch() > e2);
+    }
+
+    #[test]
+    fn compare_exchange_checks_alignment_and_permission() {
+        let m = Memory::new();
+        m.map(0x1000, 0x1000, Perm::RW, "data").unwrap();
+        m.map(0x2000, 0x1000, Perm::R, "ro").unwrap();
+        m.write64(0x1008, 5).unwrap();
+        assert_eq!(m.compare_exchange64(0x1008, 5, 6), Ok(Ok(5)));
+        assert_eq!(m.compare_exchange64(0x1008, 5, 7), Ok(Err(6)));
+        assert_eq!(m.read64(0x1008), Ok(6));
+        assert_eq!(m.compare_exchange16(0x100e, 0, 0xffff), Ok(Ok(0)));
+        assert_eq!(m.read64(0x1008), Ok(0xffff_0000_0000_0006));
+        assert_eq!(m.compare_exchange8(0x1009, 0, 1), Ok(Ok(0)));
+        assert_eq!(
+            m.compare_exchange32(0x100c, 0xffff_0000, 1),
+            Ok(Ok(0xffff_0000))
+        );
+        assert_eq!(m.read64(0x1008), Ok(0x0000_0001_0000_0106));
+        assert_eq!(
+            m.compare_exchange32(0x1002, 0, 1),
+            Err(MemFault::Unaligned { addr: 0x1002 })
+        );
+        assert_eq!(
+            m.compare_exchange32(0x2000, 0, 1),
+            Err(MemFault::Permission {
+                addr: 0x2000,
+                needed: Perm::RW
+            })
+        );
+        assert_eq!(
+            m.compare_exchange64(0x3000, 0, 1),
+            Err(MemFault::Unmapped { addr: 0x3000 })
+        );
+    }
+
+    /// Six host threads, one per Switch 2 core, on one Memory: atomic
+    /// increments all land, and an aligned 64-bit value is never seen
+    /// half written.
+    #[test]
+    fn six_host_threads_share_one_address_space() {
+        const CORES: u64 = 6;
+        const ROUNDS: u64 = 20_000;
+        let m = Memory::new();
+        m.map(0x1000, 0x1000, Perm::RW, "shared").unwrap();
+        let (counter, word) = (0x1000, 0x1040);
+        std::thread::scope(|s| {
+            for core in 0..CORES {
+                let m = &m;
+                s.spawn(move || {
+                    for i in 0..ROUNDS {
+                        loop {
+                            let v = m.read64(counter).unwrap();
+                            if m.compare_exchange64(counter, v, v + 1).unwrap().is_ok() {
+                                break;
+                            }
+                        }
+                        if core % 2 == 0 {
+                            let v = if i % 2 == 0 { 0 } else { u64::MAX };
+                            m.write64(word, v).unwrap();
+                        } else {
+                            let w = m.read64(word).unwrap();
+                            assert!(w == 0 || w == u64::MAX, "torn read {w:#x}");
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(m.read64(counter), Ok(CORES * ROUNDS));
     }
 }
