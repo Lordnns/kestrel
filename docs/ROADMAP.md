@@ -91,7 +91,8 @@ moved to the CPU track, for the recompiler first.
 | Interpreter fallback per instruction | done | `Op::Interp` |
 | Integer, branches, loads and stores translated | done | 99.3% of the self-test's instructions run translated |
 | Floating point and NEON translated | not started | they run through `Op::Interp` |
-| Speed: block chaining, inline memory accesses, register allocation of guest registers | not started | "Next task" |
+| Speed: block chaining, inline memory accesses | done | "Phase 4 notes" |
+| Speed: computed-jump lookup in generated code, guest registers in host registers, lazy flags | not started | "Next task" |
 | One host thread per guest core | not started | `PLAN.md` section 3, "Time and cores" |
 | Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 in both conventions; CI on Windows x86_64 pending | "Phase 4 notes" |
 
@@ -1067,7 +1068,8 @@ cache and dispatcher, the interpreter fallback.
 |--------------------|-------|
 | Block length | at most 64 instructions, ending at a branch; a block longer than the budget left is translated again cut to fit, so the recompiler retires exactly what the interpreter would |
 | Guest state | registers and NZCV in `CpuState` (memory), read and written by every operation; IR values in RBP, R13-R15 or stack slots |
-| Memory accesses | calls to `Memory::read*`/`write*` (the arena's own checks); inline page-table walks come next |
+| Memory accesses | an inline page-table walk (`Memory::raw_tables`) and a direct arena access; the `Memory` helper for anything unmapped, not permitted, crossing a page or beyond the table |
+| Chaining | blocks with at most 24 stack slots share one frame and jump into each other's bodies through link cells (data, not patched code); a chained jump needs room for 64 instructions in the budget, else the block returns to the dispatcher; links reset when the memory's change count moved and on `invalidate`; computed jumps always return to the dispatcher |
 | Code memory | 64 MiB per backend; when full, every translation is dropped and made again |
 | Self-modifying code | each block keeps its guest words; when `Memory::epoch` moves (a mapping or permission changed) they are fetched and compared before it runs again; blocks on writable and executable pages are compared every time |
 | A backend given another process's memory | drops every translation |
@@ -1097,6 +1099,18 @@ Verified (Linux x86_64 host, this session):
   gains most: sha256 527 MIPS (14.6 instructions a block), bigint 592;
   branchy code less: algos 268 (5.2 a block), hbthreads 182 (3.7),
   where returning to the dispatcher after every block dominates.
+- Then chaining and inline memory accesses (same machine, three runs
+  of each backend): the self-test 202 to 337 MIPS against 65 to 75 on
+  the interpreter. The total swings with the machine and is dominated by
+  translating the many short programs; long ones are steady: sha256
+  838, bigint 807, algos 554, hbthreads 319 (interpreter about 70).
+  New tests run small programs on both backends with budgets from 1 to
+  19,200 and compare: a fault part-way through a block, a store to
+  code, accesses crossing into a page whose frame is elsewhere in the
+  arena, halfwords, rewritten code (through a permission change and
+  through `invalidate`). Mutation checks: dropping the chained jump's
+  budget check, or the inline walk's page-crossing check, each fails a
+  test.
 - What still runs in the interpreter: 0.7% of the self-test's
   instructions (223,459 of 32,583,559): exclusives (LDXR/STXR in the
   thread programs' spin loops), CLZ/REV/RBIT, system registers, floating

@@ -10,7 +10,7 @@ const CODE: u64 = 0x1_0000;
 const STACK_BASE: u64 = 0x20_0000;
 const SP: u64 = STACK_BASE + 0x8000;
 
-pub(super) fn setup(words: &[u32]) -> (CpuState, Memory) {
+pub(crate) fn setup(words: &[u32]) -> (CpuState, Memory) {
     let m = Memory::new();
     m.map(CODE, 0x1000, Perm::RX, "code").unwrap();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();

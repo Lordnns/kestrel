@@ -120,7 +120,12 @@ def gen():
             case(f"a.store8_imm({m(b, disp)}, 1)", f"mov {mem('byte', b, disp)}, 1")
             case(f"a.load8_zx(R11, {m(b, disp)})", f"movzx r11d, {mem('byte', b, disp)}")
             case(f"a.load8_zx(RAX, {m(b, disp)})", f"movzx eax, {mem('byte', b, disp)}")
+            case(f"a.load16_zx(R11, {m(b, disp)})", f"movzx r11d, {mem('word', b, disp)}")
+            case(f"a.load16_zx(RAX, {m(b, disp)})", f"movzx eax, {mem('word', b, disp)}")
+            for r in (0, 2, 9):
+                case(f"a.store16({m(b, disp)}, {RUST[r]})", f"mov {mem('word', b, disp)}, {R16[r]}")
             case(f"a.lea(RCX, {m(b, disp)})", f"lea rcx, {mem('', b, disp)}")
+            case(f"a.jmp_m({m(b, disp)})", f"jmp {mem('qword', b, disp)}")
             case(f"a.lea(R9, {m(b, disp)})", f"lea r9, {mem('', b, disp)}")
             for cc in (4, 2, 8, 0):
                 case(f"a.setcc_m(Cc::{CCS[cc].capitalize()}, {m(b, disp)})", f"set{CCS[cc]} {mem('byte', b, disp)}")

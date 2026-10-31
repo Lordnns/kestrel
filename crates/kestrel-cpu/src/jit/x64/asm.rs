@@ -201,6 +201,17 @@ impl Asm {
         self.modrm_m(reg, m);
     }
 
+    /// `mov word [m], src` (the low 16 bits of src).
+    pub fn store16(&mut self, m: M, src: R) {
+        self.b(0x66);
+        self.op_rm(W32, &[0x89], src.0, m);
+    }
+
+    /// `movzx dst32, word [m]`.
+    pub fn load16_zx(&mut self, dst: R, m: M) {
+        self.op_rm(W32, &[0x0f, 0xb7], dst.0, m);
+    }
+
     /// `mov byte [m], imm`.
     pub fn store8_imm(&mut self, m: M, imm: u8) {
         self.op_rm(W32, &[0xc6], 0, m);
@@ -380,6 +391,11 @@ impl Asm {
         self.rex(W32, 0, r.0, None);
         self.b(0xff);
         self.modrm_rr(2, r.0);
+    }
+
+    /// `jmp qword [m]`: to the address held at `m`.
+    pub fn jmp_m(&mut self, m: M) {
+        self.op_rm(W32, &[0xff], 4, m);
     }
 
     pub fn ret(&mut self) {

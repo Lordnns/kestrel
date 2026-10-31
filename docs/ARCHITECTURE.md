@@ -99,8 +99,23 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   `CpuState` (RBX); IR values get RBP, R13-R15 (callee-saved in both
   conventions) or stack slots; NZCV come from the host's flags after
   `adc` (x86's SF, ZF, CF, OF are Arm's N, Z, C, V for AddWithCarry).
-  Memory accesses call helpers (`Memory::read*`/`write*`) for now; a
-  fault stops the block at the faulting instruction.
+  Memory accesses walk `Memory`'s page table inline (`Memory::raw_tables`:
+  top table, leaf, entry, permission, inside the page) and touch the
+  arena directly; anything else (unmapped, not permitted, crossing a
+  page, beyond the table) calls the `Memory` helper, which faults as the
+  interpreter does, and a fault stops the block at the faulting
+  instruction.
+- **Chaining**: every block with at most 24 stack slots shares one frame,
+  so a jump or branch with a known target can enter the next block's
+  body directly, through a link cell (a data word, so code is never
+  patched): first it points at a stub that returns to the dispatcher and
+  records the cell, and the dispatcher then points it at the target's
+  body. Before jumping, the block checks that a whole block (64
+  instructions) still fits in the budget, else it returns, so budgets
+  stay exact. Links are reset when `Memory::epoch` has moved since they
+  were made (checked at each `run`; the epoch cannot move inside one),
+  and on `invalidate`. Computed jumps (RET, BR, BLR) return to the
+  dispatcher.
 - **Encoder** (`x64/asm.rs`): kestrel's own (no dependency), from the
   Intel SDM; `scripts/gen-x64-vectors.py` checks every form it emits
   against llvm-mc (5,359 cases, `x64/asm/vectors.rs`).
@@ -235,7 +250,9 @@ phase 3 builds on, and what to check there.
 
 - Always available, on any host page size: generated code walks the page
   table as `Memory` does (top table, leaf, entry; entry layout in
-  `memory.rs`) and accesses `host_base + frame + offset`.
+  `memory.rs`) and accesses `host_base + frame + offset`. Done
+  (2026-10-31): `Memory::raw_tables` and the `TABLE_*` constants give the
+  layout; `jit/x64/mod.rs` (`walk`) emits it.
 - The fast path, with guard pages: reserve 2^39 bytes of host address
   space (plus a guard tail beyond it, so base + offset cannot escape) and
   map each guest page there as a second view of its frame, with the

@@ -47,11 +47,22 @@ pub struct JitCtx {
     fault: Option<MemFault>,
     /// An exit the interpreter returned from inside a block.
     exit: Option<Exit>,
+    /// Chained jumps need room for a whole block below this retired count.
+    limit: u64,
+    /// The link cell of the last chained exit taken, for the dispatcher to
+    /// link; 0 after other exits.
+    link: usize,
 }
+
+/// Link cells are handed out from chunks of this many.
+const CELLS: usize = 1024;
 
 /// One translated block.
 struct Entry {
     code: *const u8,
+    /// The body, which chained jumps enter; null if the block cannot be
+    /// chained to.
+    body: *const u8,
     insns: u32,
     /// The guest words it was made from.
     words: Vec<u32>,
@@ -107,6 +118,17 @@ pub struct Jit {
     /// The memory the translations were made from: one process's. Another
     /// one (a backend reused for a new process) drops them all.
     mem_id: usize,
+    /// Where an unlinked exit goes: code returning to the dispatcher.
+    stub: *const u8,
+    /// Link cells, in chunks that never move while translations live.
+    cells: Vec<Box<[usize; CELLS]>>,
+    cells_used: usize,
+    /// Cells pointing at a block, to reset when links must go.
+    linked: Vec<*mut usize>,
+    /// The memory's change count the links were made at. Within one
+    /// `run` it cannot move (only the OS layer maps memory, between
+    /// runs), so a linked block stays valid while it is the same.
+    link_epoch: u64,
     pub stats: Stats,
 }
 
@@ -136,8 +158,10 @@ impl Jit {
             c: flags + std::mem::offset_of!(crate::Flags, c) as i32,
             v: flags + std::mem::offset_of!(crate::Flags, v) as i32,
             faulted: std::mem::offset_of!(JitCtx, faulted) as i32,
+            limit: std::mem::offset_of!(JitCtx, limit) as i32,
+            link: std::mem::offset_of!(JitCtx, link) as i32,
         };
-        Ok(Jit {
+        let mut jit = Jit {
             abi,
             helpers,
             layout,
@@ -146,8 +170,15 @@ impl Jit {
             short: Map::default(),
             max_insns: frontend::MAX_INSNS,
             mem_id: 0,
+            stub: std::ptr::null(),
+            cells: Vec::new(),
+            cells_used: 0,
+            linked: Vec::new(),
+            link_epoch: 0,
             stats: Stats::default(),
-        })
+        };
+        jit.flush();
+        Ok(jit)
     }
 
     /// Limit blocks to `n` instructions (at least 1); 1 makes every
@@ -161,7 +192,39 @@ impl Jit {
     pub fn flush(&mut self) {
         self.blocks.clear();
         self.short.clear();
+        self.linked.clear();
+        self.cells.clear();
+        self.cells_used = 0;
         self.code.clear();
+        self.stub = match self.code.add(&x64::unlinked_stub(&self.layout)) {
+            Ok(Some(p)) => p,
+            _ => panic!("cannot write the recompiler's return stub"),
+        };
+    }
+
+    /// Point every linked cell back at the stub.
+    fn unlink_all(&mut self) {
+        for &cell in &self.linked {
+            // SAFETY: cells live in `self.cells` until a flush, which
+            // empties `linked` too.
+            unsafe { *cell = self.stub as usize };
+        }
+        self.linked.clear();
+    }
+
+    /// Two new link cells, unlinked.
+    fn new_cells(&mut self) -> [u64; 2] {
+        let mut take = || {
+            if self.cells_used == self.cells.len() * CELLS {
+                self.cells.push(Box::new([0; CELLS]));
+            }
+            let chunk = &mut self.cells[self.cells_used / CELLS];
+            let cell = &mut chunk[self.cells_used % CELLS];
+            *cell = self.stub as usize;
+            self.cells_used += 1;
+            cell as *mut usize as u64
+        };
+        [take(), take()]
     }
 
     /// Is `e` still what the guest has at `pc`?
@@ -181,13 +244,14 @@ impl Jit {
         same
     }
 
-    /// The code for the block at `pc`, at most `left` instructions long.
-    fn block(&mut self, mem: &Memory, pc: u64, left: u64) -> Result<(*const u8, u32), Exit> {
+    /// The code for the block at `pc`, at most `left` instructions long,
+    /// and the body a chained jump may enter (null if none may).
+    fn block(&mut self, mem: &Memory, pc: u64, left: u64) -> Result<(*const u8, *const u8), Exit> {
         let max = left.min(self.max_insns as u64) as u32;
         if let Some(e) = self.blocks.get_mut(&pc) {
             if Self::valid(e, mem, pc) {
                 if e.insns <= max {
-                    return Ok((e.code, e.insns));
+                    return Ok((e.code, e.body));
                 }
             } else {
                 self.blocks.remove(&pc);
@@ -199,37 +263,53 @@ impl Jit {
         if !natural {
             if let Some(e) = self.short.get_mut(&(pc, max)) {
                 if Self::valid(e, mem, pc) {
-                    return Ok((e.code, e.insns));
+                    return Ok((e.code, std::ptr::null()));
                 }
                 self.short.remove(&(pc, max));
             }
         }
         let e = self.translate(mem, pc, max)?;
-        let found = (e.code, e.insns);
         // A block that ended before `max` is the natural one too.
         if natural && (e.insns < max || max == self.max_insns) {
+            let found = (e.code, e.body);
             self.blocks.insert(pc, e);
+            Ok(found)
         } else {
+            let found = (e.code, std::ptr::null());
             self.short.insert((pc, max), e);
+            Ok(found)
         }
-        Ok(found)
     }
 
     fn translate(&mut self, mem: &Memory, pc: u64, max: u32) -> Result<Entry, Exit> {
         let (block, words) =
             frontend::translate(mem, pc, max).map_err(|fault| Exit::Fault { pc, fault })?;
-        let host = x64::compile(&block, self.abi, &self.helpers, &self.layout);
-        let code = match self.code.add(&host) {
+        let cells = self.new_cells();
+        let mut host = x64::compile(
+            &block,
+            self.abi,
+            &self.helpers,
+            &self.layout,
+            Some(cells),
+            mem.raw_tables(),
+        );
+        let code = match self.code.add(&host.code) {
             Ok(Some(p)) => p,
             Ok(None) => {
                 // Full: start again (the caller holds no other entry).
                 self.flush();
-                match self.code.add(&host) {
+                let cells = self.new_cells();
+                host = x64::compile(
+                    &block,
+                    self.abi,
+                    &self.helpers,
+                    &self.layout,
+                    Some(cells),
+                    mem.raw_tables(),
+                );
+                match self.code.add(&host.code) {
                     Ok(Some(p)) => p,
-                    _ => panic!(
-                        "a block of {} bytes does not fit the code memory",
-                        host.len()
-                    ),
+                    _ => panic!("a block does not fit the code memory"),
                 }
             }
             Err(e) => panic!("cannot make translated code executable: {e}"),
@@ -238,10 +318,20 @@ impl Jit {
         self.stats.code_bytes = self.code.used() as u64;
         let end = pc.wrapping_add(4 * words.len() as u64 - 1);
         let writable = |a: u64| mem.translate(a).is_some_and(|(_, p)| p.contains(Perm::W));
+        let always_check = writable(pc) || writable(end);
+        // A block checked every time it runs is never entered by a jump
+        // that skips the dispatcher.
+        let body = if host.chained && !always_check {
+            // SAFETY: the body lies inside the code just written.
+            unsafe { code.add(host.body) }
+        } else {
+            std::ptr::null()
+        };
         Ok(Entry {
             code,
+            body,
             insns: block.insns,
-            always_check: writable(pc) || writable(end),
+            always_check,
             words,
             epoch: mem.epoch(),
         })
@@ -261,12 +351,20 @@ impl CpuBackend for Jit {
         }
         let state: *mut CpuState = state;
         let mem: *mut Memory = mem;
+        // SAFETY: as below.
+        let epoch = unsafe { (*mem).epoch() };
+        if epoch != self.link_epoch {
+            self.unlink_all();
+            self.link_epoch = epoch;
+        }
         let mut ctx = JitCtx {
             state,
             mem,
             faulted: 0,
             fault: None,
             exit: None,
+            limit: start.saturating_add(max_steps),
+            link: 0,
         };
         loop {
             // SAFETY: generated code and helpers touch the state and memory
@@ -275,10 +373,18 @@ impl CpuBackend for Jit {
             if used >= max_steps {
                 return Exit::StepLimit;
             }
-            let (entry, _) = match self.block(unsafe { &*mem }, pc, max_steps - used) {
+            let (entry, body) = match self.block(unsafe { &*mem }, pc, max_steps - used) {
                 Ok(b) => b,
                 Err(exit) => return exit,
             };
+            // The last block left through a chained exit that is not
+            // linked yet: link it here, if this block may be entered so.
+            let cell = std::mem::take(&mut ctx.link) as *mut usize;
+            if !cell.is_null() && !body.is_null() {
+                // SAFETY: the cell is one of `self.cells`.
+                unsafe { *cell = body as usize };
+                self.linked.push(cell);
+            }
             self.stats.blocks_run += 1;
             // SAFETY: `entry` is a block compiled for this ABI, taking the
             // state and the context, both valid for the call.
@@ -316,6 +422,7 @@ impl CpuBackend for Jit {
     }
 
     fn invalidate(&mut self, addr: u64, len: u64) {
+        self.unlink_all();
         let end = addr.saturating_add(len);
         let hit = |pc: u64, e: &Entry| pc < end && pc + 4 * e.words.len() as u64 > addr;
         self.blocks.retain(|&pc, e| !hit(pc, e));

@@ -14,6 +14,12 @@
 //!   they survive helper calls); further values live in stack slots.
 //! - RAX, RCX, RDX, R8-R11: scratch, and the helpers' arguments.
 //!
+//! Guest memory accesses walk `Memory`'s page table inline (top table,
+//! leaf, entry, permission, staying inside the page) and touch the arena
+//! directly; anything else (unmapped, not permitted, crossing a page,
+//! beyond the table) calls the `Memory` helper, which faults as the
+//! interpreter does.
+//!
 //! The function returns a code saying how the block ended
 //! (`RET_*` below), with `CpuState::pc` set to where the guest goes on.
 
@@ -21,6 +27,11 @@ pub mod asm;
 
 use super::ir::{BinOp, Block, Carry, Op, Reg, Term, Val, Width};
 use asm::*;
+use kestrel_core::memory::{
+    RawTables, TABLE_LEAF_ENTRIES, TABLE_PERM_SHIFT, TABLE_PRESENT, TABLE_TOP_ENTRIES,
+    TABLE_TOP_SHIFT,
+};
+use kestrel_core::Perm;
 
 /// The block left normally; `CpuState::pc` is the next guest address.
 pub const RET_JUMP: u64 = 1;
@@ -84,6 +95,57 @@ pub struct Layout {
     pub v: i32,
     /// In the context: a byte set when a helper's access faulted.
     pub faulted: i32,
+    /// In the context: the retired count a chained jump must leave room
+    /// for a whole block below, and where the last exit's link cell goes.
+    pub limit: i32,
+    pub link: i32,
+}
+
+/// Stack slots every block's frame has room for, so a block can jump
+/// into another's body with the frame as it is. A block that needs more
+/// gets a frame of its own and is never chained (kestrel's choice).
+pub const FIXED_SLOTS: usize = 24;
+
+/// One block's host code.
+pub struct Compiled {
+    pub code: Vec<u8>,
+    /// Where the body starts, after the prologue: what a chained jump
+    /// enters.
+    pub body: usize,
+    /// The block uses the shared frame: it may be chained to and from.
+    pub chained: bool,
+}
+
+fn frame_size(slots: usize) -> i32 {
+    // On entry RSP is 8 past a multiple of 16; six pushes keep it so, and
+    // the frame must restore the alignment for calls.
+    let frame = SHADOW + 8 * slots as i32;
+    if frame % 16 != 8 {
+        frame + 8
+    } else {
+        frame
+    }
+}
+
+fn epilogue(a: &mut Asm, frame: i32) {
+    a.alu_ri(Alu::Add, W64, RSP, frame);
+    for r in [R15, R14, R13, R12, RBP, RBX] {
+        a.pop(r);
+    }
+    a.ret();
+}
+
+/// The code an unlinked chained exit jumps to, with its cell's address in
+/// R8: record the cell in the context and return `RET_JUMP` from a block
+/// with the shared frame, so the dispatcher looks the next block up and
+/// links the cell to it. Only this path records a cell, so the one the
+/// dispatcher sees is always the exit just taken.
+pub fn unlinked_stub(l: &Layout) -> Vec<u8> {
+    let mut a = Asm::new();
+    a.store(W64, M(CTX, l.link), R8);
+    a.mov_ri(RAX, RET_JUMP);
+    epilogue(&mut a, frame_size(FIXED_SLOTS));
+    a.code
 }
 
 const STATE: R = RBX;
@@ -117,17 +179,27 @@ struct Gen<'a> {
     to_epilogue: Vec<Fixup>,
     /// Faulting accesses: (jump, pc, instructions to retire).
     faults: Vec<(Fixup, u64, u32)>,
+    /// The link cells of the exits with a known target, when chained.
+    links: Option<[u64; 2]>,
+    /// The guest memory's page table, for inline accesses.
+    tables: RawTables,
 }
 
-/// Generate the host code for `block`.
-pub fn compile(block: &Block, abi: Abi, h: &Helpers, l: &Layout) -> Vec<u8> {
+/// Generate the host code for `block`. `links` are the addresses of two
+/// cells holding where its exits with a known target go (the jump's or
+/// the fall-through's, and the branch taken's); `None` returns to the
+/// dispatcher from every exit.
+pub fn compile(
+    block: &Block,
+    abi: Abi,
+    h: &Helpers,
+    l: &Layout,
+    links: Option<[u64; 2]>,
+    tables: RawTables,
+) -> Compiled {
     let (loc, slots) = allocate(block);
-    // On entry RSP is 8 past a multiple of 16; six pushes keep it so, and
-    // the frame must restore the alignment for calls.
-    let mut frame = SHADOW + 8 * slots as i32;
-    if frame % 16 != 8 {
-        frame += 8;
-    }
+    let chained = slots <= FIXED_SLOTS;
+    let frame = frame_size(if chained { FIXED_SLOTS } else { slots });
     let mut g = Gen {
         a: Asm::new(),
         abi,
@@ -139,6 +211,8 @@ pub fn compile(block: &Block, abi: Abi, h: &Helpers, l: &Layout) -> Vec<u8> {
         pc: block.pc,
         to_epilogue: Vec::new(),
         faults: Vec::new(),
+        links: links.filter(|_| chained),
+        tables,
     };
     for r in [RBX, RBP, R12, R13, R14, R15] {
         g.a.push(r);
@@ -147,20 +221,17 @@ pub fn compile(block: &Block, abi: Abi, h: &Helpers, l: &Layout) -> Vec<u8> {
     let [arg0, arg1, _] = abi.args();
     g.a.mov_rr(W64, STATE, arg0);
     g.a.mov_rr(W64, CTX, arg1);
+    let body = g.a.pos();
     for op in &block.ops {
         g.op(op);
     }
     g.term(&block.term, block.insns);
     // The epilogue, reached by falling through from the terminator.
-    let epilogue = g.a.pos();
+    let exit_at = g.a.pos();
     for f in std::mem::take(&mut g.to_epilogue) {
-        g.a.bind_to(f, epilogue);
+        g.a.bind_to(f, exit_at);
     }
-    g.a.alu_ri(Alu::Add, W64, RSP, frame);
-    for r in [R15, R14, R13, R12, RBP, RBX] {
-        g.a.pop(r);
-    }
-    g.a.ret();
+    epilogue(&mut g.a, frame);
     // Fault exits: the guest stops at the faulting instruction.
     for (f, pc, retire) in std::mem::take(&mut g.faults) {
         g.a.bind(f);
@@ -168,9 +239,13 @@ pub fn compile(block: &Block, abi: Abi, h: &Helpers, l: &Layout) -> Vec<u8> {
         g.set_pc_imm(pc);
         g.a.mov_ri(RAX, RET_EXIT);
         let j = g.a.jmp();
-        g.a.bind_to(j, epilogue);
+        g.a.bind_to(j, exit_at);
     }
-    g.a.code
+    Compiled {
+        code: g.a.code,
+        body,
+        chained,
+    }
 }
 
 /// Give every value a place: a constant stays an immediate; others take a
@@ -521,22 +596,51 @@ impl Gen<'_> {
                 }
             }
             Op::Load { dst, addr, size } => {
+                self.get(RCX, addr);
+                let slow = self.walk(Perm::R, size);
+                let m = M(RAX, 0);
+                match size {
+                    1 => self.a.load8_zx(RAX, m),
+                    2 => self.a.load16_zx(RAX, m),
+                    4 => self.a.load(W32, RAX, m),
+                    _ => self.a.load(W64, RAX, m),
+                }
+                let done = self.a.jmp();
+                for f in slow {
+                    self.a.bind(f);
+                }
+                // The address is still in RCX, which is the first argument
+                // in the Windows convention: move it out first.
                 let [a0, a1, _] = self.abi.args();
-                self.get(a1, addr);
+                self.a.mov_rr(W64, a1, RCX);
                 self.a.mov_rr(W64, a0, CTX);
                 self.call(self.h.read[size.trailing_zeros() as usize]);
                 self.check_fault();
+                self.a.bind(done);
                 self.put(dst, RAX);
             }
             Op::Store { addr, src, size } => {
+                self.get(RCX, addr);
+                self.get(R9, src);
+                let slow = self.walk(Perm::W, size);
+                let m = M(RAX, 0);
+                match size {
+                    1 => self.a.store8(m, R9),
+                    2 => self.a.store16(m, R9),
+                    4 => self.a.store(W32, m, R9),
+                    _ => self.a.store(W64, m, R9),
+                }
+                let done = self.a.jmp();
+                for f in slow {
+                    self.a.bind(f);
+                }
                 let [a0, a1, a2] = self.abi.args();
-                // RDX is an argument in both conventions: load it last
-                // only if it is not one of the others' sources.
-                self.get(a1, addr);
-                self.get(a2, src);
+                self.a.mov_rr(W64, a1, RCX);
+                self.a.mov_rr(W64, a2, R9);
                 self.a.mov_rr(W64, a0, CTX);
                 self.call(self.h.write[size.trailing_zeros() as usize]);
                 self.check_fault();
+                self.a.bind(done);
             }
             Op::Interp { insn } => {
                 self.retire(self.index - self.flushed);
@@ -553,6 +657,55 @@ impl Gen<'_> {
                 self.flushed = self.index + 1;
             }
         }
+    }
+
+    /// The page-table walk for an access of `size` bytes at the guest
+    /// address in RCX, which must be allowed `need`: RAX becomes the host
+    /// address, RCX is kept, RDX is used. Returns the jumps taken when the
+    /// access must go the slow way.
+    fn walk(&mut self, need: Perm, size: u8) -> Vec<Fixup> {
+        let mut slow = Vec::new();
+        let t = self.tables;
+        // The leaf: top[addr >> 21], if the address is inside the table
+        // and the leaf exists.
+        self.a.mov_rr(W64, RAX, RCX);
+        self.a.shift_ri(Shift::Shr, W64, RAX, TABLE_TOP_SHIFT as u8);
+        self.a.alu_ri(Alu::Cmp, W64, RAX, TABLE_TOP_ENTRIES as i32);
+        slow.push(self.a.jcc(Cc::Ae));
+        self.a.shift_ri(Shift::Shl, W64, RAX, 3);
+        self.a.mov_ri(RDX, t.top);
+        self.a.alu_rr(Alu::Add, W64, RAX, RDX);
+        self.a.load(W64, RAX, M(RAX, 0));
+        self.a.test_rr(W64, RAX, RAX);
+        slow.push(self.a.jcc(Cc::E));
+        // The entry: leaf[(addr >> 12) % 512], present with `need`.
+        self.a.mov_rr(W64, RDX, RCX);
+        self.a.shift_ri(Shift::Shr, W64, RDX, 12);
+        self.a
+            .alu_ri(Alu::And, W32, RDX, TABLE_LEAF_ENTRIES as i32 - 1);
+        self.a.shift_ri(Shift::Shl, W32, RDX, 3);
+        self.a.alu_rr(Alu::Add, W64, RAX, RDX);
+        self.a.load(W64, RAX, M(RAX, 0));
+        let mask = (TABLE_PRESENT | (need.bits() as u64) << TABLE_PERM_SHIFT) as i32;
+        self.a.mov_rr(W32, RDX, RAX);
+        self.a.alu_ri(Alu::And, W32, RDX, mask);
+        self.a.alu_ri(Alu::Cmp, W32, RDX, mask);
+        slow.push(self.a.jcc(Cc::Ne));
+        // Inside the page.
+        if size > 1 {
+            self.a.mov_rr(W32, RDX, RCX);
+            self.a.alu_ri(Alu::And, W32, RDX, 0xfff);
+            self.a.alu_ri(Alu::Cmp, W32, RDX, 0x1000 - size as i32);
+            slow.push(self.a.jcc(Cc::A));
+        }
+        // arena + frame + offset.
+        self.a.alu_ri(Alu::And, W64, RAX, -0x1000);
+        self.a.mov_ri(RDX, t.arena);
+        self.a.alu_rr(Alu::Add, W64, RAX, RDX);
+        self.a.mov_rr(W32, RDX, RCX);
+        self.a.alu_ri(Alu::And, W32, RDX, 0xfff);
+        self.a.alu_rr(Alu::Add, W64, RAX, RDX);
+        slow
     }
 
     fn bin(&mut self, op: BinOp, ww: W, dst: Val, a: Val, b: Val) {
@@ -710,10 +863,20 @@ impl Gen<'_> {
                 self.a.cmov(Cc::Ne, W64, RAX, RCX);
                 let m = self.st(self.l.pc);
                 self.a.store(W64, m, RAX);
+                if let Some([fall, take]) = self.links {
+                    self.a.mov_ri(R8, fall);
+                    self.a.mov_ri(R9, take);
+                    self.a.cmov(Cc::Ne, W64, R8, R9);
+                    return self.chain();
+                }
             }
             Term::Jump(pc) => {
                 self.retire(insns - self.flushed);
                 self.set_pc_imm(pc);
+                if let Some([cell, _]) = self.links {
+                    self.a.mov_ri(R8, cell);
+                    return self.chain();
+                }
             }
             Term::Svc { imm, next } => {
                 self.retire(insns - self.flushed);
@@ -722,6 +885,22 @@ impl Gen<'_> {
                 return;
             }
         }
+        self.a.mov_ri(RAX, RET_JUMP);
+    }
+
+    /// A chained exit through the link cell whose address is in R8: jump
+    /// to the code the cell names (the next block's body, or the unlinked
+    /// stub, which records the cell), unless the budget has less than a
+    /// whole block left, which the dispatcher then handles exactly.
+    fn chain(&mut self) {
+        let retired = self.st(self.l.retired);
+        self.a.load(W64, RAX, retired);
+        self.a
+            .alu_ri(Alu::Add, W64, RAX, super::frontend::MAX_INSNS as i32);
+        self.a.alu_rm(Alu::Cmp, W64, RAX, M(CTX, self.l.limit));
+        let back = self.a.jcc(Cc::A);
+        self.a.jmp_m(M(R8, 0));
+        self.a.bind(back);
         self.a.mov_ri(RAX, RET_JUMP);
     }
 }
