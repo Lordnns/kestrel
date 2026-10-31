@@ -19,10 +19,10 @@ const BRK: u32 = 0xd4200000;
 
 /// Run `insn` with FPCR = `fpcr` after `init`, and return the state at BRK.
 fn exec(insn: u32, fpcr: u64, init: impl FnOnce(&mut CpuState)) -> CpuState {
-    let (mut s, mut m) = setup(&[insn, BRK]);
+    let (mut s, m) = setup(&[insn, BRK]);
     s.fpcr = fpcr;
     init(&mut s);
-    let exit = Interpreter::new().run(&mut s, &mut m, 10);
+    let exit = Interpreter::new().run(&mut s, &m, 10);
     assert_eq!(exit, Exit::Breakpoint(0), "{insn:08x}");
     s
 }
@@ -76,9 +76,9 @@ fn flags(insn: u32, nzcv: u64, ins: [u64; 2]) -> u64 {
 }
 
 fn unsupported(insn: u32, fpcr: u64) -> Unmodelled {
-    let (mut s, mut m) = setup(&[insn, BRK]);
+    let (mut s, m) = setup(&[insn, BRK]);
     s.fpcr = fpcr;
-    match Interpreter::new().run(&mut s, &mut m, 10) {
+    match Interpreter::new().run(&mut s, &m, 10) {
         Exit::Unsupported { what, .. } => what,
         other => panic!("{insn:08x}: expected Unsupported, got {other:?}"),
     }

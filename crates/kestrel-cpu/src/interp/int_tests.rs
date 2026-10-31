@@ -39,7 +39,7 @@ pub struct Case {
 
 /// Run one case and describe every mismatch.
 fn run(case: &Case) -> Vec<String> {
-    let (mut s, mut m) = setup(&[]);
+    let (mut s, m) = setup(&[]);
     let code_base = PC - 0x80;
     m.poke_bytes(code_base, &CODE).unwrap();
     m.poke_bytes(PC, &case.insn.to_le_bytes()).unwrap();
@@ -54,7 +54,7 @@ fn run(case: &Case) -> Vec<String> {
     s.fpsr = FPSR;
     s.tpidr_el0 = TPIDR;
     s.tpidrro_el0 = TPIDRRO;
-    let exit = Interpreter::new().run(&mut s, &mut m, 1);
+    let exit = Interpreter::new().run(&mut s, &m, 1);
     if exit != Exit::StepLimit {
         return vec![format!("stopped with {exit:?}")];
     }

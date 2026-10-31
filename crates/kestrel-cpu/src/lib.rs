@@ -73,12 +73,20 @@ impl Unmodelled {
 }
 
 /// One way of executing guest ARM64 code.
-pub trait CpuBackend {
+///
+/// A backend runs one guest core. With several cores on host threads
+/// (`PLAN.md` section 3, "Time and cores"), each core has its own backend
+/// on its own host thread, so a backend is `Send`, and every core shares
+/// one [`Memory`], whose methods take `&self`: guest atomics and exclusives
+/// must reach it through its compare-and-swap, so they hold between host
+/// threads.
+pub trait CpuBackend: Send {
     /// Short identifier shown to the user, e.g. `"interp"`.
     fn name(&self) -> &'static str;
 
     /// Run until an [`Exit`] or until `max_steps` instructions have retired.
-    fn run(&mut self, state: &mut CpuState, mem: &mut Memory, max_steps: u64) -> Exit;
+    /// Other cores may run on `mem` at the same time.
+    fn run(&mut self, state: &mut CpuState, mem: &Memory, max_steps: u64) -> Exit;
 
     /// Called when guest code memory was modified, so cached translations drop.
     fn invalidate(&mut self, _addr: u64, _len: u64) {}

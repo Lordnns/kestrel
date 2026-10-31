@@ -37,7 +37,7 @@ pub(crate) type Step = Result<Flow, Exit>;
 /// Context passed to every handler.
 pub(crate) struct Ctx<'a> {
     pub s: &'a mut CpuState,
-    pub m: &'a mut Memory,
+    pub m: &'a Memory,
     pub pc: u64,
     pub insn: u32,
 }
@@ -84,7 +84,7 @@ impl CpuBackend for Interpreter {
         "interp"
     }
 
-    fn run(&mut self, state: &mut CpuState, mem: &mut Memory, max_steps: u64) -> Exit {
+    fn run(&mut self, state: &mut CpuState, mem: &Memory, max_steps: u64) -> Exit {
         for _ in 0..max_steps {
             let pc = state.pc;
             let insn = match mem.fetch32(pc) {

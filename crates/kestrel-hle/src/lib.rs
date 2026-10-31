@@ -279,7 +279,7 @@ impl Process {
             self.vsync_tick();
             let budget = (max_steps - used).min(self.sched.slice_left);
             let before = self.cpu.retired;
-            let exit = backend.run(&mut self.cpu, &mut self.mem, budget);
+            let exit = backend.run(&mut self.cpu, &self.mem, budget);
             let ran = self.cpu.retired - before;
             self.sched.slice_left = self.sched.slice_left.saturating_sub(ran);
             match exit {
