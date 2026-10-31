@@ -10,7 +10,9 @@
 //! - `vfp.rs`: floating-point lanes, calling [`crate::float`] per element
 //! - `perm.rs`: copies, permutes, table lookup, logic and immediates
 //! - `mem.rs`: structure loads and stores (LD1-LD4, ST1-ST4)
+//! - `crypto.rs`: AES, SHA-1 and SHA-256
 
+mod crypto;
 mod int;
 mod mem;
 mod perm;
@@ -29,7 +31,6 @@ pub fn exec(c: &mut Ctx) -> Step {
     let i = c.insn;
     let scalar = bit(i, 28);
     // Vector forms have bit 31 clear; scalar forms are 0b01 in bits 31..30.
-    // What remains (crypto) is not implemented.
     if (scalar && field(i, 31, 30) != 0b01) || (!scalar && bit(i, 31)) {
         return Err(c.undef());
     }
@@ -42,6 +43,10 @@ pub fn exec(c: &mut Ctx) -> Step {
                 (0b10, 0b0000) => int::misc(c, scalar),
                 (0b10, 0b1000) if scalar => int::pairwise_scalar(c),
                 (0b10, 0b1000) => int::across(c),
+                // Cryptographic AES (vector space) and two-register SHA
+                // (scalar space).
+                (0b10, 0b0100) if scalar => crypto::sha_two(c),
+                (0b10, 0b0100) => crypto::aes(c),
                 // Two-register misc, half precision.
                 (0b10, 0b1100) => vfp::misc_half(c, scalar),
                 (0b00, _) => int::three_different(c, scalar),
@@ -50,6 +55,10 @@ pub fn exec(c: &mut Ctx) -> Step {
         }
         if field(i, 23, 21) == 0 && !bit(i, 15) && bit(i, 10) {
             return perm::copy(c, scalar);
+        }
+        if scalar && field(i, 23, 21) == 0 && !bit(i, 15) && field(i, 11, 10) == 0 {
+            // Cryptographic three-register SHA.
+            return crypto::sha_three(c);
         }
         if bit(i, 15) && bit(i, 10) {
             return int::three_same_extra(c, scalar);

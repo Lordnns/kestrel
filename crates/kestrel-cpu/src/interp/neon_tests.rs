@@ -182,6 +182,11 @@ fn structure_loads_and_stores() {
 }
 
 #[test]
+fn cryptographic_extension() {
+    group("crypto");
+}
+
+#[test]
 fn dot_product() {
     group("dot");
 }
@@ -228,6 +233,7 @@ fn every_case_belongs_to_a_group() {
         "fp16_other",
         "fp16_scalar",
         "dot",
+        "crypto",
     ];
     for c in CASES {
         assert!(
@@ -258,10 +264,12 @@ fn alternative_half_precision_and_undefined_encodings_are_reported() {
         };
         assert_eq!(exit, want, "{asm}");
     }
-    // The dot product only has 32-bit lanes; AES is not implemented.
+    // The dot product only has 32-bit lanes; AES only works on bytes;
+    // SHA512 (`-march=armv8.2-a+sha3`) is not implemented.
     for (insn, asm) in [
         (0x4e429420, "sdot with size 01"),
-        (0x4e284820, "aese v0.16b, v1.16b"),
+        (0x4e684820, "aese with size 01"),
+        (0xce628020, "sha512h q0, q1, v2.2d"),
     ] {
         let (mut s, mut m) = setup(&[insn]);
         let exit = Interpreter::new().run(&mut s, &mut m, 1);

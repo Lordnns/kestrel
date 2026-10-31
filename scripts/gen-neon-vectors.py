@@ -17,6 +17,7 @@ Nothing here runs kestrel.
 Needs clang and llvm-objdump (override with $CLANG and $OBJDUMP).
 """
 
+import hashlib
 import math
 import os
 import random
@@ -532,6 +533,251 @@ def m_dot(asm, signed):
     wr(d, pack(out, 32), bits)
 
 
+# ---- the cryptographic extension -------------------------------------------------
+#
+# From the Arm ARM pseudocode (AESShiftRows, AESSubBytes, AESMixColumns and the
+# inverses, SHAchoose, SHAparity, SHAmajority, SHA256hash, the schedule
+# instructions) and FIPS 197. crypto_selfcheck() runs real AES-128, SHA-1 and
+# SHA-256 through these models and compares with FIPS 197 and hashlib.
+
+
+def gf_mul(a, b):
+    r = 0
+    for _ in range(8):
+        if b & 1:
+            r ^= a
+        a = ((a << 1) ^ (0x11B if a & 0x80 else 0)) & 0xFF
+        b >>= 1
+    return r
+
+
+def make_sbox():
+    """FIPS 197 5.1.1: the inverse in GF(2^8) (from powers of the generator
+    3), then the affine map b'_i = b_i ^ b_i+4 ^ b_i+5 ^ b_i+6 ^ b_i+7 ^ c_i."""
+    exp, log = [0] * 255, [0] * 256
+    x = 1
+    for k in range(255):
+        exp[k], log[x] = x, k
+        x = gf_mul(x, 3)
+    box = []
+    for v in range(256):
+        b = 0 if v == 0 else exp[(255 - log[v]) % 255]
+        bit = lambda i: (b >> (i % 8)) & 1  # noqa: E731
+        box.append(sum((bit(i) ^ bit(i + 4) ^ bit(i + 5) ^ bit(i + 6) ^ bit(i + 7) ^ ((0x63 >> i) & 1)) << i
+                       for i in range(8)))
+    return box
+
+
+SBOX = make_sbox()
+ISBOX = [SBOX.index(v) for v in range(256)]
+
+
+def by(v):
+    return [(v >> (8 * k)) & 0xFF for k in range(16)]
+
+
+def unby(bs):
+    return sum(b << (8 * k) for k, b in enumerate(bs))
+
+
+def aes_shift_rows(v, inv=False):
+    # State byte (row r, column c) is register byte r + 4c; row r rotates
+    # left by r columns (right when inverting).
+    b = by(v)
+    return unby([b[(r + 4 * ((c + (-r if inv else r)) % 4))] for c in range(4) for r in range(4)])
+
+
+def aes_sub_bytes(v, inv=False):
+    return unby([(ISBOX if inv else SBOX)[x] for x in by(v)])
+
+
+def aes_mix_columns(v, inv=False):
+    m = [14, 11, 13, 9] if inv else [2, 3, 1, 1]
+    b = by(v)
+    out = []
+    for c in range(4):
+        col = b[4 * c:4 * c + 4]
+        for r in range(4):
+            x = 0
+            for k in range(4):
+                x ^= gf_mul(m[(k - r) % 4], col[k])
+            out.append(x)
+    return unby(out)
+
+
+def aese(d, n):
+    return aes_sub_bytes(aes_shift_rows(d ^ n))
+
+
+def aesd(d, n):
+    return aes_sub_bytes(aes_shift_rows(d ^ n, True), True)
+
+
+def w32(v, e):
+    return (v >> (32 * e)) & M(32)
+
+
+def ror32(x, k):
+    return ((x >> k) | (x << (32 - k))) & M(32)
+
+
+def rol32(x, k):
+    return ror32(x, 32 - k)
+
+
+SHA_F = {
+    "c": lambda x, y, z: ((y ^ z) & x) ^ z,
+    "p": lambda x, y, z: x ^ y ^ z,
+    "m": lambda x, y, z: (x & y) | ((x | y) & z),
+}
+
+
+def sha1_rounds(x, y, w, f):
+    for e in range(4):
+        t = SHA_F[f](w32(x, 1), w32(x, 2), w32(x, 3))
+        y = (y + rol32(w32(x, 0), 5) + t + w32(w, e)) & M(32)
+        x = (x & ~(M(32) << 32)) | (rol32(w32(x, 1), 30) << 32)
+        yx = (y << 128) | x
+        yx = ((yx << 32) | (yx >> 128)) & M(160)
+        x, y = yx & M(128), yx >> 128
+    return x
+
+
+def sha256_hash(x, y, w, part1):
+    for e in range(4):
+        chs = SHA_F["c"](w32(y, 0), w32(y, 1), w32(y, 2))
+        maj = SHA_F["m"](w32(x, 0), w32(x, 1), w32(x, 2))
+        s1 = ror32(w32(y, 0), 6) ^ ror32(w32(y, 0), 11) ^ ror32(w32(y, 0), 25)
+        t = (w32(y, 3) + s1 + chs + w32(w, e)) & M(32)
+        x = (x & M(96)) | (((t + w32(x, 3)) & M(32)) << 96)
+        s0 = ror32(w32(x, 0), 2) ^ ror32(w32(x, 0), 13) ^ ror32(w32(x, 0), 22)
+        y = (y & M(96)) | (((t + s0 + maj) & M(32)) << 96)
+        yx = (y << 128) | x
+        yx = ((yx << 32) | (yx >> 224)) & M(256)
+        x, y = yx & M(128), yx >> 128
+    return x if part1 else y
+
+
+def sha1su0(d, n, m):
+    return ((((n & M(64)) << 64) | (d >> 64)) ^ d ^ m) & M(128)
+
+
+def sha1su1(d, n):
+    t = d ^ (n >> 32)
+    r = [rol32(w32(t, e), 1) for e in range(4)]
+    r[3] ^= rol32(w32(t, 0), 2)
+    return pack(r, 32)
+
+
+def sha256su0(d, n):
+    t = ((n & M(32)) << 96) | (d >> 32)
+    sig = lambda x: ror32(x, 7) ^ ror32(x, 18) ^ (x >> 3)  # noqa: E731
+    return pack([(sig(w32(t, e)) + w32(d, e)) & M(32) for e in range(4)], 32)
+
+
+def sha256su1(d, n, m):
+    t0 = ((m & M(32)) << 96) | (n >> 32)
+    sig = lambda x: ror32(x, 17) ^ ror32(x, 19) ^ (x >> 10)  # noqa: E731
+    r = [0] * 4
+    for e in range(4):
+        src = w32(m, e + 2) if e < 2 else r[e - 2]
+        r[e] = (sig(src) + w32(d, e) + w32(t0, e)) & M(32)
+    return pack(r, 32)
+
+
+def crypto_selfcheck():
+    """Real AES-128, SHA-1 and SHA-256 through the instruction models."""
+    # FIPS 197 Appendix C.1. Block bytes go to register bytes in order.
+    key = bytes(range(16))
+    pt = bytes.fromhex("00112233445566778899aabbccddeeff")
+    ct = bytes.fromhex("69c4e0d86a7b0430d8cdb78070b4c55a")
+    words = [key[4 * k:4 * k + 4] for k in range(4)]
+    rcon = 1
+    for k in range(4, 44):
+        t = words[k - 1]
+        if k % 4 == 0:
+            t = bytes(SBOX[b] for b in t[1:] + t[:1])
+            t = bytes([t[0] ^ rcon]) + t[1:]
+            rcon = gf_mul(rcon, 2)
+        words.append(bytes(a ^ b for a, b in zip(words[k - 4], t)))
+    rk = [int.from_bytes(b"".join(words[4 * r:4 * r + 4]), "little") for r in range(11)]
+    st = int.from_bytes(pt, "little")
+    for r in range(9):
+        st = aes_mix_columns(aese(st, rk[r]))
+    st = aese(st, rk[9]) ^ rk[10]
+    assert st.to_bytes(16, "little") == ct, "AESE/AESMC model"
+    st = aesd(int.from_bytes(ct, "little"), rk[10])
+    for r in range(9, 0, -1):
+        st = aesd(aes_mix_columns(st ^ rk[r], True), 0)
+    assert (st ^ rk[0]).to_bytes(16, "little") == pt, "AESD/AESIMC model"
+    # One SHA-256 and one SHA-1 block of b"abc".
+    msg = b"abc"
+    block = msg + b"\x80" + bytes(64 - len(msg) - 9) + (8 * len(msg)).to_bytes(8, "big")
+    ws = [int.from_bytes(block[4 * k:4 * k + 4], "big") for k in range(16)]
+    sched = [pack(ws[4 * k:4 * k + 4], 32) for k in range(4)]
+    primes = [p for p in range(2, 312) if all(p % q for q in range(2, p))][:64]
+    icbrt = lambda n: next(r for r in range(int(round(n ** (1 / 3))) + 2, -1, -1) if r ** 3 <= n)  # noqa: E731
+    isq = lambda n: math.isqrt(n)  # noqa: E731
+    # FIPS 180-4: the first 32 bits of the fractional parts of the cube roots
+    # of the first 64 primes, and of the square roots of the first 8.
+    k256 = [icbrt(p << 96) & M(32) for p in primes]
+    h256 = [isq(p << 64) & M(32) for p in primes[:8]]
+    s0, s1 = pack(h256[:4], 32), pack(h256[4:], 32)
+    a, b = s0, s1
+    msgs = list(sched)
+    for g in range(16):
+        if g >= 4:
+            msgs.append(sha256su1(sha256su0(msgs[g - 4], msgs[g - 3]), msgs[g - 2], msgs[g - 1]))
+        wk = pack([(w32(msgs[g], e) + k256[4 * g + e]) & M(32) for e in range(4)], 32)
+        # SHA256H Qa, Qb, wk then SHA256H2 Qb, Q(old a), wk.
+        a, b = sha256_hash(a, b, wk, True), sha256_hash(a, b, wk, False)
+    out = [(w32(a, e) + w32(s0, e)) & M(32) for e in range(4)] + [(w32(b, e) + w32(s1, e)) & M(32) for e in range(4)]
+    assert b"".join(x.to_bytes(4, "big") for x in out) == hashlib.sha256(msg).digest(), "SHA256 models"
+    h1 = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0]
+    k1 = [0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6]
+    abcd, e = pack(h1[:4], 32), h1[4]
+    msgs = list(sched)
+    for g in range(20):
+        if g >= 4:
+            msgs.append(sha1su1(sha1su0(msgs[g - 4], msgs[g - 3], msgs[g - 2]), msgs[g - 1]))
+        wk = pack([(w32(msgs[g], k) + k1[g // 5]) & M(32) for k in range(4)], 32)
+        e_next = rol32(w32(abcd, 0), 30)  # SHA1H
+        # Rounds 0-19 choose, 20-39 parity, 40-59 majority, 60-79 parity.
+        abcd = sha1_rounds(abcd, e, wk, "cpmp"[g // 5])
+        e = e_next
+    out = [(w32(abcd, k) + h1[k]) & M(32) for k in range(4)] + [(e + h1[4]) & M(32)]
+    assert b"".join(x.to_bytes(4, "big") for x in out) == hashlib.sha1(msg).digest(), "SHA1 models"
+
+
+def m_crypto(asm):
+    mn, regs, arrs, _, _, _ = parse(asm)
+    v = lambda k: ST.v[regs[k]]  # noqa: E731
+    d = regs[0]
+    r = {
+        "aese": lambda: aese(v(0), v(1)),
+        "aesd": lambda: aesd(v(0), v(1)),
+        "aesmc": lambda: aes_mix_columns(v(1)),
+        "aesimc": lambda: aes_mix_columns(v(1), True),
+        "sha1c": lambda: sha1_rounds(v(0), w32(v(1), 0), v(2), "c"),
+        "sha1p": lambda: sha1_rounds(v(0), w32(v(1), 0), v(2), "p"),
+        "sha1m": lambda: sha1_rounds(v(0), w32(v(1), 0), v(2), "m"),
+        "sha1h": lambda: rol32(w32(v(1), 0), 30),
+        "sha1su0": lambda: sha1su0(v(0), v(1), v(2)),
+        "sha1su1": lambda: sha1su1(v(0), v(1)),
+        "sha256h": lambda: sha256_hash(v(0), v(1), v(2), True),
+        "sha256h2": lambda: sha256_hash(v(1), v(0), v(2), False),
+        "sha256su0": lambda: sha256su0(v(0), v(1)),
+        "sha256su1": lambda: sha256su1(v(0), v(1), v(2)),
+    }[mn]()
+    wr(d, r, 128)
+
+
+def m_pmull64(asm):
+    mn, (d, n, m), _, _, _, _ = parse(asm)
+    half = 1 if mn.endswith("2") else 0
+    wr(d, clmul(lanes(ST.v[n], 64)[half], lanes(ST.v[m], 64)[half]), 128)
+
+
 # ---- copies, permutes, immediates --------------------------------------------
 
 
@@ -1023,6 +1269,12 @@ def model(asm):
         return m_ext(asm)
     if base in ("tbl", "tbx"):
         return m_tbl(asm, base == "tbx")
+    # The cryptographic extension.
+    if mn in ("aese", "aesd", "aesmc", "aesimc", "sha1c", "sha1p", "sha1m", "sha1h", "sha1su0", "sha1su1",
+              "sha256h", "sha256h2", "sha256su0", "sha256su1"):
+        return m_crypto(asm)
+    if base == "pmull" and ".1q" in rest:
+        return m_pmull64(asm)
     # Integer.
     if base in ("sdot", "udot"):
         return m_dot(asm, base == "sdot")
@@ -1544,6 +1796,18 @@ GROUPS["dot"] = [
     "udot v0.2s, v5.8b, v4.4b[0]", "sdot v0.4s, v4.16b, v5.4b[1]",
 ]
 
+# The cryptographic extension (FEAT_AES, FEAT_PMULL, FEAT_SHA1, FEAT_SHA256).
+GROUPS["crypto"] = [
+    "aese v0.16b, v1.16b", "aesd v0.16b, v1.16b", "aesmc v0.16b, v2.16b", "aesimc v0.16b, v2.16b",
+    "aese v5.16b, v31.16b", "aesd v3.16b, v3.16b", "aesmc v4.16b, v4.16b", "aesimc v7.16b, v30.16b",
+    "sha1c q0, s1, v2.4s", "sha1p q0, s3, v4.4s", "sha1m q0, s5, v6.4s", "sha1h s0, s1", "sha1h s0, s4",
+    "sha1su0 v0.4s, v1.4s, v2.4s", "sha1su1 v0.4s, v1.4s", "sha1c q7, s7, v7.4s",
+    "sha256h q0, q1, v2.4s", "sha256h2 q0, q1, v2.4s", "sha256su0 v0.4s, v1.4s",
+    "sha256su1 v0.4s, v1.4s, v2.4s", "sha256h q3, q4, v5.4s", "sha256h2 q5, q4, v3.4s",
+    "pmull v0.1q, v1.1d, v2.1d", "pmull2 v0.1q, v1.2d, v2.2d", "pmull v0.1q, v4.1d, v4.1d",
+    "pmull2 v3.1q, v3.2d, v31.2d",
+]
+
 RP, RM, RZ = 1 << 22, 2 << 22, 3 << 22
 C_FZ, C_DN, C_FZ16 = 1 << 24, 1 << 25, 1 << 19
 NZ, ZZ, CZ = 0b1000, 0b0100, 0b0010  # NZCV inputs: N, Z, C
@@ -1648,7 +1912,7 @@ def assemble(lines):
         src, obj = os.path.join(tmp, "v.s"), os.path.join(tmp, "v.o")
         with open(src, "w") as fh:
             fh.write("".join(line + "\n" for line in lines))
-        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+fp16+dotprod", "-c", src,
+        subprocess.run([os.environ.get("CLANG", "clang"), "--target=aarch64-none-elf", "-march=armv8.2-a+fp16+dotprod+aes+sha2", "-c", src,
                         "-o", obj], check=True)
         dis = subprocess.run([os.environ.get("OBJDUMP", "llvm-objdump"), "-d", obj], check=True, capture_output=True,
                              text=True).stdout
@@ -1660,6 +1924,7 @@ def assemble(lines):
 
 def main():
     global ST
+    crypto_selfcheck()
     words = assemble([asm for _, asm, _, _ in CASES])
     out = []
     w = out.append

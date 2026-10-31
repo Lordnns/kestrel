@@ -325,7 +325,8 @@ pub fn three_different(c: &mut Ctx, scalar: bool) -> Step {
     let ok = match opc {
         _ if scalar => sqd && !u && (size == 1 || size == 2),
         _ if sqd => !u && (size == 1 || size == 2),
-        0b1110 => !u && size == 0, // PMULL (the 64-bit form needs the crypto extension)
+        // PMULL: 8-bit lanes, or one 64-bit lane (FEAT_PMULL).
+        0b1110 => !u && (size == 0 || size == 3),
         0b1111 => false,
         _ => size != 3,
     };
@@ -338,6 +339,15 @@ pub fn three_different(c: &mut Ctx, scalar: bool) -> Step {
     let lanes = if scalar { 1 } else { 64 / es };
     // The "2" forms read the upper halves; scalar forms always set bit 30.
     let base = if q && !scalar { lanes } else { 0 };
+    if opc == 0b1110 && size == 3 {
+        // PMULL, PMULL2 (1Q): one 128-bit carry-less product.
+        let (a, b) = (get(n, 64, base), get(m, 64, base));
+        let r = (0..64)
+            .filter(|k| (b >> k) & 1 != 0)
+            .fold(0u128, |acc, k| acc ^ ((a as u128) << k));
+        write(c, rd(i), r, 128);
+        return Ok(Flow::Next);
+    }
     if matches!(opc, 0b0100 | 0b0110) {
         // ADDHN, RADDHN, SUBHN, RSUBHN: high half of a wide sum.
         let mut r = 0u64;
