@@ -19,7 +19,7 @@ mod fp;
 mod ldst;
 mod neon;
 mod simd;
-mod system;
+pub(crate) mod system;
 
 use crate::{CpuBackend, CpuState, Exit};
 use kestrel_core::Memory;
@@ -132,7 +132,7 @@ pub(crate) fn execute(c: &mut Ctx) -> Step {
 }
 
 #[cfg(test)]
-mod cores_tests;
+pub(crate) mod cores_tests;
 #[cfg(test)]
 mod fp_tests;
 #[cfg(test)]

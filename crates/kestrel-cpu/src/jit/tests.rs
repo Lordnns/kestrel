@@ -229,3 +229,22 @@ fn a_chained_loop_sees_code_another_core_rewrote() {
     // ignores the change count stops only then, after 5 billion).
     assert!(s.retired < 1_000_000_000, "{} instructions", s.retired);
 }
+
+// The interpreter's tests of guest cores on several host threads
+// (`interp/cores_tests.rs`), on the recompiler: its translated exclusives
+// (a compare-and-swap of the value LDXR read) must hold between host
+// threads as the interpreter's do.
+
+fn jit() -> Box<dyn CpuBackend + Send> {
+    Box::new(Jit::new().unwrap())
+}
+
+#[test]
+fn another_cores_store_fails_the_translated_store_exclusive() {
+    crate::interp::cores_tests::another_cores_store_fails_the_store_exclusive_on(jit);
+}
+
+#[test]
+fn translated_guest_atomics_hold_between_host_threads() {
+    crate::interp::cores_tests::guest_atomics_hold_between_host_threads_on(jit);
+}

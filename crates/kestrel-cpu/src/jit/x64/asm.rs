@@ -368,6 +368,11 @@ impl Asm {
         self.op_rm(W64, &[0x8d], dst.0, m);
     }
 
+    /// `mfence`: a full fence, every earlier access before any later one.
+    pub fn mfence(&mut self) {
+        self.code.extend_from_slice(&[0x0f, 0xae, 0xf0]);
+    }
+
     pub fn stc(&mut self) {
         self.b(0xf9);
     }

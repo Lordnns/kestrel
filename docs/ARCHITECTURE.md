@@ -138,9 +138,12 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   `invalidate`. Computed jumps (RET,
   BR, BLR) return to the dispatcher.
 - **Threaded cores**: one `Jit` per guest core (`Jit` is `Send`; each
-  owns its code memory and link cells). Exclusives, LSE atomics,
-  acquire/release and barriers run in the interpreter, whose
-  compare-and-swap and fences hold between host threads.
+  owns its code memory and link cells). LDXR/STXR keep the interpreter's
+  monitor: STXR is a compare-and-swap of the value LDXR read, through a
+  helper. LDAR and STLR are plain x86 accesses, already acquire and
+  release, with `mfence` after STLR; DMB and DSB are `mfence`. Exclusive
+  pairs, compare-and-swap and the LSE atomics run in the interpreter,
+  whose host compare-and-swaps hold between host threads.
 - **Encoder** (`x64/asm.rs`): kestrel's own (no dependency), from the
   Intel SDM; `scripts/gen-x64-vectors.py` checks every form it emits
   against llvm-mc (5,551 cases, `x64/asm/vectors.rs`).

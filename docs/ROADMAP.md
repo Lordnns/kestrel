@@ -1296,12 +1296,33 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      1. Done (2026-10-31): CI run 9 passed on `windows-2022`, and
         `auto` now picks the recompiler on Windows and Linux x86_64.
      2. Translate what still runs in the interpreter, most frequent
-        first (measure with a count per encoding in `jit::interp`):
-        LDXR/STXR and the other exclusives (as a host compare-and-swap
-        of the value LDXR saw, `docs/ARCHITECTURE.md`, "Memory"), CLZ,
-        REV, RBIT, MRS/MSR of TPIDR_EL0, NZCV, FPCR and FPSR; counter
-        reads need the retired count flushed first, as `Op::Interp`
-        does.
+        first (measure with a count per encoding in `jit::interp`).
+        Measured 2026-10-31: in the self-test, LDAXR/STLXR/LDXR/STXR,
+        LDAR and CLREX (the thread programs' locks), REV, then NEON; in
+        libnx's hello-world (first 100 million instructions), DC CIVAC
+        (1.5% of all instructions: libnx flushing the framebuffer every
+        frame), NOP and hints, then CLZ, RBIT and NEON.
+        - Done (2026-10-31): hints, ISB, SB, the EL0 cache maintenance
+          operations (nothing to do), DMB and DSB (`mfence`, as the
+          interpreter's full fence), CLREX, MRS/MSR of TPIDR_EL0,
+          TPIDRRO_EL0 (read), NZCV, FPCR, FPSR and the constant ID
+          registers; LDAR and STLR as plain accesses (x86's order is
+          acquire and release) with STLR's sequentially consistent fence
+          after the store; LDXR/LDAXR and STXR/STLXR through helpers that
+          keep the interpreter's monitor (`CpuState::exclusive_addr` and
+          `exclusive_value`): the store-exclusive is a host
+          compare-and-swap of the value the load-exclusive read. The
+          interpreter's multi-thread tests (`interp/cores_tests.rs`) now
+          also run on the recompiler: another core's store fails the
+          translated STXR, and four host threads lose no increment.
+          Mutation checks: inverting STXR's status or dropping CLREX
+          fails the integer vectors; a plain store instead of the
+          compare-and-swap fails both multi-thread tests. Not covered by
+          a failing test: the fences (a litmus test would need weak
+          ordering, which x86 hosts do not show).
+        - Next: REV, REV16, REV32, CLZ, CLS, RBIT; then DC ZVA, the
+          counters (the retired count flushed first, as `Op::Interp`
+          does), exclusive pairs and the LSE atomics.
      3. Floating point and NEON: first as calls to the interpreter's own
         routines (`float.rs`, the NEON lane helpers) with operands in
         `CpuState::v`, so results stay identical on every host; then

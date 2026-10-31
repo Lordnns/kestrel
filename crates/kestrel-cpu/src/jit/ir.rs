@@ -45,6 +45,11 @@ pub enum Reg {
     /// X0..X30.
     X(u8),
     Sp,
+    /// The system registers EL0 reads and writes as plain values.
+    Tpidr,
+    TpidrRo,
+    Fpcr,
+    Fpsr,
 }
 
 /// Two-operand integer operations. Shifts and rotates take their amount
@@ -176,6 +181,29 @@ pub enum Op {
         src: Val,
         size: u8,
     },
+    /// Load `size` bytes, zero-extended, and set the exclusive monitor to
+    /// `addr` and the value read (LDXR, LDAXR); a fault leaves the monitor
+    /// as it was.
+    LoadExclusive {
+        dst: Val,
+        addr: Val,
+        size: u8,
+    },
+    /// If the monitor holds `addr`, a compare-and-swap of `size` bytes at
+    /// `addr` from the value the load-exclusive read to `src`; then clear
+    /// the monitor (STXR, STLXR). `status` is 0 if stored, 1 if not. A
+    /// fault leaves the monitor as it was and sets no status.
+    StoreExclusive {
+        status: Val,
+        addr: Val,
+        src: Val,
+        size: u8,
+    },
+    /// Clear the exclusive monitor (CLREX).
+    ClearExclusive,
+    /// A full fence: every access before it, by this core, is seen by
+    /// other cores before any after it (DMB, DSB, and STLR's own order).
+    Fence,
     /// Run the current instruction (`insn`, at the `pc` of the last
     /// [`Op::Insn`]) in the interpreter. It may end the block: a branch
     /// it takes, a system call or a fault.
