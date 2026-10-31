@@ -14,6 +14,8 @@
 
 pub mod float;
 pub mod interp;
+#[cfg(jit_host)]
+pub mod jit;
 pub mod state;
 
 use kestrel_core::{MemFault, Memory};
