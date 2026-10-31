@@ -60,27 +60,46 @@ qemu for Linux ARM64.
 | `docs/SWITCH2_NOTES.md` | done | purpose, entry format, the first public-source entries (Switchbrew [S2] marks); no observations yet |
 | Phase 2 acceptance | done | the four standard examples (hello-world, read-controls, sdmc, barrier), built from source in the pinned devkitPro container (libnx 4.12.0), run in kestrel with scripted presses, and their last frames read back with libnx's font and checked against their sources (`scripts/build-examples.sh`, `run-examples.sh`, `check-examples.py`): 4/4 on every native CI job (Linux, Windows and macOS, x86_64 and aarch64) on `v0.1.17`, which was all green; every unimplemented call stops with its name and number and is logged |
 
-### Phase 3: Native execution on ARM hosts: **in progress** (memory arena done)
+### Phase 3: Native execution on ARM hosts: **in progress** (memory arena done; the rest waits for the Windows milestone)
 
-Starts on macOS once phase 2's threads and synchronisation are done
-(`PLAN.md` phase 3 priority). The owner had the memory arena refactor done
-first, on Linux (2026-10-30; "Phase 3 notes").
+The owner had the memory arena refactor done first, on Linux (2026-10-30;
+"Phase 3 notes"). Since 2026-10-31 the rest waits for the Windows x86_64
+milestone, and ARM hosts start with the in-process fallback ("Plan
+changes (2026-10-31, the Windows milestone)"). The differential tester
+moved to the CPU track, for the recompiler first.
 
 | Task | Status | Evidence |
 |------|--------|----------|
 | Memory arena refactor | done (2026-10-30; CI green on every platform, manual run 5 on the branch) | `kestrel_core::arena` (one host range, 2 MiB aligned, committed as used), `Memory` as a lock-free two-level page table over it, `Send + Sync`; compare-and-swap, `translate` and `epoch` for the fast backends; the self-test's output unchanged; the hypervisor and recompiler constraints in `docs/ARCHITECTURE.md`, "Memory" |
 | Native backend | not started | `create_backend(Native)` returns "not implemented yet" |
-| Differential tester | not started | none |
+| Differential tester | done (2026-10-31, CPU track) | `kestrel_testsuite::diff`, `kestrel diff --backend <b>`; "Phase 4 notes" |
 | Self-modifying code, cache maintenance | not started | `IC IVAU` is a no-op; `CpuBackend::invalidate` is never called |
-| Per-backend speed in self-test | partial | self-test prints MIPS for the one backend it runs |
+| Per-backend speed in self-test | done (2026-10-31) | `kestrel selftest` runs every backend the build has and prints each one's MIPS; `--backend` picks one |
 | Guest counter reads from kestrel's clock | not started | `PLAN.md` section 3, "Time and cores": trap EL0 counter reads (CNTKCTL_EL1), measure the cost |
 | One host thread per guest core (six) | not started | `PLAN.md` section 3, "Time and cores"; the interpreter's scheduler runs every core on one host thread |
 
-### Phases 4 to 7: **not started**
+### Phase 4: x86_64 recompiler: **in progress** (Windows and Linux x86_64)
 
-- Phase 4 x86_64 recompiler: `create_backend(Jit)` returns "not implemented
-  yet"; it runs each guest core on its own host thread, as phase 3 does
-  (`PLAN.md` section 3, "Time and cores").
+| Task | Status | Evidence |
+|------|--------|----------|
+| Differential tester | done (2026-10-31) | `kestrel_testsuite::diff`, `kestrel diff`; "Phase 4 notes" |
+| IR between the ARM64 decoder and x86_64 code generation | done | `jit/ir.rs`, `jit/frontend.rs` |
+| kestrel's own x86_64 encoder, checked against llvm-mc | done | `jit/x64/asm.rs`; 5,359 cases from `scripts/gen-x64-vectors.py` |
+| Executable memory per OS, never writable and executable at once | done (Linux; Windows under Wine and natively on `windows-2022`, CI run 9) | `jit/code.rs` |
+| Windows x64 and System V calling conventions | done | both run in the Linux tests |
+| Blocks cached by guest address, checked through the memory's change count | done | `Jit::block`, `Jit::valid` |
+| Interpreter fallback per instruction | done | `Op::Interp` |
+| Integer, branches, loads and stores translated | done | 99.3% of the self-test's instructions run translated |
+| Floating point and NEON translated | not started | they run through `Op::Interp` |
+| Speed: block chaining, inline memory accesses | done | "Phase 4 notes" |
+| Speed: computed-jump lookup in generated code, guest registers in host registers, lazy flags | not started | "Next task" |
+| One host thread per guest core | not started | `PLAN.md` section 3, "Time and cores" |
+| Performance measurement for runs | done (2026-10-31) | `kestrel run --stats`: instructions per second, and frame times (average, 1% low, worst) |
+| Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 and Windows x86_64 (CI run 9, 2026-10-31); floating point and NEON still go through the interpreter | "Phase 4 notes" |
+| The recompiler as the default | done (owner, 2026-10-31, after CI run 9) | `auto` picks it on Windows and Linux x86_64 |
+
+### Phases 5 to 7: **not started**
+
 - Phase 5 graphics (5A display, 5B Maxwell GPU level, 5C Ampere GPU level,
   5D NVN API level), phase 6 commercial software, phase 7 polish: no code.
 
@@ -149,6 +168,21 @@ The owner's decision of 2026-10-30 to close the CPU gaps before phase 3
 |---------------------|---------|
 | Phase 1A: half precision no longer stops as unsupported "for now"; it is added before phase 3 | `float.rs`, the scalar and NEON floating-point decoders |
 | Phase 1B: the crypto extension, with the dot product, is added before phase 3 rather than when a program needs it | the NEON decoders |
+
+### Plan changes (2026-10-31, the Windows milestone)
+
+The owner's decisions of 2026-10-31. What changed in `PLAN.md` and what
+it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Section 1: the product target is Windows x86_64 only until the Windows milestone (a game the owner owns playable from start to gameplay at full speed on Windows x86_64); the goal is full emulation at up to 120 fps, as soon as possible | the order of all work |
+| Section 3, "Platform priority": the other platforms are frozen, not dropped: existing features keep working and passing CI on all six native targets; new features are built for Windows x86_64, and Linux x86_64 runs them where testing needs it (cloud sessions, lavapipe); on macOS and ARM a new feature compiles and stops with "not yet supported on this platform", never a build error | every new feature from now on; `create_backend(Jit)` off x86_64 |
+| Section 3: two main tracks in parallel, the CPU track (differential tester, then the x86_64 recompiler) and the graphics track (5A then 5B, Vulkan, lavapipe on Linux, real GPUs on Windows); phases 4 and 5 no longer wait for phase 3 | phases 3, 4 and 5; the "Next task" below |
+| Section 3: after the milestone, platforms in this order: macOS ARM, Linux x86_64, Windows ARM, macOS x86_64, Linux ARM; ARM hosts start with phase 3's in-process fallback (guest code run directly, rewriting svc, system and thread registers, x18 and counter reads), because GitHub's macOS ARM runners return HV_UNSUPPORTED from hv_vm_create and its Linux ARM runners have no /dev/kvm; hypervisor backends wait for Mac hardware | phase 3 (its order and first backend) |
+| Section 3's machine table corrected: the owner has no ARM machine; their machines are x86_64 (a Windows PC, a Windows bare-metal server, Debian bare metal, Proxmox) | gameplay testing; ARM hosts tested only on CI |
+| Phase 4 provisions: kestrel's own x86_64 encoder (no new dependency), every encoding checked against llvm-mc; the Windows x64 calling convention first, System V for Linux testing; executable memory never writable and executable at once; an interpreter fallback for anything not translated; integer, branches, loads and stores first, then floating point and NEON through the interpreter's routines where simpler; zero divergences at every step. Acceptance is now Windows x86_64 (and Linux x86_64 for testing) | the recompiler |
+| Phase 5: 5A then 5B in parallel with phase 4 | the graphics track |
 
 ### CPU gaps before phase 3 (owner, 2026-10-30)
 
@@ -993,43 +1027,180 @@ Not verified (no ARM host with a hypervisor here): the hypervisor and
 recompiler constraints in `docs/ARCHITECTURE.md` are for phases 3 and 4
 to check.
 
+### Phase 4 notes
+
+The CPU track (owner, 2026-10-31): the differential tester first, then
+the x86_64 recompiler.
+
+The differential tester (`crates/kestrel-testsuite/src/diff.rs`,
+`kestrel diff --backend <b> [program...]`; `docs/ARCHITECTURE.md`,
+"Correctness", has how it works). Two copies of a self-test program run
+on the counted clock, one on the interpreter and one on the candidate,
+compared every 100,000 instructions (registers, flags, vector and system
+registers, the exclusive monitor, instructions retired, the clock, the
+running thread, system calls with X0..X7, the memory map and every
+writable page, the output, the stop); the first stretch that differs is
+replayed and narrowed down 100 times at a time to one instruction.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Comparison points | every 100,000 instructions, then every 1,000, 10 and 1 in the replays |
+| Memory compared | the memory map, and the bytes of every page mapped readable and writable; read-only pages change only through system calls, which are compared |
+| System calls | each side's backend is wrapped and records every `Exit::Svc` with X0..X7 and the instructions retired |
+| A stretch that does not diverge again in smaller steps | reported as the stretch, saying so |
+
+Verified: the interpreter against itself on all 27 self-test programs,
+zero divergences (`cargo test`, and `kestrel diff` on Linux x86_64). An
+interpreter with a deliberate bug from the nth time an instruction runs
+(an ADD result, the carry of SUBS, a value STR stores, a system call
+number) is found at exactly the first instruction the bug struck, with
+the register, flag, memory word or call named first; disabling the
+memory comparison fails the memory test.
+
+Limit: a wrong value overwritten before the next comparison point (a dead
+flag) leaves no trace in the state and is not reported, since the
+program is not affected; a program that uses it shows it.
+
+The x86_64 recompiler, first steps (2026-10-31; `docs/ARCHITECTURE.md`,
+"JIT", has the design): IR, frontend, code generation in both calling
+conventions, kestrel's own encoder, executable memory per OS, the block
+cache and dispatcher, the interpreter fallback.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Block length | at most 64 instructions, ending at a branch; a block longer than the budget left is translated again cut to fit, so the recompiler retires exactly what the interpreter would |
+| Guest state | registers and NZCV in `CpuState` (memory), read and written by every operation; IR values in RBP, R13-R15 or stack slots |
+| Memory accesses | an inline page-table walk (`Memory::raw_tables`) and a direct arena access; the `Memory` helper for anything unmapped, not permitted, crossing a page or beyond the table |
+| Chaining | blocks with at most 24 stack slots share one frame and jump into each other's bodies through link cells (data, not patched code); a chained jump needs room for 64 instructions in the budget, else the block returns to the dispatcher; links reset when the memory's change count moved and on `invalidate`; computed jumps always return to the dispatcher |
+| Code memory | 64 MiB per backend; when full, every translation is dropped and made again |
+| Self-modifying code | each block keeps its guest words; when `Memory::epoch` moves (a mapping or permission changed) they are fetched and compared before it runs again; blocks on writable and executable pages are compared every time |
+| A backend given another process's memory | drops every translation |
+| The default backend | the recompiler where it is built (`auto`; the owner's decision of 2026-10-31, after CI run 9 passed on Windows x86_64); `--backend interp` picks the interpreter, which the self-test also runs |
+
+Verified (Linux x86_64 host, this session):
+- Every one of the 494 integer vectors (`int_vectors.rs`, expected values
+  from the Python models) runs as a one-instruction block, in the System V
+  and the Windows convention.
+- The encoder matches llvm-mc on all 5,359 cases.
+- The self-test: 27/27 on `--backend jit`; `kestrel diff --backend jit`:
+  zero divergences on all 27 programs, and the same in `cargo test` in
+  both conventions, with blocks of up to 64 and of 1 instruction.
+- Windows: the same build for `x86_64-pc-windows-gnu`, run under Wine
+  (VirtualAlloc, VirtualProtect, FlushInstructionCache, the Windows
+  convention): self-test 27/27 on the recompiler, zero divergences, every
+  recompiler and testsuite test passes. Then natively: CI run 9 (manual,
+  on the branch, 2026-10-31,
+  https://github.com/Lordnns/kestrel/actions/runs/41161345370), all 11
+  jobs green; on `windows-2022` (MSVC) `cargo test` passes (the
+  recompiler's tests in both conventions included), the self-test passes
+  27/27 on the recompiler at 358.6 MIPS, and `kestrel diff --backend jit`
+  finds zero divergences on all 27 programs; the same on `ubuntu-24.04`.
+  The owner then made the recompiler `auto`'s choice. (Under Wine an
+  interpreter test, `fp_tests::flush_to_zero`, fails on a double FMA
+  edge case, on the code before this work too: mingw's or Wine's `fma`,
+  not kestrel's; CI on Windows with MSVC passes it.)
+- Mutation check: setting C from the host's carry inverted makes `kestrel
+  diff` report `cmp x0, #2` in algos and `cmp x12, #7` in hbthreads as
+  the first divergence, with NZCV named.
+- Speed (self-test, Linux x86_64 cloud machine, one run each): 254 MIPS
+  on the recompiler against 62 on the interpreter. Straight-line code
+  gains most: sha256 527 MIPS (14.6 instructions a block), bigint 592;
+  branchy code less: algos 268 (5.2 a block), hbthreads 182 (3.7),
+  where returning to the dispatcher after every block dominates.
+- Then chaining and inline memory accesses (same machine, three runs
+  of each backend): the self-test 202 to 337 MIPS against 65 to 75 on
+  the interpreter. The total swings with the machine and is dominated by
+  translating the many short programs; long ones are steady: sha256
+  838, bigint 807, algos 554, hbthreads 319 (interpreter about 70).
+  New tests run small programs on both backends with budgets from 1 to
+  19,200 and compare: a fault part-way through a block, a store to
+  code, accesses crossing into a page whose frame is elsewhere in the
+  arena, halfwords, rewritten code (through a permission change and
+  through `invalidate`). Mutation checks: dropping the chained jump's
+  budget check, or the inline walk's page-crossing check, each fails a
+  test.
+- The four libnx examples (built in the pinned container, run by
+  `run-examples.sh` with `--backend jit`): 4/4. hello-world headless on
+  the counted clock with `--stats`, 503 million instructions and 243
+  frames: interpreter 51 MIPS, 25.3 fps average, 1% low 14.1 fps, worst
+  75.8 ms; recompiler 207 MIPS, 103.6 fps, 1% low 75.6 fps, worst
+  22.7 ms (the console redraws every frame through the libnx console,
+  so this is mostly guest code; the fps is host time between frames,
+  not the console's 60 Hz pacing, which only a window's host clock has).
+- What still runs in the interpreter: 0.7% of the self-test's
+  instructions (223,459 of 32,583,559): exclusives (LDXR/STXR in the
+  thread programs' spin loops), CLZ/REV/RBIT, system registers, floating
+  point and NEON.
+
 ## Next task
 
-Phase 2 is accepted (`v0.1.17`, 2026-10-30), the clock follows the
-owner's decision of 2026-10-30 (`PLAN.md` section 3: real time with a
-window, 52 instructions a tick otherwise), and guest memory is the
-phase 3 arena (2026-10-30, "Phase 3 notes"). Both passed CI on every
-platform (a manual run on the arena's branch, 2026-10-31); a release tag
-is needed only to publish packages. Ask the owner which comes next; the
-candidates:
+The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
+Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
 
-1. Phase 3 on Linux KVM and Windows (the native backend), now that
-   phase 2 is accepted and the arena is done; phase 3 on macOS needs a
-   session on the owner's Mac. Design it for the real-time goal
-   (`PLAN.md` section 1): guest counter reads from kestrel's clock, one
-   host thread per guest core, the arena mapped as `docs/ARCHITECTURE.md`
-   ("Memory") describes.
-2. A licence-notices file in the release packages, which now bundle
-   MIT/Apache crates (winit, softbuffer, gilrs and their dependencies).
-3. More homebrew: run other public homebrew in kestrel and fix what the
-   unimplemented-call log names (`user/logs/unimplemented.log`).
-4. Later input tasks the owner wants (2026-10-30): the other
-   NpadStyleTag controllers (GameCube, NES/SNES/N64/Genesis), several
-   players, and real Joy-Con motion, rumble and pairing over their own
-   protocol. A Wii Remote is not a Switch controller type; it can only be
-   mapped as a host gamepad.
+1. The CPU track, in this order:
+   - A. Done (2026-10-31, "Phase 4 notes"): the differential tester,
+     backend-agnostic: the interpreter and another backend side by side
+     on the counted clock, reporting the first divergence (registers,
+     flags, memory writes, system calls); proven with a deliberately
+     faulty interpreter variant.
+   - B. The x86_64 recompiler (phase 4) behind `create_backend(Jit)`.
+     Done (2026-10-31, "Phase 4 notes"): the IR, the frontend, kestrel's
+     encoder checked against llvm-mc, code generation in the Windows x64
+     and System V conventions, executable memory per OS, the block cache
+     with the memory's change count, the interpreter fallback, integer,
+     branches, loads and stores, chaining and inline memory accesses;
+     self-test 27/27 and zero divergences in both conventions. The
+     remaining steps, in this order; each must keep the differential
+     tester at zero divergences on every self-test program (`kestrel diff
+     --backend jit`, and `cargo test`, which runs both conventions):
+     1. Done (2026-10-31): CI run 9 passed on `windows-2022`, and
+        `auto` now picks the recompiler on Windows and Linux x86_64.
+     2. Translate what still runs in the interpreter, most frequent
+        first (measure with a count per encoding in `jit::interp`):
+        LDXR/STXR and the other exclusives (as a host compare-and-swap
+        of the value LDXR saw, `docs/ARCHITECTURE.md`, "Memory"), CLZ,
+        REV, RBIT, MRS/MSR of TPIDR_EL0, NZCV, FPCR and FPSR; counter
+        reads need the retired count flushed first, as `Op::Interp`
+        does.
+     3. Floating point and NEON: first as calls to the interpreter's own
+        routines (`float.rs`, the NEON lane helpers) with operands in
+        `CpuState::v`, so results stay identical on every host; then
+        host SSE where the Arm rules allow (round-to-nearest arithmetic
+        on finite values, with the NaN and flush-to-zero handling of
+        `float.rs` around it).
+     4. Speed: computed jumps (RET, BR, BLR) looked up in generated code
+        (a return-address stack or a small PC-indexed table) instead of
+        returning to the dispatcher; guest registers kept in host
+        registers inside a block and written back at exits and calls;
+        NZCV only computed when read or at a block's exit (lazy flags).
+        Measure with `kestrel selftest` (three runs) and `kestrel run
+        --stats` on the libnx examples.
+     5. One host thread per guest core (`PLAN.md` section 3, "Time and
+        cores"), once the parallel session's thread-safe OS layer is in:
+        one `Jit` per core or a shared, locked cache; the link cells
+        assume the memory's change count cannot move inside one `run`,
+        which another core breaks, so links must then be checked or
+        reset when the OS layer changes mappings.
+     6. `kestrel diff` on any program (an NRO path, not only the
+        self-test's), to run the libnx examples and later homebrew side
+        by side.
+   - C. Done (2026-10-31): per-backend speed in the self-test output,
+     and `kestrel run --stats` with frame times (average, 1% low, worst)
+     and instructions per second.
+2. The graphics track: phase 5A, then 5B, on Vulkan (lavapipe on Linux,
+   real GPUs on Windows).
 
-The CPU gaps the owner chose to close before phase 3 are closed on branch
-`claude/bold-euler-pjl3cr` (2026-10-31, "CPU gaps before phase 3": a unit
-test for every instruction, half precision, the dot product, the crypto
-extension, then CRC32 and CASP), waiting for review; once merged, a
-manual CI run or a release tag checks it on every platform, including
-the new `gen-int-vectors.py --check`. CPU features left for the owner to decide: LDAPR (FEAT_LRCPC),
-the non-hint pointer authentication instructions (PACIA, AUTIA, RETAA,
-LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as undefined; they
-are later or optional features, to check against the Cortex-A78C's
-documentation before adding. The hint-space PAC instructions (PACIASP
-and the like) already run as NOP.
+Other candidates, when the owner asks for them: a licence-notices file in
+the release packages (they bundle MIT/Apache crates: winit, softbuffer,
+gilrs and their dependencies); more homebrew, fixing what
+`user/logs/unimplemented.log` names; the later input tasks (other
+NpadStyleTag controllers, several players, real Joy-Con motion, rumble
+and pairing). CPU features left for the owner to decide: LDAPR
+(FEAT_LRCPC), the non-hint pointer authentication instructions (PACIA,
+AUTIA, RETAA, LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as
+undefined; check them against the Cortex-A78C's documentation before
+adding. The hint-space PAC instructions (PACIASP and the like) already
+run as NOP.
 
 Each service so far followed the same steps; keep them:
 
@@ -1217,7 +1388,11 @@ differential tester; the memory arena is done.
 
 ### Order after that
 
-1. Phase 3 on Linux KVM and Windows (phase 2 is accepted).
+1. The Windows x86_64 milestone (the two tracks above, then phase 6 on
+   the owner's Windows machines).
+2. Then the other platforms, in the owner's order: macOS ARM, Linux
+   x86_64, Windows ARM, macOS x86_64, Linux ARM; ARM hosts with phase 3's
+   in-process fallback first.
 
 Owner decisions pending in `PLAN.md` section 7 (strategy, API-level
 graphics, code reuse) do not block any of the above; ask before phase 5.

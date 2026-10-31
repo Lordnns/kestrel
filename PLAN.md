@@ -52,6 +52,12 @@ what changed and which tasks it affects.
   backends. Weigh every design choice against this goal; the interpreter
   remains the reference for correctness, not for speed. Section 3, "Time
   and cores", holds the decisions that follow from it.
+- The product target until the Windows milestone (owner, 2026-10-31):
+  Windows x86_64 only. The milestone: a game the owner owns is playable
+  from start to gameplay, at full speed, on Windows x86_64. The goal
+  behind it: full emulation at up to 120 fps, as soon as possible.
+  Section 3, "Platform priority", says what this means for the other
+  hosts; the five-platform goal above stands, after the milestone.
 
 ---
 
@@ -120,13 +126,18 @@ what changed and which tasks it affects.
 
 ## 3. Platform and test provisions
 
-| Host target      | CI builds and tests on            | Owner's gameplay test machine        |
+| Host target      | CI builds and tests on            | Owner's machines                     |
 |------------------|-----------------------------------|--------------------------------------|
-| Linux x86_64     | GitHub hosted Ubuntu x86          | x86 PC, dual-boot                    |
-| Linux ARM64      | GitHub hosted Ubuntu ARM          | Apple Silicon M1/M2 with Asahi Linux |
-| Windows x86_64   | GitHub hosted Windows x86         | x86 PC, dual-boot                    |
-| Windows ARM64    | GitHub hosted Windows 11 ARM      | Snapdragon X laptop                  |
-| macOS            | GitHub hosted macOS ARM and Intel | Apple Silicon Mac                    |
+| Linux x86_64     | GitHub hosted Ubuntu x86          | Debian bare-metal server; Proxmox    |
+| Linux ARM64      | GitHub hosted Ubuntu ARM          | none                                 |
+| Windows x86_64   | GitHub hosted Windows x86         | Windows PC; Windows bare-metal server |
+| Windows ARM64    | GitHub hosted Windows 11 ARM      | none                                 |
+| macOS            | GitHub hosted macOS ARM and Intel | none                                 |
+
+Corrected 2026-10-31 (owner): the owner has no ARM machine; their
+machines are all x86_64 (a Windows PC, a Windows bare-metal server, a
+Debian bare-metal server, a Proxmox host). ARM hosts are tested only on
+CI's hosted runners until the owner has ARM hardware.
 
 - CI runs the full test suite and self-test natively on all five targets.
   Owner decision (2026-10-29): CI runs only as the first stage of the release
@@ -139,6 +150,33 @@ what changed and which tasks it affects.
 - Hosted runners have no usable GPU and never see game files, so gameplay
   testing is manual on the owner's machines. Gameplay hardware is bought only
   when phase 5 starts.
+
+### Platform priority (owner decisions, 2026-10-31)
+
+- **Until the Windows milestone** (section 1), new features are built for
+  Windows x86_64. Linux x86_64 also runs them where testing needs it:
+  cloud sessions are Linux, and graphics is tested with lavapipe there.
+- **The other platforms are frozen, not dropped.** Existing features keep
+  working and keep passing CI on all six native targets. On macOS and on
+  ARM hosts, a new feature compiles and stops with an explicit "not yet
+  supported on this platform" message, never a build error.
+- **Two main tracks run in parallel:** the CPU track (the differential
+  tester, then the x86_64 recompiler of phase 4) and the graphics track
+  (phase 5A, then 5B, on Vulkan; tested with lavapipe on Linux and real
+  GPUs on Windows). Phases 4 and 5 no longer wait for phase 3.
+- **The recompiler uses kestrel's own x86_64 encoder**, no new
+  dependency. Every encoding it emits is checked against llvm-mc in the
+  tests, never hand-assembled (the section 2 rule for CPU encodings,
+  applied to the host's instruction set).
+- **After the milestone, the order of platforms:** macOS ARM, Linux
+  x86_64, Windows ARM, macOS x86_64, Linux ARM.
+- **ARM hosts start with the in-process fallback** (phase 3's documented
+  fallback): guest code runs directly in kestrel's process, with load-time
+  rewriting of svc, the system and thread registers, x18 and counter
+  reads. Reason: GitHub's macOS ARM runners return HV_UNSUPPORTED from
+  hv_vm_create and its Linux ARM runners have no /dev/kvm, and the owner
+  has no ARM machine, so a hypervisor backend could not be tested.
+  Hypervisor backends wait for Mac hardware.
 
 ### Time and cores (owner decisions, 2026-10-30)
 
@@ -183,7 +221,8 @@ These follow from the real-time goal in section 1.
 Each phase lists its goal, tasks, provisions (decisions already made) and
 acceptance criteria. Finish a phase's acceptance criteria before starting the
 next, unless the owner says otherwise or a phase's provisions allow an earlier
-start (phase 3 does).
+start (phase 3 does). Since 2026-10-31 (section 3, "Platform priority"),
+phases 4 and 5 run in parallel and no longer wait for phase 3.
 
 ### Phase 0: Foundation
 - Workspace split into memory, CPU, loader, OS emulation, test suite and
@@ -318,6 +357,10 @@ Provisions (decided):
   six for Switch 2 games; guest counter reads answered from kestrel's
   clock.
 - Order: macOS first (owner's development Mac), then Linux KVM, then Windows.
+  Superseded 2026-10-31 (section 3, "Platform priority"): phase 3 waits
+  for the Windows x86_64 milestone, the owner has no ARM machine, and ARM
+  hosts start with the in-process fallback; hypervisor backends wait for
+  Mac hardware.
 - Priority (2026-10-29): native execution on ARM is the approach the first
   public Switch 2 demos use (section 6), so it is not deferred until phase 2
   is complete. Start phase 3 on macOS as soon as phase 2's threads and
@@ -345,8 +388,23 @@ the phase 1 NaN rules applied; one host thread per guest core, as in phase 3
 (section 3, "Time and cores"). Static whole-program recompilation is a later
 option.
 
-Acceptance: the self-test passes on the recompiler on Linux, Windows and
-macOS Intel; zero divergences against the interpreter.
+Provisions added 2026-10-31 (owner): Windows x86_64 first (the Windows
+x64 calling convention, then System V for testing on Linux); kestrel's
+own x86_64 encoder, every encoding checked against llvm-mc; executable
+memory per OS behind platform conditions (VirtualAlloc and VirtualProtect
+on Windows, mmap and mprotect on Linux), never writable and executable at
+once; anything not yet translated falls back to the interpreter for that
+instruction or block, so programs always run; integer, branches and
+loads and stores first, then floating point and NEON, calling the
+interpreter's routines where that is simpler, so guest results stay
+identical on every host. Every step passes the differential tester with
+zero divergences on every self-test program. On other hosts
+`create_backend(Jit)` stops with "not yet supported on this platform".
+
+Acceptance: the self-test passes on the recompiler on Windows x86_64
+(and Linux x86_64 for testing); zero divergences against the interpreter.
+macOS Intel follows after the milestone (section 3, "Platform
+priority").
 
 ### Phase 5: Graphics
 Goal: homebrew that draws, then 3D, then a graphics path for commercial games.
@@ -380,6 +438,10 @@ Provisions:
   strictly: the NVN API is known only from observation of software the owner
   legally has, never from leaked headers or SDK documentation. Owner approval
   is required before 5D starts (section 7).
+- Since 2026-10-31 (section 3, "Platform priority"): 5A then 5B run in
+  parallel with phase 4, on Vulkan, built for Windows x86_64 and tested
+  with lavapipe (Mesa's software Vulkan driver) on Linux and with real
+  GPUs on the owner's Windows machines.
 
 5A. Display and framebuffer
 - GPU driver services and their control calls, GPU address space, display
