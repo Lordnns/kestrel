@@ -46,7 +46,10 @@ RUN OPTIONS:
                                          (default: user/sdmc next to kestrel)
     --threaded                           Each guest core on its own host
                                          thread, in real time on the host's
-                                         clock (runs do not repeat)
+                                         clock (runs do not repeat); the
+                                         default with a window
+    --single-thread                      Every guest core in turn on one
+                                         host thread, as without a window
     --headless                           No window for a homebrew NRO; the
                                          window maps keys and gamepads as
                                          user/config/input.cfg says
@@ -70,6 +73,7 @@ struct Opts {
     stats: bool,
     sd: Option<PathBuf>,
     threaded: bool,
+    single_thread: bool,
     headless: bool,
     presses: Vec<unattended::Press>,
     save_frame: Option<PathBuf>,
@@ -88,6 +92,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         stats: false,
         sd: None,
         threaded: false,
+        single_thread: false,
         headless: false,
         presses: Vec::new(),
         save_frame: None,
@@ -110,6 +115,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--stats" => o.stats = true,
             "--sd" => o.sd = Some(it.next().ok_or("--sd needs a folder")?.into()),
             "--threaded" => o.threaded = true,
+            "--single-thread" => o.single_thread = true,
             "--headless" => o.headless = true,
             "--press" => o
                 .presses
@@ -123,7 +129,18 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             other => return Err(format!("unknown option '{other}'")),
         }
     }
+    if o.threaded && o.single_thread {
+        return Err("--threaded and --single-thread cannot both be given".into());
+    }
     Ok(o)
+}
+
+/// Whether each guest core runs on its own host thread: with a window,
+/// unless --single-thread (the owner's decision of 2026-10-31: someone
+/// using the program gets the cores in parallel, in real time); without
+/// one, only with --threaded, so unattended runs repeat.
+fn threaded(o: &Opts, windowed: bool) -> bool {
+    o.threaded || (windowed && !o.single_thread)
 }
 
 fn info() {
@@ -421,10 +438,12 @@ fn emulate(
     proc.services.fs.program = program;
     // With a window someone is using the program: it runs on the host's
     // clock, in real time, for as long as they like (the owner's decision
-    // of 2026-10-30). Without one, time is counted, so runs repeat, unless
-    // the cores run on host threads, which is always real time.
+    // of 2026-10-30), its cores on host threads (`threaded`). Without one,
+    // time is counted, so runs repeat, unless the cores run on host
+    // threads, which is always real time.
     let windowed = window.is_some();
-    if windowed || o.threaded {
+    let threaded = threaded(o, windowed);
+    if windowed || threaded {
         proc.cpu.clock = kestrel_cpu::Clock::host();
     }
     if let Some((input, screen, interrupt)) = window {
@@ -458,10 +477,10 @@ fn emulate(
         note = note.take().or(n);
         Ok(b)
     };
-    // One backend per guest core with --threaded, each on its own host
+    // One backend per guest core when threaded, each on its own host
     // thread; otherwise one runs every core in turn.
     let mut backends = vec![make_backend()?];
-    if o.threaded {
+    if threaded {
         for _ in 1..kestrel_hle::thread::CORES {
             backends.push(make_backend()?);
         }
@@ -472,7 +491,7 @@ fn emulate(
     let backend_name = backends[0].name();
 
     let t0 = Instant::now();
-    let stop = if o.threaded {
+    let stop = if threaded {
         proc.run_threaded(backends, max_steps)
     } else {
         proc.run(backends[0].as_mut(), max_steps)
@@ -573,6 +592,25 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_runs_threaded_unless_told_otherwise() {
+        let opts = |a: &[&str]| {
+            let args: Vec<String> = std::iter::once("x.nro")
+                .chain(a.iter().copied())
+                .map(String::from)
+                .collect();
+            parse(&args)
+        };
+        let plain = opts(&[]).unwrap();
+        assert!(threaded(&plain, true), "a window");
+        assert!(!threaded(&plain, false), "unattended runs repeat");
+        let single = opts(&["--single-thread"]).unwrap();
+        assert!(!threaded(&single, true));
+        let forced = opts(&["--threaded"]).unwrap();
+        assert!(threaded(&forced, false));
+        assert!(opts(&["--threaded", "--single-thread"]).is_err());
+    }
 
     #[test]
     fn log_times_are_utc_dates() {
