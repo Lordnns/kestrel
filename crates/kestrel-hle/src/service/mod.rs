@@ -2693,7 +2693,8 @@ mod tests {
             .iter()
             .all(|&b| b == 0));
         assert!(p.log.is_empty());
-        // Activated, but only Handheld supported: refused, noted once.
+        // Activated, nothing supported yet: not connected, but not refused
+        // either, as the next call may set what the program supports.
         let hid = open(&mut p, b"hid");
         let aruid = PROCESS_ID.to_le_bytes();
         let mut rev = 5u64.to_le_bytes().to_vec();
@@ -2702,6 +2703,9 @@ mod tests {
             send(&mut p, hid, &request(true, &[], None, 109, &rev)),
             Ok(0)
         );
+        sample(&mut p);
+        assert!(p.log.is_empty(), "{:?}", p.log);
+        // Only Handheld supported: refused, noted once.
         let mut styles = 2u64.to_le_bytes().to_vec();
         styles.extend(aruid);
         assert_eq!(

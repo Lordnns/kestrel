@@ -188,7 +188,13 @@ impl Process {
             return;
         }
         if hid.style_set & style == 0 || !hid.npad_ids.contains(&id) {
-            if !hid.refused {
+            // Only a list the program set can refuse the controller: one
+            // still empty may be set by its next call (padConfigureInput
+            // sends two), which another guest core may not have reached
+            // when this one samples.
+            let refused = (hid.style_set != 0 && hid.style_set & style == 0)
+                || (!hid.npad_ids.is_empty() && !hid.npad_ids.contains(&id));
+            if refused && !hid.refused {
                 let what = format!(
                     "the program does not accept the emulated {controller:?} (style {style:#x}, \
                      NpadIdType {id:#x}); it supports styles {:#x} and IDs {:x?}",
