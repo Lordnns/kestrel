@@ -23,7 +23,7 @@ pub mod sync;
 mod testutil;
 pub mod thread;
 
-use kestrel_core::{Memory, Perm};
+use kestrel_core::{Arena, Memory, Perm, DEFAULT_ARENA_SIZE};
 use kestrel_cpu::{CpuBackend, CpuState, Exit};
 use kestrel_loader::Loaded;
 
@@ -161,7 +161,7 @@ pub struct Process {
 
 impl Process {
     /// Create a process around an already-loaded image.
-    pub fn new(mut mem: Memory, image: &Loaded) -> Result<Self, String> {
+    pub fn new(mem: Memory, image: &Loaded) -> Result<Self, String> {
         use layout::*;
         use memory::{state, tag};
         // The image the loader mapped: code read-only, data writable.
@@ -222,7 +222,9 @@ impl Process {
     /// process. An NRO is loaded at `layout::NRO_BASE` and started with
     /// argv[0] = `name` followed by `args`; an ELF takes no arguments.
     pub fn load(file: &[u8], name: &str, args: &[String]) -> Result<Self, String> {
-        let mut mem = Memory::new();
+        let arena = Arena::new(DEFAULT_ARENA_SIZE)
+            .map_err(|e| format!("cannot reserve address space for guest memory: {e}"))?;
+        let mut mem = Memory::with_arena(std::sync::Arc::new(arena));
         if kestrel_loader::is_nro(file) {
             let nro = kestrel_loader::load_nro(file, layout::NRO_BASE, &mut mem)
                 .map_err(|e| e.to_string())?;
