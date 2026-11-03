@@ -306,8 +306,15 @@ const NO_FENCE: [u8; 0x24] = [0; 0x24];
 /// magic, width, height, stride, format, usage, pid, refcount, fd and int
 /// counts) and the ints that follow, the NvGraphicBuffer after its
 /// NativeHandle header (libnx's `nvidia/graphic_buffer.h`): the nvmap ID
-/// at 4, then plane 0 from 0x34, its layout at 0x44, pitch 0x48, offset
-/// 0x50 and block height 0x58.
+/// at 4, the pixel format at 0x1c, then plane 0 from 0x34, its layout at
+/// 0x44, pitch 0x48, offset 0x50 and block height 0x58.
+///
+/// The pixel format is the NvGraphicBuffer's own, not the header's: the
+/// header carries the window's format, which libnx's native window sets
+/// from the first buffer it is given and resets to 0 when it disconnects,
+/// so a program that makes a second swapchain (deko_examples switching
+/// examples) sends 0 there, while each buffer still says what it holds
+/// (kestrel's choice: the buffer's own description wins).
 fn parse_buffer(flat: &[u8]) -> Result<Buffer, String> {
     let word = |at: usize| {
         flat.get(at..at + 4)
@@ -325,7 +332,7 @@ fn parse_buffer(flat: &[u8]) -> Result<Buffer, String> {
     let surface = Surface {
         width: word(4)?,
         height: word(8)?,
-        format: word(16)?,
+        format: int(0x1c)?,
         layout: int(0x44)?,
         pitch: int(0x48)?,
         block_height_log2: int(0x58)?,

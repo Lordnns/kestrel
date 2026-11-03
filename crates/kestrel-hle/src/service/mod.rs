@@ -2765,18 +2765,20 @@ mod tests {
     /// bqSetPreallocatedBuffer send for a 32x8 block-linear RGB 565
     /// surface (blocks one GOB high) at `offset` in nvmap object `nvmap`:
     /// the "GBFR" header, then the NvGraphicBuffer after its NativeHandle
-    /// header, as ints.
+    /// header, as ints. The header's format is 0, as libnx sends it for a
+    /// window's second set of buffers; the buffer's own says RGB 565.
     fn graphic_buffer(nvmap: u32, offset: u32) -> Vec<u8> {
         let mut ints = vec![0u32; 0x51];
         ints[0] = u32::MAX;
         ints[1] = nvmap;
         ints[3] = 0xdaff_caff;
+        ints[0x1c / 4] = 4;
         ints[0x34 / 4] = 32;
         ints[0x38 / 4] = 8;
         ints[0x44 / 4] = 3;
         ints[0x48 / 4] = 64;
         ints[0x50 / 4] = offset;
-        let mut v = words(&[0x4742_4652, 32, 8, 32, 4, 0xb00, 42, 0, 0, 0x51]);
+        let mut v = words(&[0x4742_4652, 32, 8, 32, 0, 0xb00, 42, 0, 0, 0x51]);
         v.extend(words(&ints));
         v
     }
