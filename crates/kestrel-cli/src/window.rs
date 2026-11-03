@@ -1,9 +1,10 @@
-//! The window: winit for the window and keyboard, softbuffer to paint it,
-//! gilrs for gamepads (the owner's choice). The window's event loop owns the
-//! main thread, as macOS requires; the program runs on a worker thread and
-//! reads the controller the window builds from the keyboard and gamepads.
-//! The window paints the frames the program queues to the display, scaled
-//! to fit with their shape kept.
+//! The window: winit for the window and keyboard, Vulkan (`vulkan.rs`, on
+//! Windows and Linux x86_64) or softbuffer to paint it, gilrs for gamepads
+//! (the owner's choices). The window's event loop owns the main thread, as
+//! macOS requires; the program runs on a worker thread and reads the
+//! controller the window builds from the keyboard and gamepads. The window
+//! paints the frames the program queues to the display, scaled to fit with
+//! their shape kept.
 
 use crate::input_config::InputConfig;
 use kestrel_hle::display::{Frame, Screen};
@@ -26,7 +27,41 @@ use winit::window::{Window, WindowId};
 const POLL: Duration = Duration::from_millis(4);
 /// The background, and the bars around a frame of another shape: a dark
 /// grey.
-const BACKGROUND: u32 = 0x0020_2020;
+pub(crate) const BACKGROUND: u32 = 0x0020_2020;
+
+/// How the window paints (`--video`), as Dolphin's video backend setting:
+/// Vulkan through the host GPU, or softbuffer on the CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Video {
+    /// Vulkan where kestrel supports it and the computer has a driver,
+    /// softbuffer otherwise.
+    Auto,
+    Vulkan,
+    Software,
+}
+
+/// Whether kestrel paints with Vulkan on this platform: Windows and Linux
+/// x86_64 for now (PLAN.md section 3, "Platform priority").
+pub const VULKAN_HERE: bool = cfg!(all(
+    target_arch = "x86_64",
+    any(windows, target_os = "linux")
+));
+
+impl std::str::FromStr for Video {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "auto" => Ok(Video::Auto),
+            "software" => Ok(Video::Software),
+            "vulkan" if VULKAN_HERE => Ok(Video::Vulkan),
+            "vulkan" => Err("--video vulkan: not yet supported on this platform".into()),
+            _ => Err(format!(
+                "unknown video backend '{s}' (auto, vulkan, software)"
+            )),
+        }
+    }
+}
 
 /// What the program sees: the controller the window last built.
 struct SharedPad {
@@ -65,21 +100,35 @@ impl Screen for SharedScreen {
     }
 }
 
-/// Paint `frame` into a `width` x `height` buffer: as large as fits with
-/// its shape kept, centred, each window pixel taking the frame pixel under
-/// its centre (kestrel's choice: sharp pixels, no blending).
-fn scale(frame: &Frame, buffer: &mut [u32], width: usize, height: usize) {
-    buffer.fill(BACKGROUND);
-    let (fw, fh) = (frame.width as usize, frame.height as usize);
+/// Where an `fw` x `fh` frame goes in a `width` x `height` window: as
+/// large as fits with its shape kept, centred, as (x, y, width, height).
+/// None for an empty frame.
+pub(crate) fn fit(
+    fw: usize,
+    fh: usize,
+    width: usize,
+    height: usize,
+) -> Option<(usize, usize, usize, usize)> {
     if fw == 0 || fh == 0 {
-        return;
+        return None;
     }
     let (w, h) = if width * fh <= height * fw {
         (width, (width * fh / fw).max(1))
     } else {
         ((height * fw / fh).max(1), height)
     };
-    let (x0, y0) = ((width - w) / 2, (height - h) / 2);
+    Some(((width - w) / 2, (height - h) / 2, w, h))
+}
+
+/// Paint `frame` into a `width` x `height` buffer: as `fit` places it,
+/// each window pixel taking the frame pixel under its centre (kestrel's
+/// choice: sharp pixels, no blending).
+pub(crate) fn scale(frame: &Frame, buffer: &mut [u32], width: usize, height: usize) {
+    buffer.fill(BACKGROUND);
+    let (fw, fh) = (frame.width as usize, frame.height as usize);
+    let Some((x0, y0, w, h)) = fit(fw, fh, width, height) else {
+        return;
+    };
     for y in 0..h {
         let sy = (2 * y + 1) * fh / (2 * h);
         let row = &frame.pixels[sy * fw..(sy + 1) * fw];
@@ -90,11 +139,45 @@ fn scale(frame: &Frame, buffer: &mut [u32], width: usize, height: usize) {
     }
 }
 
+/// What paints the window.
+enum Painter {
+    Software(softbuffer::Surface<Rc<Window>, Rc<Window>>),
+    #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+    Vulkan(Box<crate::vulkan::Vulkan>),
+}
+
+/// softbuffer's painter for `w`.
+fn software(w: &Rc<Window>) -> Result<Painter, String> {
+    let context = softbuffer::Context::new(w.clone()).map_err(|e| e.to_string())?;
+    let surface = softbuffer::Surface::new(&context, w.clone()).map_err(|e| e.to_string())?;
+    Ok(Painter::Software(surface))
+}
+
+/// The painter `video` asks for: Vulkan when asked or by default where it
+/// is supported, falling back to softbuffer with a note when it cannot
+/// start (no driver, no GPU that can show the window).
+fn painter(video: Video, w: &Rc<Window>) -> Result<Painter, String> {
+    #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+    if video != Video::Software {
+        match crate::vulkan::Vulkan::for_window(w) {
+            Ok(v) => {
+                eprintln!("note: video: Vulkan on {}", v.name);
+                return Ok(Painter::Vulkan(Box::new(v)));
+            }
+            Err(e) => eprintln!("note: video: Vulkan not usable ({e}); painting with softbuffer"),
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", any(windows, target_os = "linux"))))]
+    let _ = video;
+    software(w)
+}
+
 struct App {
     title: String,
     config: InputConfig,
+    video: Video,
     window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    painter: Option<Painter>,
     keys: HashSet<String>,
     gilrs: Option<gilrs::Gilrs>,
     pad: Arc<Mutex<Pad>>,
@@ -153,8 +236,38 @@ impl App {
     }
 
     fn paint(&mut self) {
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
+        let (Some(window), Some(painter)) = (&self.window, &mut self.painter) else {
             return;
+        };
+        #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+        if let Painter::Vulkan(v) = painter {
+            // The frame is copied out, so the program's thread is not held
+            // while the window waits for the display.
+            let frame = self.frame.lock().unwrap().clone();
+            let size = window.inner_size();
+            match v.present(frame.as_ref(), size.width, size.height) {
+                Ok(()) => return,
+                Err(e) => {
+                    eprintln!("note: video: Vulkan stopped ({e}); painting with softbuffer");
+                    let w = window.clone();
+                    match software(&w) {
+                        Ok(p) => *painter = p,
+                        Err(e) => {
+                            self.error = Some(e);
+                            self.painter = None;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // Where kestrel has no Vulkan the painter has one kind, and this
+        // match only unwraps it.
+        #[allow(clippy::infallible_destructuring_match)]
+        let surface = match painter {
+            Painter::Software(surface) => surface,
+            #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+            Painter::Vulkan(_) => return,
         };
         let size = window.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
@@ -181,20 +294,19 @@ impl ApplicationHandler<Event> for App {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
+        let video = self.video;
         let made = event_loop
             .create_window(attributes)
             .map_err(|e| e.to_string())
             .and_then(|w| {
                 let w = Rc::new(w);
-                let context = softbuffer::Context::new(w.clone()).map_err(|e| e.to_string())?;
-                let surface =
-                    softbuffer::Surface::new(&context, w.clone()).map_err(|e| e.to_string())?;
-                Ok((w, surface))
+                let painter = painter(video, &w)?;
+                Ok((w, painter))
             });
         match made {
-            Ok((w, surface)) => {
+            Ok((w, painter)) => {
                 self.window = Some(w);
-                self.surface = Some(surface);
+                self.painter = Some(painter);
             }
             Err(e) => {
                 // The program keeps running without a window.
@@ -232,6 +344,10 @@ impl ApplicationHandler<Event> for App {
                 self.update_pad();
             }
             WindowEvent::Resized(_) => {
+                #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+                if let Some(Painter::Vulkan(v)) = &mut self.painter {
+                    v.resized();
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -265,6 +381,7 @@ impl ApplicationHandler<Event> for App {
 pub fn run<R: Send + 'static>(
     title: String,
     config: InputConfig,
+    video: Video,
     program: impl FnOnce(Box<dyn Source>, Box<dyn Screen>, Arc<AtomicBool>) -> R + Send + 'static,
 ) -> Result<R, String> {
     let event_loop = EventLoop::<Event>::with_user_event()
@@ -298,8 +415,9 @@ pub fn run<R: Send + 'static>(
     let mut app = App {
         title,
         config,
+        video,
         window: None,
-        surface: None,
+        painter: None,
         keys: HashSet::new(),
         gilrs,
         pad,

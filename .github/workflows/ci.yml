@@ -49,6 +49,13 @@ jobs:
       - name: Install libudev
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      # Vulkan presentation is tested with lavapipe, Mesa's software Vulkan
+      # driver (PLAN.md section 3): the Vulkan test must run on this job.
+      - name: Install lavapipe
+        if: matrix.name == 'Linux x86_64'
+        run: |
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+          echo "KESTREL_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
