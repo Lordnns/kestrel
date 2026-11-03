@@ -586,8 +586,19 @@ impl Process {
     }
 
     /// The next clock reading at which something wakes a thread: a sleep
-    /// or a wait's timeout ending, or the display freeing a buffer.
+    /// or a wait's timeout ending, the display freeing a buffer, or the
+    /// next vsync while a thread waits on the vsync event.
     pub(crate) fn next_wake(&self) -> Option<u64> {
+        let vsync_event = self.services.vi.vsync_event;
+        let vsync_waiter = self.sched.threads.iter().any(|t| {
+            matches!(
+                (&t.state, &t.wait),
+                (State::Waiting { .. }, Some(Wait::Objects(objects)))
+                    if vsync_event.is_some_and(|e| objects.contains(&e))
+            )
+        });
+        let next_vsync =
+            (self.now() / crate::service::vi::VSYNC_PERIOD + 1) * crate::service::vi::VSYNC_PERIOD;
         self.sched
             .threads
             .iter()
@@ -596,6 +607,7 @@ impl Process {
                 _ => None,
             })
             .chain(self.services.vi.next_release())
+            .chain(vsync_waiter.then_some(next_vsync))
             .min()
     }
 

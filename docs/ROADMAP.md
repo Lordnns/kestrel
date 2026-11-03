@@ -1281,6 +1281,320 @@ Verified (Linux x86_64 host, this session):
   (2026-11-03, release run 21, every job green): the first release with
   the recompiler as the default and the threaded cores.
 
+### Phase 5 notes
+
+The graphics track (owner, 2026-10-31: 5A, then 5B, on Vulkan; "Next
+task" item 2). Started 2026-11-03 on branch `claude/graphics-5a`, in a
+cloud session (Linux x86_64) while a local session works on the CPU
+track.
+
+#### 5A acceptance: the framebuffer and 2D examples
+
+The pinned switch-examples commit (669786898205b7beb25ff1731e72982e6d0397d3,
+the one phase 2 uses) has six examples in `graphics/`. Each was built
+and run headless with `--save-frame` (2026-11-03):
+
+| Example | What it needs | Result |
+|---------|---------------|--------|
+| `graphics/printing/vt52-demo` | libnx's console (RGB 565), cursor escapes, colours, bold, faint, reverse, underline, strikethrough | displays correctly with phase 2's screen path; now an acceptance example |
+| `graphics/simplegfx` | `framebufferCreate` in RGBA 8888, `framebufferMakeLinear` (libnx swizzles to block-linear itself) | displays correctly; now an acceptance example |
+| `graphics/simplegfx_moviemaker` | sockets (`bsd:u`, for nxlink's stdio; it carries on if they fail) and grc's MovieMaker (video recording to the album, `grc:c`, offscreen layers) | stops: `service "bsd:u"`. Not a display feature: waits for the owner's decision |
+| `graphics/shared_font` | pl:u's shared system font, Nintendo's font data | not run: kestrel must not ship or invent the font; waits for the owner's decision |
+| `graphics/sdl2/*`, `graphics/opengl/*`, `graphics/deko3d/*` | the GPU itself (nvhost devices, channels, command streams, shaders) | phase 5B |
+
+The owner's decisions (2026-11-03):
+- `graphics/shared_font`: pl:u's shared font is Nintendo's data; kestrel
+  does not ship it or make a stand-in. sm: now stops on pl:u and pl:s
+  with a message saying so (`service/sm.rs`); loading a font file the
+  user dumped from their own console comes later.
+- `graphics/simplegfx_moviemaker` (sockets, grc's video recording) is
+  not part of 5A.
+- Vulkan presentation uses `ash` (MIT or Apache 2.0), the new
+  dependency PLAN.md section 5 asks about.
+- Everything of 5A, the GPU's nvhost devices included, goes in one pull
+  request.
+
+How the two are checked (`scripts/check-examples.py`, independent of
+kestrel):
+- vt52-demo, pixel for pixel, against a model of libnx 4.12.0's console
+  written from its source (`console.c`'s escape handling,
+  `console_sw.c`'s palette and `drawChar`, ISC) and the example's
+  `main.c`: the 80x45 text grid with each cell's colours and lines,
+  drawn with libnx's font; RGB 565 widened as kestrel's display
+  documents (each channel's top bits repeated below them).
+- simplegfx: one grey everywhere, 4 * n in each channel with n at most
+  60 (it counts frames 1 to 60, then 0). Which grey depends on how many
+  frames ran, so any is accepted. A uniform grey cannot show a channel
+  order or layout bug; `display.rs`'s unit tests cover RGBA 8888.
+
+`build-examples.sh` builds six examples, `run-examples.sh` runs all six
+single-threaded and threaded: 6/6 PASS both ways (Linux x86_64,
+recompiler). Mutation check: RGB 565 widened without repeating the top
+bits fails vt52-demo at its first coloured pixel. Time on the
+interpreter (the ARM and macOS jobs): simplegfx about 19 s a run (it
+fills 921,600 pixels a frame in guest code), vt52-demo about 6 s.
+
+#### Sources
+
+- libnx 4.12.0 (`7644c9b`, ISC), read for the protocol only:
+  `nx/source/nvidia/ioctl/*.c` (the ioctl numbers and argument layouts of
+  nvhost-ctrl, nvhost-ctrl-gpu, nvhost-as-gpu and the channels),
+  `nvidia/fence.c` (how fences wait: EventRegister, nvdrv QueryEvent
+  (4) with `0x10000000 | slot`, EventWaitAsync answering Timeout (5)
+  until the event is signalled), `services/nv.c` (NvError numbers),
+  `display/*.c`.
+- Switchbrew, "NV services" (wiki source, read 2026-11-03; the
+  session's network first refused switchbrew.org, then allowed it):
+  the nvdrv commands (QueryEvent, 4), the /dev/nvhost-ctrl ioctl table
+  and argument layouts, the event ID formats, NvError. "Display
+  services" now redirects to "VI services".
+
+#### /dev/nvhost-ctrl (2026-11-03)
+
+What it is for: a syncpoint is a counter the GPU (and the display)
+increments when a piece of work finishes; a fence is "syncpoint N
+reaches value V". Programs wait on fences before reusing a buffer the
+GPU or the display still reads. libnx's nvFenceWait registers an event
+slot (SYNCPT_ALLOC_EVENT), gets its event (nvdrv QueryEvent with
+`0x10000000 | slot`), arms it (SYNCPT_WAIT_EVENT_EX, which answers
+Timeout when the fence is not reached yet), waits on the event, and on
+its own timeout clears the wait (SYNCPT_CLEAR_EVENT_WAIT).
+
+Implemented (`hle/service/nv.rs`): SYNCPT_READ (0x14), SYNCPT_INCR
+(0x15), SYNCPT_WAIT (0x16), SYNCPT_WAITEX (0x19), SYNCPT_READ_MAX
+(0x1a), SYNCPT_CLEAR_EVENT_WAIT (0x1c), SYNCPT_WAIT_EVENT_EX (0x1e),
+SYNCPT_ALLOC_EVENT (0x1f), SYNCPT_FREE_EVENT (0x20),
+SYNCPT_FREE_EVENT_BATCH (0x21), and nvdrv QueryEvent on nvhost-ctrl.
+No GPU runs yet, so only the program's own SYNCPT_INCR moves a
+syncpoint; `Process::syncpoint_incr` is where the GPU will. Still
+stopping, named: MODULE_MUTEX (0x17), MODULE_REGRDWR (0x18),
+GET_CONFIG (0x1b, "not available in production mode", with no error
+documented), SYNCPT_WAIT_EVENT (0x1d, libnx uses it only before 2.0.0;
+it allocates its own slot), SYNCPT_GET_SHIFT (0x22, which of its two
+answers is undocumented), the [S2] ioctls (0x27, 0x28, 0x2a, 0x2b), and
+QueryEvent on any other device.
+
+Tests: `nvhost_ctrl_syncpoints_and_events` in `service/mod.rs` (IPC);
+`guest/src/nro/hbnvctrl.c` sends the requests as libnx does, with the
+fence wait's both paths (signalled by an increment; timed out and
+cleared), modelled in `gen-expected.py`: self-test 28/28 on both
+backends, the same output at `-O3 -march=armv8.2-a` on both. Mutation
+check: signalling only when the value passes the threshold by one
+makes hbnvctrl deadlock (its event never fires) and fails the unit
+test. Switchbrew contradicts itself on SYNCPT_WAIT_EVENT_EX's Timeout
+value (its section says `slot | id << 4`, QueryEvent's says the new
+format); kestrel follows the section; libnx ignores the value.
+
+This supersedes the "Phase 2 acceptance" gap "/dev/nvhost-ctrl opens
+and stops on any ioctl".
+
+#### Choices (kestrel's)
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Syncpoints | IDs 0 to 191 (the Tegra X1's host1x count, as Linux's host1x driver lists for Tegra210; "NV services" does not say); others BadParameter; all start at 0 |
+| SYNCPT_INCR | both 0x40040015 ("NV services") and 0xc0040015 (libnx's `_NV_IOWR`); the value and the max move together |
+| Reached | a wrapping 32-bit compare: the value minus the threshold, as signed, is not negative |
+| SYNCPT_WAIT / WAITEX not reached | timeout 0: Timeout; any other timeout stops, named ("a request that blocks"): kestrel's services cannot make a request wait yet |
+| WAITEX's value | written only when the threshold is reached |
+| SYNCPT_WAIT_EVENT_EX | its timeout is not used (libnx waits on the event with its own); arming clears the event; reached: the value out, the event untouched |
+| Event IDs (QueryEvent, CLEAR_EVENT_WAIT) | the slot is the low 16 bits; the syncpoint and valid fields are not checked (libnx sends `0x10000000 \| slot` to both) |
+| Event slots | allocating one twice: AlreadyAllocated (13, libnx's name); freeing or using one not allocated: BadParameter; a batch skips slots not allocated; handles to a freed slot's event stay valid |
+| CLEAR_EVENT_WAIT | drops the slot's wait and clears its event |
+
+#### The buffer queue's swap interval and fences, QUERY, the vsync event (2026-11-03)
+
+What they are for: the swap interval is how many vsyncs each frame stays
+on the screen (1: 60 fps, 2: 30 fps), so a game runs at its intended
+rate; a queued frame's fence says which GPU work must finish before it
+is shown; QUERY asks the queue for its size and state; the vsync event
+lets a program pace itself on the display.
+
+Sources: libnx 4.12.0's `BqBufferInput` (`display/buffer_producer.h`:
+the swap interval at 0x2c, the NvMultiFence at 0x30), `native_window.c`
+(libnx sends swap interval 1 unless the program sets another) and
+`services/vi.c` (GetDisplayVsyncEvent, 5202); Switchbrew, "VI services"
+(GetDisplayVsyncEvent takes the display ID and returns a handle; no
+more); Android's `system/window.h` and `vndk/window.h` (Apache 2.0) for
+the QUERY constants and the swap interval's meaning, the minimum number
+of vsyncs per frame, as EGL's eglSwapInterval.
+
+Implemented (`hle/service/vi.rs`):
+- QUEUE_BUFFER reads its QueueBufferInput. Frames take turns on the
+  screen: a frame's turn starts at the start of the vsync period it is
+  queued in, or at the end of the previous frame's turn, whichever is
+  later, and lasts its swap interval in vsyncs; its buffer is freed when
+  the turn ends. Before, every queued buffer was freed at the next vsync,
+  so a double-buffered program could show two frames a vsync: simplegfx
+  showed 181 frames in about 2 s of guest time, now 122 (60 a second).
+- Fences: each must be on a syncpoint that exists and already reached;
+  one not reached stops, named, since no GPU increments syncpoints yet.
+- QUERY (9): WIDTH, HEIGHT, DEFAULT_WIDTH, DEFAULT_HEIGHT (the queue's
+  size), FORMAT (the buffers'), TRANSFORM_HINT (0),
+  CONSUMER_RUNNING_BEHIND (more than one buffer queued and not freed);
+  the others (MIN_UNDEQUEUED_BUFFERS and the rest) stop, named.
+- GetDisplayVsyncEvent (5202): an event signalled at every vsync after
+  it is made; the scheduler wakes at the next vsync while a thread waits
+  on it (`Process::next_wake`).
+- `hbdisplay` sent its swap interval at 0x24 (the sticky transform) and
+  now sends it at 0x2c; it also asks five QUERYs, waits on the vsync
+  event twice (a vsync apart), and queues two frames with swap interval
+  2 and a reached fence, then times the next free buffer (two vsyncs
+  on). Its model in `gen-expected.py` follows the rules above: frame 2
+  is still pending when frame 3 is queued.
+
+Tests: `vi_swap_intervals_fences_queries_and_the_vsync_event` (IPC);
+`hbdisplay` in the self-test, 28/28 on both backends, the same output at
+`-O3 -march=armv8.2-a`; the six examples pass, threaded too. Mutation
+checks: every swap interval taken as 1 fails hbdisplay ("woken two
+vsyncs on") and the unit test; never signalling the vsync event fails
+the unit test (and makes the self-test spin: a thread waits on an event
+that never comes, and the counted clock keeps jumping to the next vsync;
+the self-test has no wall-clock limit for that).
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| A frame's turn | from the start of the vsync period it is queued in, or the previous frame's end if later, for its swap interval in vsyncs; freed at the end (shown at once, as before) |
+| Swap interval 0 | freed at the next vsync, not waiting for its turn |
+| Fences not reached | stop, named (no GPU yet) |
+| QUERY FORMAT before buffers | RGBA 8888 (1), Android's BufferQueue default |
+| QUERY CONSUMER_RUNNING_BEHIND | more than one buffer queued and not freed, as libnx reads numPendingBuffers |
+| GetDisplayVsyncEvent | each call copies a handle to the same event; the first signal is the first vsync after the first call |
+
+#### The GPU's nvdrv devices (2026-11-03)
+
+What they are for: before a program draws with the GPU (deko3d, and
+through it the deko3d examples of 5B), it asks the GPU what it is
+(`/dev/nvhost-ctrl-gpu`), builds a GPU address space and maps its memory
+into it (`/dev/nvhost-as-gpu`), and opens a channel with a command
+queue, a syncpoint for its fences and an engine (`/dev/nvhost-gpu`).
+
+Sources: Switchbrew, "NV services" (the three devices' ioctl tables and
+layouts, GET_CHARACTERISTICS's values on a Switch, PTIMER's 1.625 ns,
+Ioctl2); libnx 4.12.0 `nvidia/*.c` and `nvidia/ioctl.h` (the requests
+and their order, the ZCULL info a console answers); deko3d 0.5.0
+(zlib, read for the calls it makes: big-page address space, code
+segment reservation with fixed mappings, Modify for image kinds).
+
+Implemented (`hle/service/nvgpu.rs`, wired in `nv.rs`):
+- /dev/nvhost-ctrl-gpu: ZCULL_GET_CTX_SIZE, ZCULL_GET_INFO,
+  GET_CHARACTERISTICS, GET_TPC_MASKS, GET_GPU_TIME.
+- /dev/nvhost-as-gpu, one address space per descriptor: ALLOC_AS_EX
+  (libnx's InitializeEx), BIND_CHANNEL, ALLOC_SPACE, FREE_SPACE,
+  MAP_BUFFER_EX (placed, fixed, modify), UNMAP_BUFFER, GET_VA_REGIONS.
+- /dev/nvhost-gpu, one channel per descriptor: SET_NVMAP_FD,
+  SET_TIMEOUT, ALLOC_GPFIFO_EX2, ALLOC_OBJ_CTX, ZCULL_BIND,
+  SET_ERROR_NOTIFIER, SET_PRIORITY, QueryEvent 1 to 3; SUBMIT_GPFIFO
+  (Ioctl, entries inline) and SUBMIT_GPFIFO2 (nvdrv Ioctl2, 11, libnx's
+  KickoffPb) record the entries in `Channel::submitted`, then stop,
+  named ("GPU command lists do not run yet (phase 5B)").
+- am ISelfController LockExit (1) and UnlockExit (2), which
+  deko_examples calls: recorded, as kestrel has no HOME menu.
+- Still stopping, named: the other ioctls of the three devices (ZBC,
+  debug, power and clock controls, the error notification reads), the
+  [S2] variants (GET_CHARACTERISTICS 0xc0e04705 and the rest),
+  nvdrv Ioctl3 (12).
+
+The deko3d examples of the pinned switch-examples (`graphics/deko3d/
+deko_basic`, `deko_console`, `deko_examples`, with A pressed to pick an
+example) now set up their device, memory and queue, and stop at their
+first command submission. That is where 5B starts.
+
+Tests: `nvgpu_devices_describe_the_gpu_map_memory_and_set_up_a_channel`
+(IPC, Ioctl2 included); `guest/src/nro/hbnvgpu.c`, as libnx and deko3d
+send the requests, modelled in `gen-expected.py`: self-test 29/29 on
+both backends, the same output at `-O3 -march=armv8.2-a`. Mutation
+checks: a fixed mapping allowed over another fails hbnvgpu ("over it")
+and the unit test; first fit ignoring the alignment fails the unit test
+(hbnvgpu's addresses happen to be aligned either way).
+
+Switchbrew and libnx disagree on ALLOC_AS_EX: Switchbrew has the big
+page size first and flags third, libnx sends flags (1) first and the big
+page size third. Homebrew runs on consoles with libnx's layout, so
+kestrel reads that.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| GET_CHARACTERISTICS impl | 0xb (GM20B; Switchbrew also lists 0xe, GM20B_B) |
+| ZCULL_GET_CTX_SIZE | 0: no source gives a console's value, and kestrel's GPU keeps no ZCULL context (deko3d then binds none) |
+| GET_TPC_MASKS | 0b11: one GPC with two TPCs, as GET_CHARACTERISTICS says |
+| GET_GPU_TIME | PTIMER starts with the system tick: ticks times 1250 / 39 |
+| "Must not be NULL" fields | BadParameter when 0 |
+| GPU address layout (GET_VA_REGIONS) | small pages from 16 MiB to 16 GiB, big pages from 16 GiB to 1 TiB (40 bits) |
+| Placing ALLOC_SPACE and MAP_BUFFER_EX | first fit, lowest address, aligned to the page size or the alignment asked; page size 0 means small pages |
+| Fixed mappings | inside a reservation, on its page size, over no other mapping |
+| FREE_SPACE | exactly one reservation; mappings inside it go with it |
+| MAP_BUFFER_EX not page-aligned | stops: "the driver panics on a console" ("NV services") |
+| Modify | a range of the mapping that starts at the address given |
+| Before ALLOC_AS_EX, a second ALLOC_AS_EX | InvalidState |
+| Channels | one per address space; must be bound before ALLOC_GPFIFO_EX2 and ALLOC_OBJ_CTX (InvalidState); one queue; one object context (AlreadyAllocated); object ID 1 |
+| Channel syncpoints | the first channel takes 1, the next 2, ...; the fence is the syncpoint at its current value |
+| SET_PRIORITY | 0x32, 0x64, 0x96, else BadParameter |
+| Submissions | recorded, then stop, named |
+
+#### Vulkan presentation (2026-11-03)
+
+What it is for: the window shows frames through the host GPU's Vulkan
+driver, as Dolphin's Vulkan video backend does, instead of copying
+pixels on the CPU (softbuffer). The picture is the same; the GPU does
+the scaling, waits for the display's vsync, and 5B's renderer will draw
+into the same path. `--video auto` (the default) uses Vulkan on Windows
+and Linux x86_64 when a driver is there and says so in a "note: video:"
+line, and falls back to softbuffer with a note saying why;
+`--video software` keeps softbuffer; `--video vulkan` elsewhere stops
+with "not yet supported on this platform" (PLAN.md section 3).
+
+Dependency (the owner's decision, 2026-11-03): `ash` 0.38 (MIT or
+Apache 2.0) and its `libloading` (ISC), only for Windows and Linux
+x86_64 builds with the `window` feature; it loads `vulkan-1.dll` or
+`libvulkan.so.1` when the window opens, so building needs no Vulkan
+SDK.
+
+How (`kestrel-cli/src/vulkan.rs`): an instance with the window's
+surface extension (Win32, Xlib, XCB or Wayland, from winit's raw
+handles), the first GPU with a graphics queue that can present to it,
+a FIFO swapchain of transfer-destination images. Each frame: the
+0x00RRGGBB pixels into a host-visible buffer, then an image of the
+frame's size; the swapchain image cleared to the background; the frame
+blitted with nearest filtering into the rectangle `window::fit` gives
+(the software scaler's placement, now shared); presented. A resize or an
+out-of-date swapchain makes it again. The frame is copied out of the
+shared slot first, so the program's thread never waits for the display.
+
+Tests: `vulkan_draws_frames_as_the_software_path_does` renders seven
+frame and window shapes off-screen through the same commands and reads
+them back: the bars exactly, the frame pixel under each window pixel's
+centre, either neighbour only where that centre is exactly on an edge
+(the Vulkan specification lets a nearest blit compute the source
+coordinate in floating point; lavapipe takes the left or upper pixel
+there, the software scaler the right or lower one). Without a Vulkan
+driver it prints a note and does not run, unless KESTREL_REQUIRE_VULKAN
+is set: CI's Linux x86_64 job installs lavapipe and sets it. Mutation
+check: a linear filter fails the first shape. By hand on Linux
+(Xvfb, lavapipe): vt52-demo in a window, "note: video: Vulkan on
+llvmpipe", the same picture as its checked PNG; `--video software`, and
+`auto` with no driver (VK_ICD_FILENAMES pointing nowhere) falling back
+with its note. Windows is type-checked here (x86_64 and ARM64), not
+run: the owner's PC will be its first real run.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| `--video` default | auto: Vulkan where supported and working, softbuffer otherwise, with a note either way when Vulkan was tried |
+| Swapchain format | the first of B8G8R8A8_UNORM, R8G8B8A8_UNORM, B8G8R8A8_SRGB, R8G8B8A8_SRGB the window offers (sRGB formats get a linearised background so the bytes match) |
+| Present mode | FIFO (vsync; every driver has it) |
+| Scaling | nearest, as the software path; the frame image matches the swapchain format |
+| GPU | the first with a graphics queue that can present to the window |
+| Vulkan stops mid-run | a note, then softbuffer for the rest of the run |
+
+#### Gaps left in 5A
+
+- Running GPU command lists (5B): the channel records them and stops.
+- Display: CreateStrayLayer, other displays, layer position and size,
+  the crop, scaling mode and transform of a queued frame (ignored),
+  QUERY's other constants.
+- Vulkan presentation on Windows has not run yet (type-checked only);
+  macOS and ARM hosts keep softbuffer until after the Windows milestone.
+
 ## Next task
 
 The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
@@ -1462,7 +1776,41 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      and `kestrel run --stats` with frame times (average, 1% low, worst)
      and instructions per second.
 2. The graphics track: phase 5A, then 5B, on Vulkan (lavapipe on Linux,
-   real GPUs on Windows).
+   real GPUs on Windows). Where it stands ("Phase 5 notes"; branch
+   `claude/graphics-5a`):
+   - Done (2026-11-03): 5A's acceptance examples. vt52-demo and
+     simplegfx display correctly with phase 2's screen path, and
+     `build-examples.sh`, `run-examples.sh` and `check-examples.py` run
+     and check them with the other four (6/6, single-threaded and
+     threaded).
+   - Decided by the owner (2026-11-03, "Phase 5 notes"): shared_font
+     stops with a clear message (done: sm: on pl:u and pl:s), a font
+     file the user dumped comes later; moviemaker is not part of 5A;
+     Vulkan presentation with `ash`; all of 5A in one pull request.
+   - Next, in this order, each with the service steps below (sources,
+     IPC unit tests, an `hb<service>.c` program with a model, checks):
+     1. Done (2026-11-03): `/dev/nvhost-ctrl`'s syncpoints and events
+        and nvdrv QueryEvent, as libnx's fences use them; `hbnvctrl`
+        (self-test 28/28). Left stopping, named: GET_CONFIG,
+        SYNCPT_WAIT_EVENT, GET_SHIFT, the module ioctls and the [S2]
+        ones ("Phase 5 notes"). A wait that would block stops, until
+        kestrel's services can make a request wait.
+     2. Done (2026-11-03): the buffer queue's swap interval (frames
+        take turns, so 60 fps at 1) and fences (reached ones; others
+        stop, named), QUERY, GetDisplayVsyncEvent ("Phase 5 notes").
+     3. Done (2026-11-03): the GPU's devices, /dev/nvhost-ctrl-gpu,
+        /dev/nvhost-as-gpu and /dev/nvhost-gpu, as libnx and deko3d use
+        them (submissions recorded, then a named stop); am LockExit and
+        UnlockExit. The three deko3d examples reach their first command
+        submission ("Phase 5 notes").
+     4. Done (2026-11-03): Vulkan presentation with `ash` on Windows and
+        Linux x86_64 (`--video auto|vulkan|software`), softbuffer as the
+        fallback; tested off-screen against the software scaler with
+        lavapipe ("Phase 5 notes").
+     Next: phase 5B, running the command lists the channel records
+     (Maxwell's GPFIFO, the 3D, compute and copy engines), starting with
+     what deko_basic submits first; first, the owner's PC runs the
+     window on Windows with a real GPU.
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,

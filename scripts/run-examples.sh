@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Phase 2 acceptance (PLAN.md): run the standard homebrew examples that
-# scripts/build-examples.sh built, each on an empty SD card with scripted
-# presses, save each one's last frame, and check what they show with
-# scripts/check-examples.py; then the same with each guest core on its own
-# host thread (--threaded).
+# Phase 2 and phase 5A acceptance (PLAN.md): run the standard homebrew
+# examples that scripts/build-examples.sh built, each on an empty SD card
+# with scripted presses, save each one's last frame, and check what they
+# show with scripts/check-examples.py; then the same with each guest core
+# on its own host thread (--threaded).
 #
 # Usage: run-examples.sh [path to kestrel] (default: target/release/kestrel)
 # THREADED_RUNS (default 5): how many threaded runs of the barrier example.
@@ -48,6 +48,8 @@ all() { # all <frames folder> <options>
     run "$1" read-controls "${@:2}" --press A@2 --press Plus@2.5
     run "$1" sdmc "${@:2}" --press Plus@2
     run "$1" barrier "${@:2}" --press Plus@2
+    run "$1" vt52-demo "${@:2}" --press Plus@2
+    run "$1" simplegfx "${@:2}" --press Plus@2
 }
 check() {
     "$py" "$root/scripts/check-examples.py" "$font" "$1"

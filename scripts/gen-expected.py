@@ -1121,8 +1121,16 @@ def hbdisplay():
     the pointer buffer is 0x8000 bytes; the queue reports 1280x720 before it
     has buffers; descriptors and nvmap handles count from 1; a dequeue
     answers the free buffer freed longest ago with no fences; a queued
-    buffer is shown at once and freed at the next vsync (60 Hz of the 19.2
-    MHz clock); RGB 565 becomes 8 bits a channel with the top bits
+    buffer is shown at once and freed when its turn on the screen ends:
+    frames take turns, each from the start of the vsync period it is
+    queued in or the end of the previous one's turn, whichever is later,
+    for its swap interval in vsyncs (60 Hz of the 19.2 MHz clock; the swap
+    interval is EGL's and Android's, the minimum number of vsyncs a frame
+    stays shown), so frames 1 and 2, queued in one vsync period with swap
+    interval 1, are freed at the first and second vsyncs, and frame 2 is
+    still pending when frame 3 is queued; the vsync event is signalled at
+    each vsync after it is made; RGB 565 becomes 8 bits a channel with the
+    top bits
     repeated. The self-test adds a line per frame shown: its size and the
     CRC-32 of its pixels as little-endian 0x00RRGGBB words."""
     ok = hex64(0)
@@ -1241,7 +1249,40 @@ def hbdisplay():
         f"wait for the buffer-free event: {ok}",
         "woken by the next vsync: yes",
     ]
-    out += ["frame 3"] + dequeue(0) + queue(1)
+    out += ["frame 3"] + dequeue(0) + queue(2)
+    # QUERY (Android's NATIVE_WINDOW_* constants): the buffers' size and
+    # format (RGB 565 is 4), transform hint 0, and the consumer running
+    # behind (frames 2 and 3 both pending: more than one).
+    for what, value in [(0, width), (1, height), (2, 4), (8, 0), (9, 1)]:
+        out += [f"QUERY {what}", f"  result: {ok}", f"  value: {value}", "  status: 0"]
+    # The vsync event, made after frame 3 (just past vsync 1): signalled at
+    # vsyncs 2 and 3.
+    out += [
+        f"GetDisplayVsyncEvent: {ok}",
+        f"  event handed out: {hex64(1)}",
+        f"wait for a vsync: {ok}",
+        f"  reset the event: {ok}",
+        f"wait for the next: {ok}",
+        "  a vsync apart: yes",
+        f"SYNCPT_INCR: {ok}",
+    ]
+    # Just past vsync 3: slot 1 (freed at vsync 2) before slot 0 (vsync 3).
+    # Frame 4, swap interval 2: its turn starts at vsync 3 (the period it
+    # is queued in, and frame 3's end) and lasts two: freed at vsync 5.
+    # Frame 5: from frame 4's end, vsync 5, to vsync 7. Another dequeue
+    # waits from just past vsync 3 to vsync 5: more than one vsync, at
+    # most two.
+    out += ["frame 4"] + dequeue(1) + queue(1)
+    out += ["frame 5"] + dequeue(0) + queue(2)
+    out += [
+        "another buffer:",
+        f"  DEQUEUE_BUFFER: {ok}",
+        "  slot: -1",
+        "  status: -11",
+        f"wait for the buffer-free event: {ok}",
+        "woken two vsyncs on: yes",
+        f"close the vsync event: {ok}",
+    ]
     out += [
         f"DISCONNECT: {ok}",
         "  status: 0",
@@ -1260,7 +1301,233 @@ def hbdisplay():
         f"close vi:u: {ok}",
         f"close sm: {ok}",
     ]
-    out += [frame_line(n, f) for n, f in [(1, 1), (2, 2), (3, 3)]]
+    out += [frame_line(n, n) for n in range(1, 6)]
+    return "".join(line + "\n" for line in out)
+
+
+def hbnvctrl():
+    """guest/src/nro/hbnvctrl.c: /dev/nvhost-ctrl's syncpoints and events,
+    sent as libnx's nvInitialize, nvFenceInit and nvFenceWait send them.
+    Switchbrew ("NV services"): NvError 0 success, 4 BadParameter, 5
+    Timeout; SYNCPT_READ and READ_MAX answer a value; SYNCPT_WAIT answers
+    at once for a threshold reached; SYNCPT_WAIT_EVENT_EX answers the
+    syncpoint's value when reached, and otherwise Timeout with
+    slot | id << 4, its event signalled once the syncpoint gets there;
+    event slots are 0x00 to 0x3f; QueryEvent's ID for nvhost-ctrl is
+    slot | syncpoint << 16 | valid << 28. Switchbrew ("Error codes"): a
+    wait that times out is 0xea01. libnx (nv.c): NvError 13 is
+    AlreadyAllocated. Kestrel's documented choices (docs/ROADMAP.md,
+    "Phase 5 notes"): syncpoints start at 0, IDs 0 to 191; SYNCPT_INCR
+    moves the value and the max; a slot allocated twice is
+    AlreadyAllocated; freeing a slot not allocated is BadParameter; a
+    batch skips slots not allocated; nvdrv descriptors count from 1."""
+    ok = hex64(0)
+    bad, timeout = hex64(4), hex64(5)
+    timed_out = hex64(0xEA01)
+    syncpt, slot = 7, 0
+    value = 0
+    out = [
+        "homebrew nvhost-ctrl test",
+        f"sm: register: {ok}",
+        f"SetHeapSize: {ok}",
+        f"CreateTransferMemory: {ok}",
+        f"nvdrv: {ok}",
+        f"Initialize: {ok}",
+        f"  error: {ok}",
+        f"SetAruid: {ok}",
+        f"  error: {ok}",
+        f"Open /dev/nvhost-ctrl: {ok}",
+        f"  fd: {hex64(1)}",
+        f"  error: {ok}",
+    ]
+
+    def read(label, v):
+        out.extend([f"{label}{ok}", f"  value: {v}"])
+
+    def incr():
+        nonlocal value
+        value += 1
+        out.append(f"SYNCPT_INCR: {ok}")
+
+    def wait_async(threshold):
+        if value >= threshold:
+            out.extend([f"SYNCPT_WAIT_EVENT_EX: {ok}", f"  value: {hex64(value)}"])
+        else:
+            out.extend(
+                [f"SYNCPT_WAIT_EVENT_EX: {timeout}", f"  value: {hex64(slot | syncpt << 4)}"]
+            )
+
+    read("SYNCPT_READ: ", value)
+    incr()
+    incr()
+    read("SYNCPT_READ: ", value)
+    read("SYNCPT_READ_MAX: ", value)
+    read("SYNCPT_READ of another: ", 0)
+    out.append(f"SYNCPT_READ of 192: {bad}")
+    out += [
+        f"SYNCPT_WAIT: {ok}",
+        f"SYNCPT_WAIT: {ok}",
+        f"SYNCPT_WAIT: {timeout}",
+        f"EventRegister: {ok}",
+        f"EventRegister again: {hex64(13)}",
+        f"QueryEvent: {ok}",
+        f"  error: {ok}",
+        f"  event handed out: {hex64(1)}",
+    ]
+    wait_async(4)
+    out.append(f"wait for the event, 0 ns: {timed_out}")
+    incr()
+    out.append(f"wait for the event, 0 ns: {timed_out}")
+    incr()
+    out += [f"wait for the event: {ok}", f"reset it: {ok}"]
+    wait_async(4)
+    wait_async(6)
+    out += [f"wait for the event, 1 ms: {timed_out}", f"EventSignal: {ok}"]
+    incr()
+    incr()
+    out.append(f"wait for the event, 0 ns: {timed_out}")
+    read("SYNCPT_READ: ", value)
+    out += [
+        f"close the event: {ok}",
+        f"EventUnregister: {ok}",
+        f"EventUnregister again: {bad}",
+        f"QueryEvent of a free slot: {ok}",
+        f"  error: {bad}",
+        f"EventRegister 5: {ok}",
+        f"EventRegister 63: {ok}",
+        f"EventRegister 64: {bad}",
+        f"FREE_EVENT_BATCH: {ok}",
+        f"EventUnregister 5: {bad}",
+        f"Close /dev/nvhost-ctrl: {ok}",
+        f"  error: {ok}",
+        f"close nvdrv: {ok}",
+        f"close the transfer memory: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
+def hbnvgpu():
+    """guest/src/nro/hbnvgpu.c: the GPU's nvdrv devices, sent as libnx's
+    nvGpuInit, nvAddressSpace*, nvMapCreate and nvGpuChannelCreate send
+    them. Switchbrew ("NV services"): GET_CHARACTERISTICS answers the
+    GM20B's description (arch 0x120, big page size 0x20000, available
+    0x30000, 40 address bits, 3D class 0xB197, GPFIFO class 0xB06F, chip
+    "gm20b") and its buffer size as 0xA0; GET_VA_REGIONS answers its
+    buffer size as two regions (48); NvError 4 is BadParameter; a channel
+    takes one object context. libnx's nvidia/ioctl.h: the ZCULL info a
+    console answers (32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16), NvError
+    13 AlreadyAllocated. Kestrel's documented choices (docs/ROADMAP.md,
+    "Phase 5 notes"): impl 0xB; ZCULL context size 0; TPC mask 0b11 for
+    one GPC of two TPCs; PTIMER from the system tick; small pages from
+    16 MiB to 16 GiB, big pages from there to 1 TiB; first fit, lowest
+    address, aligned to the page size or the alignment asked; a fixed
+    mapping inside a reservation and over no other mapping; channel
+    syncpoints from 1, at value 0; object ID 1; descriptors count from
+    1."""
+    ok = hex64(0)
+    bad = hex64(4)
+    small_start, big_start, va_end = 0x100_0000, 0x4_0000_0000, 1 << 40
+    big = 0x20000
+    out = [
+        "homebrew GPU devices test",
+        f"sm: register: {ok}",
+        f"SetHeapSize: {ok}",
+        f"CreateTransferMemory: {ok}",
+        f"nvdrv: {ok}",
+        f"Initialize: {ok}",
+        f"  error: {ok}",
+        f"SetAruid: {ok}",
+        f"  error: {ok}",
+    ]
+
+    def opened(path, fd):
+        out.extend([path, f"  open: {ok}", f"  fd: {hex64(fd)}", f"  error: {ok}"])
+
+    opened("/dev/nvmap", 1)
+    out += [f"NVMAP_IOC_CREATE: {ok}", f"NVMAP_IOC_ALLOC: {ok}"]
+    opened("/dev/nvhost-ctrl-gpu", 2)
+    out += [
+        f"GET_CHARACTERISTICS: {ok}",
+        f"  size: {hex64(0xA0)}",
+        f"  arch: {hex64(0x120)}",
+        f"  impl: {hex64(0xB)}",
+        f"  big page size: {hex64(big)}",
+        f"  available big page sizes: {hex64(0x30000)}",
+        "  GPU address bits: 40",
+        f"  3D class: {hex64(0xB197)}",
+        f"  GPFIFO class: {hex64(0xB06F)}",
+        "  chip: gm20b",
+        f"ZCULL_GET_CTX_SIZE: {ok}",
+        f"  size: {ok}",
+        f"ZCULL_GET_INFO: {ok}",
+    ]
+    out += [f"  {v}" for v in [32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16]]
+    out += [
+        f"GET_TPC_MASKS: {ok}",
+        f"  GPC 0: {hex64(0b11)}",
+        f"GET_GPU_TIME: {ok}",
+        f"  running: {hex64(1)}",
+    ]
+    opened("/dev/nvhost-as-gpu", 3)
+    out += [
+        f"InitializeEx: {ok}",
+        f"GET_VA_REGIONS: {ok}",
+        f"  size: {hex64(48)}",
+        f"  region: {hex64(small_start)}",
+        f"    page size: {hex64(0x1000)}",
+        f"    pages: {hex64((big_start - small_start) // 0x1000)}",
+        f"  region: {hex64(big_start)}",
+        f"    page size: {hex64(big)}",
+        f"    pages: {hex64((va_end - big_start) // big)}",
+    ]
+    # The code segment: four big pages at the start of the big region; two
+    # small pages at the start of the small region.
+    segment = big_start
+    out += [f"ALLOC_SPACE: {ok}", f"  at: {hex64(segment)}"]
+    out += [f"ALLOC_SPACE small pages: {ok}", f"  at: {hex64(small_start)}"]
+    # The whole object (0x30000) on big pages: after the segment.
+    pitch = segment + 4 * big
+    out += [f"MAP_BUFFER_EX: {ok}", f"  at: {hex64(pitch)}"]
+    out += [f"MAP_BUFFER_EX fixed: {ok}", f"  at: {hex64(segment + big)}"]
+    out += [
+        f"MAP_BUFFER_EX over it: {bad}",
+        f"MAP_BUFFER_EX outside: {bad}",
+        f"MAP_BUFFER_EX modify: {ok}",
+        f"UNMAP_BUFFER: {ok}",
+        f"UNMAP_BUFFER again: {bad}",
+    ]
+    opened("/dev/nvhost-gpu", 4)
+    out += [
+        f"SET_NVMAP_FD: {ok}",
+        f"BIND_CHANNEL: {ok}",
+        f"ALLOC_GPFIFO_EX2: {ok}",
+        f"  syncpoint: {hex64(1)}",
+        f"  value: {ok}",
+        f"ALLOC_OBJ_CTX: {ok}",
+        f"  id: {hex64(1)}",
+        f"ALLOC_OBJ_CTX again: {hex64(13)}",
+        f"QueryEvent: {ok}",
+        f"  error: {ok}",
+        f"  event handed out: {hex64(1)}",
+        f"SET_ERROR_NOTIFIER: {ok}",
+        f"SET_PRIORITY: {ok}",
+        f"SET_ERROR_NOTIFIER off: {ok}",
+        f"close the error event: {ok}",
+        f"Close /dev/nvhost-gpu: {ok}",
+        f"  error: {ok}",
+        f"FREE_SPACE: {ok}",
+        f"Close /dev/nvhost-as-gpu: {ok}",
+        f"  error: {ok}",
+        f"Close /dev/nvhost-ctrl-gpu: {ok}",
+        f"  error: {ok}",
+        f"NVMAP_IOC_FREE: {ok}",
+        f"Close /dev/nvmap: {ok}",
+        f"  error: {ok}",
+        f"close nvdrv: {ok}",
+        f"close the transfer memory: {ok}",
+        f"close sm: {ok}",
+    ]
     return "".join(line + "\n" for line in out)
 
 
@@ -1287,6 +1554,8 @@ PROGRAMS = {
     "hbpower": hbpower,
     "hbinput": hbinput,
     "hbdisplay": hbdisplay,
+    "hbnvctrl": hbnvctrl,
+    "hbnvgpu": hbnvgpu,
 }
 
 

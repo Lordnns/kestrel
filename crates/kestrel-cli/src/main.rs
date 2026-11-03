@@ -4,6 +4,12 @@
 mod input_config;
 mod perf;
 mod unattended;
+#[cfg(all(
+    feature = "window",
+    target_arch = "x86_64",
+    any(windows, target_os = "linux")
+))]
+mod vulkan;
 #[cfg(feature = "window")]
 mod window;
 
@@ -67,6 +73,10 @@ RUN OPTIONS:
                                          controls
     --save-frame <file.png>              Save the last frame the program
                                          showed
+    --video <auto|vulkan|software>       How the window paints: Vulkan
+                                         through the GPU (Windows and Linux
+                                         x86_64), or software (default:
+                                         auto, Vulkan where it works)
     -- args...                           Arguments for a homebrew NRO (argv[0]
                                          is its file name)
 ";
@@ -84,6 +94,8 @@ struct Opts {
     headless: bool,
     presses: Vec<unattended::Press>,
     save_frame: Option<PathBuf>,
+    /// `--video`, kept as given: it is read only with a window.
+    video: Option<String>,
     args: Vec<String>,
 }
 
@@ -103,6 +115,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         headless: false,
         presses: Vec::new(),
         save_frame: None,
+        video: None,
         args: Vec::new(),
     };
     while let Some(a) = it.next() {
@@ -129,6 +142,12 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 .push(it.next().ok_or("--press needs a value")?.parse()?),
             "--save-frame" => {
                 o.save_frame = Some(it.next().ok_or("--save-frame needs a file")?.into())
+            }
+            "--video" => {
+                let v = it.next().ok_or("--video needs a value")?;
+                #[cfg(feature = "window")]
+                v.parse::<window::Video>()?;
+                o.video = Some(v.clone());
             }
             "--" => {
                 o.args = it.by_ref().cloned().collect();
@@ -512,9 +531,13 @@ fn run(o: Opts) -> Result<ExitCode, String> {
     #[cfg(feature = "window")]
     if kestrel_loader::is_nro(&file) && !o.headless {
         let config = input_config()?;
+        let video = match &o.video {
+            Some(v) => v.parse()?,
+            None => window::Video::Auto,
+        };
         let title = format!("kestrel - {name}");
         let (opts, f, n) = (o.clone(), file.clone(), name.clone());
-        let windowed = window::run(title, config, move |source, screen, interrupt| {
+        let windowed = window::run(title, config, video, move |source, screen, interrupt| {
             emulate(&opts, &f, &n, Some((source, screen, interrupt)))
         });
         match windowed {
@@ -733,6 +756,32 @@ mod tests {
         let forced = opts(&["--threaded"]).unwrap();
         assert!(threaded(&forced, false));
         assert!(opts(&["--threaded", "--single-thread"]).is_err());
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn video_backends_are_checked_when_parsed() {
+        let opts = |a: &[&str]| {
+            let args: Vec<String> = std::iter::once("x.nro")
+                .chain(a.iter().copied())
+                .map(String::from)
+                .collect();
+            parse(&args)
+        };
+        assert!(opts(&["--video", "software"]).is_ok());
+        assert!(opts(&["--video", "auto"]).is_ok());
+        let e = opts(&["--video", "metal"]).err().unwrap();
+        assert!(e.contains("unknown video backend 'metal'"), "{e}");
+        // Vulkan only where kestrel paints with it (PLAN.md section 3).
+        let vulkan = opts(&["--video", "vulkan"]);
+        if window::VULKAN_HERE {
+            assert!(vulkan.is_ok());
+        } else {
+            assert!(vulkan
+                .err()
+                .unwrap()
+                .contains("not yet supported on this platform"));
+        }
     }
 
     #[test]

@@ -56,8 +56,15 @@ sessions learned. The plan and the status live elsewhere; read them first:
   immediates, with a V register as two 64-bit IR halves. Only lane
   arithmetic and scalar floating point still run in the interpreter in
   the measured programs; next, SSE2 for the integer lanes (ROADMAP
-  "Next task", step 3). The graphics track (5A) runs in a separate cloud
-  session (branch `claude/graphics-5a`) since 2026-11-03.
+  "Next task", step 3).
+- The graphics track (5A), in a separate cloud session since 2026-11-03:
+  vt52-demo and simplegfx display and are checked with the examples;
+  /dev/nvhost-ctrl's syncpoints and events, the buffer queue's swap
+  interval and fences, QUERY, the vsync event and the GPU's nvhost
+  devices run, the deko3d examples reach their first command
+  submission, and the window presents with Vulkan (`ash`, owner
+  2026-11-03) on Windows and Linux x86_64 (branch
+  `claude/graphics-5a`); next 5B (ROADMAP "Next task" item 2).
 
 ## How the owner works
 

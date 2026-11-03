@@ -8,10 +8,11 @@
 //! IGraphicBufferProducer through IHOSBinderDriver's TransactParcel. The
 //! program hands the queue its buffers (memory registered with nvmap),
 //! then dequeues one, draws into it and queues it back. kestrel shows a
-//! queued buffer at once (`display.rs`), and frees it at the next vsync,
-//! 60 times a second of guest time, when the buffer-free event is
-//! signalled.
+//! queued buffer at once (`display.rs`), and frees it at a vsync, 60 times
+//! a second of guest time, when the buffer-free event is signalled: frames
+//! take turns on the screen, each for its swap interval in vsyncs.
 
+use super::nv;
 use super::{Call, Interface, IpcError, Out};
 use crate::display::Surface;
 use crate::kernel::{ObjectId, PROCESS_ID};
@@ -56,9 +57,64 @@ mod code {
     pub const DEQUEUE_BUFFER: u32 = 3;
     pub const QUEUE_BUFFER: u32 = 7;
     pub const CANCEL_BUFFER: u32 = 8;
+    pub const QUERY: u32 = 9;
     pub const CONNECT: u32 = 10;
     pub const DISCONNECT: u32 = 11;
     pub const SET_PREALLOCATED_BUFFER: u32 = 14;
+}
+
+/// What QUERY asks for: Android's NATIVE_WINDOW_* query constants
+/// (`system/window.h`, `vndk/window.h`, Apache 2.0).
+mod query {
+    pub const WIDTH: i32 = 0;
+    pub const HEIGHT: i32 = 1;
+    pub const FORMAT: i32 = 2;
+    pub const DEFAULT_WIDTH: i32 = 6;
+    pub const DEFAULT_HEIGHT: i32 = 7;
+    pub const TRANSFORM_HINT: i32 = 8;
+    pub const CONSUMER_RUNNING_BEHIND: i32 = 9;
+}
+
+/// The format QUERY answers before the program sets buffers: kestrel's
+/// choice, RGBA 8888 (1), Android's BufferQueue default.
+const DEFAULT_FORMAT: i32 = 1;
+
+/// A QueueBufferInput as libnx's BqBufferInput lays it out (0x54 bytes):
+/// a timestamp, isAutoTimestamp, the crop, scaling mode, transform,
+/// sticky transform, a word libnx leaves 0, the swap interval at 0x2c,
+/// then the NvMultiFence at 0x30 (a count, then up to four fences, each a
+/// syncpoint ID and a value).
+struct QueueInput {
+    swap_interval: u32,
+    fences: Vec<(u32, u32)>,
+}
+
+impl QueueInput {
+    const SIZE: usize = 0x54;
+
+    fn parse(b: &[u8]) -> Result<Self, IpcError> {
+        if b.len() < Self::SIZE {
+            return Err(IpcError::Stop(format!(
+                "a QueueBufferInput of {:#x} bytes, fewer than its {:#x}",
+                b.len(),
+                Self::SIZE
+            )));
+        }
+        let word = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().expect("four bytes"));
+        let count = word(0x30);
+        if count > 4 {
+            return Err(IpcError::Stop(format!(
+                "an NvMultiFence of {count} fences, more than its four"
+            )));
+        }
+        let fences = (0..count as usize)
+            .map(|i| (word(0x34 + 8 * i), word(0x38 + 8 * i)))
+            .collect();
+        Ok(QueueInput {
+            swap_interval: word(0x2c),
+            fences,
+        })
+    }
 }
 
 /// A slot's buffer: the GraphicBuffer the program set, flattened, and
@@ -105,6 +161,14 @@ pub struct State {
     pub buffer_free_event: Option<ObjectId>,
     /// Frames shown.
     pub frames: u64,
+    /// The vsync that frees the last frame queued with a swap interval:
+    /// the next frame's turn on the screen starts there.
+    pub last_release: u64,
+    /// GetDisplayVsyncEvent's event, signalled at every vsync after it
+    /// was made.
+    pub vsync_event: Option<ObjectId>,
+    /// The last vsync seen, counted from 0 (the clock over the period).
+    pub vsyncs: u64,
 }
 
 impl State {
@@ -352,6 +416,19 @@ impl Process {
                 call.u64(8)?;
                 ok()
             }
+            // GetDisplayVsyncEvent: the display ID; an event signalled at
+            // every vsync ("VI services"). kestrel's choices: each call
+            // copies a handle to the same event, and its first signal is
+            // the first vsync after the first call.
+            (ApplicationDisplayService, 5202) => {
+                self.display_id(call, 0)?;
+                let fresh = self.services.vi.vsync_event.is_none();
+                let out = self.event_handle(|s| &mut s.vi.vsync_event);
+                if fresh {
+                    self.services.vi.vsyncs = self.now() / VSYNC_PERIOD;
+                }
+                Ok(out)
+            }
             (HosBinderDriver, 0 | 3) => self.transact_parcel(call),
             // AdjustRefcount: the binder ID, an amount and which count.
             (HosBinderDriver, 1) => {
@@ -461,6 +538,7 @@ impl Process {
                 let status = if vi.connected { 0 } else { NO_INIT };
                 vi.connected = false;
                 vi.slots.clear();
+                vi.last_release = 0;
                 self.update_buffer_free();
                 w.i32(status);
             }
@@ -532,15 +610,17 @@ impl Process {
                 }
             }
             // QUEUE_BUFFER: the slot and its QueueBufferInput. The frame is
-            // shown now, and the buffer freed at the next vsync.
+            // shown now, once its fences are reached, and the buffer freed
+            // when its turn on the screen ends (`release_at`).
             code::QUEUE_BUFFER => {
                 let slot = r.i32()?;
-                r.flattened()?;
+                let input = QueueInput::parse(&r.flattened()?)?;
                 let status = match self.slot(slot) {
                     Some(s) if s.state == SlotState::Dequeued => {
                         let buffer = s.buffer.clone();
+                        self.check_fences(&input.fences)?;
                         self.present(&buffer)?;
-                        let release = (self.now() / VSYNC_PERIOD + 1) * VSYNC_PERIOD;
+                        let release = self.release_at(input.swap_interval);
                         let s = self.services.vi.slots[slot as usize]
                             .as_mut()
                             .expect("slot");
@@ -549,10 +629,36 @@ impl Process {
                     }
                     _ => BAD_VALUE,
                 };
-                let pending = self.services.vi.slots.iter().flatten();
-                let pending = pending.filter(|s| matches!(s.state, SlotState::Queued { .. }));
-                buffer_output(&mut w, size, pending.count() as u32);
+                buffer_output(&mut w, size, self.pending());
                 w.i32(status);
+            }
+            // QUERY: what to ask (Android's NATIVE_WINDOW_* constants);
+            // the value and a status. Only what kestrel knows is answered;
+            // the rest stops, named.
+            code::QUERY => {
+                let what = r.i32()?;
+                let vi = &self.services.vi;
+                let value = match what {
+                    query::WIDTH | query::DEFAULT_WIDTH => size.0 as i32,
+                    query::HEIGHT | query::DEFAULT_HEIGHT => size.1 as i32,
+                    query::FORMAT => vi
+                        .slots
+                        .iter()
+                        .flatten()
+                        .next()
+                        .map_or(DEFAULT_FORMAT, |s| s.buffer.surface.format as i32),
+                    // As CONNECT and QUEUE_BUFFER answer it.
+                    query::TRANSFORM_HINT => 0,
+                    // "More than one buffer behind": more than one queued
+                    // and not yet freed, as libnx reads numPendingBuffers.
+                    query::CONSUMER_RUNNING_BEHIND => (self.pending() > 1) as i32,
+                    what => {
+                        return Err(IpcError::Unimplemented(format!(
+                            "IGraphicBufferProducer QUERY {what}"
+                        )))
+                    }
+                };
+                w.i32(value).i32(0);
             }
             // CANCEL_BUFFER: the slot and a fence. No reply.
             code::CANCEL_BUFFER => {
@@ -572,6 +678,58 @@ impl Process {
             }
         }
         Ok(w)
+    }
+
+    /// Buffers queued and not yet freed.
+    fn pending(&self) -> u32 {
+        let slots = self.services.vi.slots.iter().flatten();
+        slots
+            .filter(|s| matches!(s.state, SlotState::Queued { .. }))
+            .count() as u32
+    }
+
+    /// The vsync that frees a buffer queued now with swap interval `n`.
+    /// The swap interval is the minimum number of vsyncs a frame stays on
+    /// the screen (EGL's eglSwapInterval, Android's setSwapInterval), so
+    /// frames take turns. kestrel's choices: a frame's turn starts at the
+    /// start of the vsync period it is queued in (kestrel shows it at
+    /// once) or when the previous frame's turn ends, whichever is later,
+    /// and lasts `n` vsyncs; its buffer is freed when the turn ends. With
+    /// 0 it is freed at the next vsync, without waiting for its turn.
+    fn release_at(&mut self, n: u32) -> u64 {
+        let next = (self.now() / VSYNC_PERIOD + 1) * VSYNC_PERIOD;
+        if n == 0 {
+            return next;
+        }
+        let vi = &mut self.services.vi;
+        let n = n as u64 * VSYNC_PERIOD;
+        let release = (next + n - VSYNC_PERIOD).max(vi.last_release + n);
+        vi.last_release = release;
+        release
+    }
+
+    /// A queued buffer's fences: each a syncpoint and a value the GPU must
+    /// reach before the frame is shown. With no GPU yet, one not reached
+    /// would never be: it stops, named.
+    fn check_fences(&self, fences: &[(u32, u32)]) -> Result<(), IpcError> {
+        for &(id, value) in fences {
+            match self.services.nv.syncpoint(id) {
+                None => {
+                    return Err(IpcError::Stop(format!(
+                        "a queued buffer's fence on syncpoint {id}, which does not exist"
+                    )))
+                }
+                Some(sp) if !nv::reached(sp.value, value) => {
+                    return Err(IpcError::Unimplemented(format!(
+                        "a queued buffer waiting for syncpoint {id} to reach {value} (it is \
+                         at {}): no GPU increments it yet",
+                        sp.value
+                    )))
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
     }
 
     fn slot(&self, slot: i32) -> Option<&Slot> {
@@ -643,10 +801,18 @@ impl Process {
         Ok(())
     }
 
-    /// Free the buffers whose vsync has come. Called from the run loop and
-    /// the scheduler, which wakes for the next one.
+    /// Free the buffers whose vsync has come, and signal the vsync event
+    /// at each new vsync. Called from the run loop and the scheduler, which
+    /// wakes for the next one.
     pub(crate) fn vsync_tick(&mut self) {
         let now = self.now();
+        let vsync = now / VSYNC_PERIOD;
+        if vsync > self.services.vi.vsyncs {
+            self.services.vi.vsyncs = vsync;
+            if let Some(id) = self.services.vi.vsync_event {
+                self.set_event(id, true);
+            }
+        }
         let due: Vec<usize> = (self.services.vi.slots.iter().enumerate())
             .filter(|(_, s)| {
                 matches!(s, Some(Slot { state: SlotState::Queued { release }, .. }) if *release <= now)

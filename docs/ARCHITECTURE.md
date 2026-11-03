@@ -379,8 +379,10 @@ method; the methods live next to the state they change:
 - Controller input: `kestrel_hle::input::Source` gives hid one
   controller's state; hid writes it into its shared memory every 5 ms of
   guest time (`hid_tick`, called from the run loop). The front end's
-  window (`kestrel-cli/src/window.rs`, winit, softbuffer, gilrs, behind
-  the default `window` feature) runs the event loop on the main thread
+  window (`kestrel-cli/src/window.rs`, winit, gilrs, and Vulkan through
+  ash (`vulkan.rs`, Windows and Linux x86_64) or softbuffer to paint,
+  behind the default `window` feature) runs the event loop on the main
+  thread
   and the program on a worker thread, and maps keys and gamepads as
   `user/config/input.cfg` says (`input_config.rs`). The self-test uses a
   scripted Source instead.
@@ -390,13 +392,25 @@ method; the methods live next to the state they change:
   the program's memory and turned into pixels (`hle/display.rs`: block
   linear, pixel formats) for `Process::screen`, a
   `kestrel_hle::display::Screen`: the window paints it, the self-test
-  records a CRC-32 of it. Buffers are freed at a 60 Hz vsync of guest
-  time, which the scheduler wakes for.
+  records a CRC-32 of it. Frames take turns on the screen, each for its
+  swap interval in vsyncs (60 Hz of guest time), and a buffer is freed
+  when its frame's turn ends; the scheduler wakes for that, and for the
+  next vsync while a thread waits on the vsync event. nvdrv's
+  /dev/nvhost-ctrl keeps
+  the syncpoints and the events programs wait on for fences; with no
+  GPU yet, only the program's own increments move them
+  (`Process::syncpoint_incr`, where the GPU will). The GPU's devices
+  (`hle/service/nvgpu.rs`) describe a GM20B, keep a GPU address space
+  per /dev/nvhost-as-gpu descriptor (reservations and nvmap objects
+  mapped at GPU addresses) and a channel per /dev/nvhost-gpu
+  descriptor; submitted command lists are recorded for phase 5B, which
+  will run them.
 - Unattended runs: `kestrel-cli/src/unattended.rs` gives a program a
   scripted controller (`--press`) and saves its last frame as a PNG
   (`--save-frame`); `scripts/run-examples.sh` uses both to run the
   standard homebrew examples, and `check-examples.py` reads the frames
-  back as text with libnx's font.
+  back as text with libnx's font, or compares them pixel for pixel with
+  a model (vt52-demo, simplegfx).
 - Whatever kestrel does not implement (an SVC, a named port, a service,
   a command or a CMIF control command) stops the program with
   `Stop::Unimplemented`, which names it with its identifiers; services
@@ -503,4 +517,6 @@ Two levels, both needed (`PLAN.md` phase 5):
 
 Both levels render through one Vulkan renderer (MoltenVK on macOS) with a
 cross-platform window and presentation layer, fed by the display services
-and buffer queue.
+and buffer queue. Presentation is done for Windows and Linux x86_64
+(`kestrel-cli/src/vulkan.rs`): each frame the display decodes is copied
+into an image and blitted into the window's swapchain image.

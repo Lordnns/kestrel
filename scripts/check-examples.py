@@ -25,6 +25,21 @@ domain mark) prints:
   round before all four have entered it. Threads may interleave in any
   order that keeps those rules, as on a console.
 
+Phase 5A acceptance (PLAN.md), the framebuffer and 2D examples:
+
+- vt52-demo (graphics/printing/vt52-demo): its escape codes move the
+  cursor and set colours, bold, faint, reverse, underline and
+  strikethrough. Its frame is checked pixel for pixel against a model of
+  libnx 4.12.0's console written from its source (console.c's escape
+  handling, console_sw.c's palette and drawChar, both ISC): the text
+  grid with each cell's colours and lines, drawn with the font, the
+  RGB 565 colours widened as kestrel's display documents (each
+  channel's top bits repeated below it).
+- simplegfx (graphics/simplegfx): an RGBA 8888 framebuffer made linear
+  by libnx, filled each frame with one grey, 4 * cnt in each byte, where
+  cnt counts frames from 1 to 60 and back to 0. The frame must be that
+  one grey everywhere; which one depends on how many frames ran.
+
 Usage: check-examples.py <default_font.bin> <frames folder>
 """
 
@@ -115,6 +130,188 @@ def check_read_controls(lines):
     return None
 
 
+# libnx 4.12.0's console palette (console_sw.c's colorTable), as RGB 8 per
+# channel before the RGB 565 packing: normal, bright (bold), faint.
+PALETTE = [
+    (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+    (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+    (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+    (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+    (0, 0, 0), (64, 0, 0), (0, 64, 0), (64, 64, 0),
+    (0, 0, 64), (64, 0, 64), (0, 64, 64), (96, 96, 96),
+]
+BOLD, FAINT, UNDERLINE, REVERSE, CROSSED = 1, 2, 4, 8, 16
+
+
+def rgb565_shown(r, g, b):
+    """RGB8 packed as libnx's RGB565_FROM_RGB8 (top 5, 6, 5 bits), then
+    widened back as kestrel shows RGB 565: each channel's bits repeated
+    below it."""
+    r5, g6, b5 = r >> 3, g >> 2, b >> 3
+    return ((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2))
+
+
+class Console:
+    """The part of libnx's console (console.c) the demo uses: an 80x45
+    grid, 1-based cursor, printable characters, '\n', and the escapes
+    H, A, B, C, D, J (2) and m with codes 0, 1, 2, 4, 7, 9 and 30-37."""
+
+    def __init__(self):
+        self.x, self.y = 1, 1
+        self.fg, self.bg, self.flags = 7, 0, 0
+        self.cells = {}
+        self.clear()
+
+    def clear(self):
+        for row in range(ROWS):
+            for col in range(COLUMNS):
+                self.cells[row, col] = (" ", self.fg, self.bg, self.flags)
+        self.x, self.y = 1, 1
+
+    def put(self, c):
+        if c == "\n":
+            self.y += 1  # the demo never reaches the last row
+            self.x = 1
+            return
+        if self.x > COLUMNS:
+            self.x = 1
+            self.y += 1
+        self.cells[self.y - 1, self.x - 1] = (c, self.fg, self.bg, self.flags)
+        self.x += 1
+
+    def sgr(self, code):
+        if code == 0:
+            self.fg, self.bg, self.flags = 7, 0, 0
+        elif code == 1:
+            self.flags = (self.flags & ~FAINT) | BOLD
+        elif code == 2:
+            self.flags = (self.flags & ~BOLD) | FAINT
+        elif code == 4:
+            self.flags |= UNDERLINE
+        elif code == 7:
+            self.flags |= REVERSE
+        elif code == 9:
+            self.flags |= CROSSED
+        elif 30 <= code <= 37:
+            self.fg = code - 30
+        else:
+            raise ValueError(f"code {code} is outside the model")
+
+    def write(self, text):
+        at = 0
+        while at < len(text):
+            c = text[at]
+            if c != "\x1b":
+                self.put(c)
+                at += 1
+                continue
+            assert text[at + 1] == "["
+            end = at + 2
+            while not text[end].isalpha():
+                end += 1
+            args = [int(a) for a in text[at + 2 : end].split(";") if a]
+            op = text[end]
+            n = args[0] if args else 1
+            if op == "H":
+                self.y = min(max(args[0], 1), ROWS)
+                self.x = min(max(args[1], 1), COLUMNS)
+            elif op == "A":
+                self.y = max(self.y - n, 1)
+            elif op == "B":
+                self.y = min(self.y + n, ROWS)
+            elif op == "C":
+                self.x = min(self.x + n, COLUMNS)
+            elif op == "D":
+                self.x = max(self.x - n, 1)
+            elif op == "J" and args == [2]:
+                self.clear()
+            elif op == "m":
+                for code in args or [0]:
+                    self.sgr(code)
+            else:
+                raise ValueError(f"escape {text[at:end + 1]!r} is outside the model")
+            at = end + 1
+
+    def pixels(self, font):
+        """The screen as drawChar paints it: rows of (r, g, b)."""
+        rows = [[None] * (COLUMNS * CELL) for _ in range(ROWS * CELL)]
+        for (row, col), (c, fg, bg, flags) in self.cells.items():
+            if flags & BOLD:
+                fgc = PALETTE[fg + 8]
+            elif flags & FAINT:
+                fgc = PALETTE[fg + 16]
+            else:
+                fgc = PALETTE[fg]
+            bgc = PALETTE[bg]
+            if flags & REVERSE:
+                fgc, bgc = bgc, fgc
+            fgc, bgc = rgb565_shown(*fgc), rgb565_shown(*bgc)
+            shape = list(struct.unpack_from("<16H", font, 32 * ord(c)))
+            if flags & UNDERLINE:
+                shape[15] = 0xFFFF
+            if flags & CROSSED:
+                shape[7] = 0xFFFF
+            for j in range(CELL):
+                for i in range(CELL):
+                    on = shape[j] >> (15 - i) & 1
+                    rows[row * CELL + j][col * CELL + i] = fgc if on else bgc
+        return rows
+
+
+def vt52_demo_text():
+    """What graphics/printing/vt52-demo's main.c prints, its escapes
+    expanded as its CONSOLE_ESC macro and printf's %1$d do."""
+    e = "\x1b["
+    text = e + "2J"
+    text += e + "10;10H" + "VT52 codes demo"
+    text += e + "10A" + "Line 0"
+    text += e + "28D" + "Column 0"
+    text += e + "19B" + "Line 19"
+    text += e + "5C" + "Column 20"
+    text += "\n"
+    for i in range(8):
+        c = f"{e}{i + 30};1m"
+        text += (
+            c + "Default " + e + "1m" + "Bold " + e + "7m" + "Reversed "
+            + e + "0m" + c + e + "2m" + "Light " + e + "7m" + "Reversed "
+            + e + "0m" + c + e + "4m" + "Underline "
+            + e + "0m" + c + e + "9m" + "Strikethrough " + "\n" + e + "0m"
+        )
+    return text
+
+
+def check_vt52_demo(path, font):
+    width, height, rows = read_png(path)
+    if (width, height) != (COLUMNS * CELL, ROWS * CELL):
+        return f"a {width}x{height} frame, not the console's 1280x720"
+    console = Console()
+    console.write(vt52_demo_text())
+    want = console.pixels(font)
+    for y in range(height):
+        for x in range(width):
+            if rows[y][x] != want[y][x]:
+                return (
+                    f"pixel ({x}, {y}), cell ({y // CELL}, {x // CELL}): "
+                    f"{rows[y][x]} instead of {want[y][x]}"
+                )
+    return None
+
+
+def check_simplegfx(path, font):
+    width, height, rows = read_png(path)
+    if (width, height) != (1280, 720):
+        return f"a {width}x{height} frame, not its 1280x720"
+    first = rows[0][0]
+    v = first[0]
+    if first != (v, v, v) or v % 4 or v > 240:
+        return f"pixel (0, 0) is {first}, not a grey 4 * n with n at most 60"
+    for y, row in enumerate(rows):
+        for x, p in enumerate(row):
+            if p != first:
+                return f"pixel ({x}, {y}) is {p}, pixel (0, 0) {first}"
+    return None
+
+
 def check_barrier(lines):
     if not lines or lines[0] != "Creating threads":
         return f"expected 'Creating threads' first, read {lines[:1]!r}"
@@ -147,7 +344,8 @@ def check_barrier(lines):
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    table = glyphs(Path(sys.argv[1]).read_bytes())
+    font = Path(sys.argv[1]).read_bytes()
+    table = glyphs(font)
     frames = Path(sys.argv[2])
     hello = [""] * 15 + [" " * 19 + "Hello World!"]
     checks = {
@@ -156,9 +354,15 @@ def main():
         "sdmc": lambda t: expect_lines(t, ["Dir-listing for '':", "d_name: sdmc.nro", "Done."]),
         "barrier": check_barrier,
     }
+    # Checks that read the frame's pixels rather than its text.
+    frame_checks = {
+        "vt52-demo": check_vt52_demo,
+        "simplegfx": check_simplegfx,
+    }
     failed = 0
-    for name, check in checks.items():
-        problem = check(screen_text(frames / f"{name}.png", table))
+    results = [(n, c(screen_text(frames / f"{n}.png", table))) for n, c in checks.items()]
+    results += [(n, c(frames / f"{n}.png", font)) for n, c in frame_checks.items()]
+    for name, problem in results:
         print(f"{'FAIL' if problem else 'PASS'}  {name}" + (f": {problem}" if problem else ""))
         failed += problem is not None
     sys.exit(1 if failed else 0)

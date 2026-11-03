@@ -5,9 +5,11 @@
 // the "Default" display, the layer am makes, its buffer queue through the
 // binder relay, and two block-linear RGB 565 buffers registered with nvmap.
 // It then draws three frames of a known pattern, laid out as Mesa describes
-// the Tegra GOB, and queues them. The self-test records the frames kestrel
-// shows and adds a CRC-32 of each to the output, modelled in
-// scripts/gen-expected.py.
+// the Tegra GOB, and queues them; asks the queue what it knows (QUERY);
+// waits on the display's vsync event twice; and queues two more frames
+// with a swap interval of 2 and a fence, timing when their buffers come
+// back. The self-test records the frames kestrel shows and adds a CRC-32
+// of each to the output, modelled in scripts/gen-expected.py.
 #include "hb.h"
 
 #define CUR_PROCESS 0xffff8001u
@@ -81,6 +83,13 @@ static u64 wait_one(u64 h) {
     register u64 x2 __asm__("x2") = 1;
     register u64 x3 __asm__("x3") = ~0ull;
     __asm__ volatile("svc #0x18" : "=r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : : "memory");
+    return x0;
+}
+
+// svcResetSignal on an event's readable side.
+static u64 reset_signal(u64 h) {
+    register u64 x0 __asm__("x0") = h;
+    __asm__ volatile("svc #0x17" : "+r"(x0) : : "memory");
     return x0;
 }
 
@@ -371,11 +380,20 @@ static int dequeue(void) {
     return slot;
 }
 
+// The swap interval and the fence (a syncpoint and a value, or none) the
+// next queued frame carries.
+static u32 swap_interval = 1, fence_id, fence_value, fenced;
+
 static void queue(int slot) {
     parcel_start(&tx);
     put(&tx, (u32)slot);
-    u8 input[0x54] = {0};
-    input[0x24] = 1; // swap interval 1
+    // libnx's BqBufferInput: the swap interval at 0x2c, the NvMultiFence
+    // at 0x30 (a count, then each fence's syncpoint and value).
+    u32 input[0x54 / 4] = {0};
+    input[0x2c / 4] = swap_interval;
+    input[0x30 / 4] = fenced;
+    input[0x34 / 4] = fence_id;
+    input[0x38 / 4] = fence_value;
     put_flattened(&tx, input, sizeof input);
     hex("  QUEUE_BUFFER: ", transact(7));
     dec("  width: ", take());
@@ -517,7 +535,8 @@ void hb_main(const config_entry *config, u64 x1) {
     hex("  error: ", out32(1));
     path.a[0] = (buf){(u64)ctrl_path, sizeof ctrl_path - 1};
     hex("Open /dev/nvhost-ctrl: ", call_ex(nvdrv, &path, 4, 0, 0, 0));
-    hex("  fd: ", out32(0));
+    u32 ctrl = out32(0);
+    hex("  fd: ", ctrl);
     hex("  error: ", out32(1));
 
     // framebufferCreate: two buffers in one nvmap object.
@@ -586,6 +605,50 @@ void hb_main(const config_entry *config, u64 x1) {
     puts_(waited > 0 && waited <= 320000 ? "woken by the next vsync: yes\n"
                                           : "woken by the next vsync: no\n");
     frame(3, &requested);
+
+    // QUERY (Android's NATIVE_WINDOW_*): width, height, format, transform
+    // hint, consumer running behind.
+    static const u32 queries[] = {0, 1, 2, 8, 9};
+    for (u32 i = 0; i < sizeof queries / sizeof queries[0]; i++) {
+        parcel_start(&tx);
+        put(&tx, queries[i]);
+        dec("QUERY ", queries[i]);
+        hex("  result: ", transact(9));
+        sdec("  value: ", (int)take());
+        sdec("  status: ", (int)take());
+    }
+
+    // The display's vsync event: two waits, a vsync apart.
+    hex("GetDisplayVsyncEvent: ", call(ads, 5202, &display, 8));
+    u64 vsync = copied;
+    hex("  event handed out: ", vsync != 0);
+    hex("wait for a vsync: ", wait_one(vsync));
+    u64 first = tick();
+    hex("  reset the event: ", reset_signal(vsync));
+    hex("wait for the next: ", wait_one(vsync));
+    u64 apart = tick() - first;
+    puts_(apart >= 320000 - 80000 && apart <= 320000 + 80000 ? "  a vsync apart: yes\n"
+                                                              : "  a vsync apart: no\n");
+
+    // Two frames with a swap interval of 2, each fenced on a syncpoint the
+    // program has already moved: each stays two vsyncs, so the second
+    // buffer comes back two vsyncs after the first frame's turn began.
+    u32 incr[1] = {7};
+    hex("SYNCPT_INCR: ", ioctl(ctrl, 0xc0040015, incr, sizeof incr));
+    swap_interval = 2;
+    fenced = 1;
+    fence_id = 7;
+    fence_value = 1;
+    frame(4, &requested);
+    frame(5, &requested);
+    puts_("another buffer:\n");
+    dequeue();
+    before = tick();
+    hex("wait for the buffer-free event: ", wait_one(event));
+    waited = tick() - before;
+    puts_(waited > 320000 && waited <= 2 * 320000 ? "woken two vsyncs on: yes\n"
+                                                  : "woken two vsyncs on: no\n");
+    hex("close the vsync event: ", close_handle(vsync));
 
     // nwindowClose and framebufferClose.
     parcel_start(&tx);

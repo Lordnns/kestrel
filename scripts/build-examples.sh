@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Build the standard homebrew examples phase 2 acceptance runs (PLAN.md):
-# switchbrew/switch-examples (public domain mark) at a pinned commit, built
-# with libnx in the public devkitPro toolchain container at a pinned image.
+# Build the standard homebrew examples phase 2 and phase 5A acceptance run
+# (PLAN.md): switchbrew/switch-examples (public domain mark) at a pinned
+# commit, built with libnx in the public devkitPro toolchain container at
+# a pinned image.
 # The built NROs go to target/examples/bin and are not committed.
 #
 # Needs Docker and curl. On Windows (Git Bash) Docker Desktop must be
@@ -13,12 +14,15 @@ set -euo pipefail
 EXAMPLES_COMMIT=669786898205b7beb25ff1731e72982e6d0397d3
 IMAGE=devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
 
-# name:folder for each example.
+# name:folder for each example: phase 2's four, then phase 5A's
+# framebuffer and 2D examples.
 EXAMPLES=(
     hello-world:graphics/printing/hello-world
     read-controls:hid/read-controls
     sdmc:fs/sdmc
     barrier:misc/barrier
+    vt52-demo:graphics/printing/vt52-demo
+    simplegfx:graphics/simplegfx
 )
 
 root=$(cd "$(dirname "$0")/.." && pwd)

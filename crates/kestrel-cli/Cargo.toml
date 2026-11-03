@@ -25,6 +25,14 @@ winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 gilrs = { version = "0.11", optional = true }
 
+# Vulkan presentation (the owner's choice, 2026-11-03): ash (MIT or Apache
+# 2.0, with libloading, ISC), which loads the system's Vulkan library when
+# kestrel starts, so building needs no Vulkan SDK. Windows and Linux x86_64
+# only for now (PLAN.md section 3, "Platform priority"); elsewhere the
+# window paints with softbuffer.
+[target.'cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))'.dependencies]
+ash = { version = "0.38", optional = true }
+
 [features]
 default = ["window"]
-window = ["dep:winit", "dep:softbuffer", "dep:gilrs"]
+window = ["dep:winit", "dep:softbuffer", "dep:gilrs", "dep:ash"]

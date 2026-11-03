@@ -20,6 +20,7 @@ pub mod fatal;
 pub mod fs;
 pub mod hid;
 pub mod nv;
+pub mod nvgpu;
 pub mod psm;
 pub mod set;
 pub mod sm;
@@ -374,6 +375,8 @@ pub struct State {
     pub applet_message_event: Option<ObjectId>,
     /// am: the event signalled when the suspended tick count changes.
     pub suspended_tick_event: Option<ObjectId>,
+    /// am: LockExit came without an UnlockExit after it.
+    pub exit_locked: bool,
     pub hid: hid::State,
     /// time: the shared memory the clocks are read from.
     pub time_shared_memory: Option<ObjectId>,
@@ -933,6 +936,12 @@ mod tests {
         }
         let e = send(&mut p, h, &get(b"nosuch")).unwrap_err();
         assert!(e.starts_with("unimplemented: service \"nosuch\""), "{e}");
+        // The shared font is Nintendo's data: a clear stop.
+        for font in [&b"pl:u"[..], b"pl:s"] {
+            let e = send(&mut p, h, &get(font)).unwrap_err();
+            assert!(e.contains("shared system font"), "{e}");
+            assert!(e.contains("kestrel does not include"), "{e}");
+        }
         // A session to the test service, used through its handle.
         assert_eq!(send(&mut p, h, &get(b"test")), Ok(0));
         let (rc, moved, _) = reply(&p, true);
@@ -1365,6 +1374,11 @@ mod tests {
             (0, vec![], vi::LAYER_ID.to_le_bytes().to_vec())
         );
         assert!(p.services.vi.layer_made);
+        // LockExit and UnlockExit.
+        assert_eq!(call(&mut p, selfc, 1, &[], 0).0, 0);
+        assert!(p.services.exit_locked);
+        assert_eq!(call(&mut p, selfc, 2, &[], 0).0, 0);
+        assert!(!p.services.exit_locked);
         // The events are readable events that nothing signals; asking
         // again names the same event.
         let (_, again, _) = call(&mut p, state, 0, &[], 0);
@@ -1734,9 +1748,9 @@ mod tests {
         assert_eq!(u32s(&answer(&p, false, 4).3), vec![0]);
         assert_eq!(open_dev(&mut p, b"/dev/nvmap"), Ok(vec![1, 0]));
         assert_eq!(open_dev(&mut p, b"/dev/nvhost-ctrl"), Ok(vec![2, 0]));
-        let e = open_dev(&mut p, b"/dev/nvhost-gpu").unwrap_err();
+        let e = open_dev(&mut p, b"/dev/nvhost-vic").unwrap_err();
         assert!(
-            e.contains("unimplemented: nvdrv device \"/dev/nvhost-gpu\""),
+            e.contains("unimplemented: nvdrv device \"/dev/nvhost-vic\""),
             "{e}"
         );
 
@@ -1829,8 +1843,8 @@ mod tests {
             e.contains("unimplemented: nvdrv /dev/nvmap ioctl 0xc00801ff"),
             "{e}"
         );
-        let e = ioctl(&mut p, 2, 0xc008_0014, &[0; 8]).unwrap_err();
-        assert!(e.contains("/dev/nvhost-ctrl ioctl 0xc0080014"), "{e}");
+        let e = ioctl(&mut p, 2, 0x4008_0017, &[0; 8]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl ioctl 0x40080017"), "{e}");
         // A closed descriptor takes no ioctls.
         let close = hipc(false, &[], 2, &1u32.to_le_bytes(), &[], &[], &[], &[]);
         assert_eq!(send(&mut p, nv, &close), Ok(0));
@@ -1838,6 +1852,562 @@ mod tests {
         assert_eq!(ioctl(&mut p, 1, 0xc008_0101, &[0; 8]).unwrap().0, 4);
         assert_eq!(send(&mut p, nv, &close), Ok(0));
         assert_eq!(u32s(&answer(&p, false, 4).3), vec![4]);
+    }
+
+    /// nvdrv, opened and initialized as libnx's nvInitialize does it.
+    fn nvdrv_ready(p: &mut Process) -> u64 {
+        let nv = open(p, b"nvdrv");
+        let heap = p.set_heap_size(0x20_0000).unwrap();
+        let tmem = p.create_transfer_memory(heap, 0x1000, 0).unwrap();
+        let process = handle::CURRENT_PROCESS as u32;
+        let init = hipc(
+            false,
+            &[process, tmem],
+            3,
+            &0x1000u32.to_le_bytes(),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(send(p, nv, &init), Ok(0));
+        nv
+    }
+
+    /// nvdrv Open: (descriptor, NvError).
+    fn nv_open(p: &mut Process, nv: u64, path: &[u8]) -> (u32, u32) {
+        p.mem.write_bytes(STRINGS, path).unwrap();
+        let a = [(STRINGS, path.len() as u64)];
+        let msg = hipc(false, &[], 0, &[], &[], &a, &[], &[]);
+        assert_eq!(send(p, nv, &msg), Ok(0));
+        let out = u32s(&answer(p, false, 8).3);
+        (out[0], out[1])
+    }
+
+    /// nvdrv Ioctl over pointers, as libnx sends small ones: (NvError, the
+    /// argument after it), or the stop.
+    fn nv_ioctl(
+        p: &mut Process,
+        nv: u64,
+        fd: u32,
+        code: u32,
+        arg: &[u8],
+    ) -> Result<(u32, Vec<u8>), String> {
+        let (input, output) = (STRINGS + 0x200, STRINGS + 0x300);
+        p.mem.write_bytes(input, arg).unwrap();
+        p.mem.write_bytes(output, &vec![0; arg.len()]).unwrap();
+        let size = arg.len() as u64;
+        let args = [fd.to_le_bytes(), code.to_le_bytes()].concat();
+        let (x, c) = ([(input, size)], [(output, size)]);
+        let msg = hipc(false, &[], 1, &args, &x, &[(0, 0)], &[(0, 0)], &c);
+        send(p, nv, &msg)?;
+        let err = u32s(&answer(p, false, 4).3)[0];
+        Ok((err, p.mem.read_vec(output, arg.len()).unwrap()))
+    }
+
+    /// nvdrv QueryEvent: (NvError, the copied handles), or the stop.
+    fn nv_query_event(
+        p: &mut Process,
+        nv: u64,
+        fd: u32,
+        id: u32,
+    ) -> Result<(u32, Vec<u32>), String> {
+        let msg = hipc(false, &[], 4, &words(&[fd, id]), &[], &[], &[], &[]);
+        send(p, nv, &msg)?;
+        let (rc, copied, _, data, _) = answer(p, false, 4);
+        assert_eq!(rc, 0);
+        Ok((u32s(&data)[0], copied))
+    }
+
+    #[test]
+    fn nvhost_ctrl_syncpoints_and_events() {
+        let mut p = setup();
+        let nv = nvdrv_ready(&mut p);
+        let (ctrl, err) = nv_open(&mut p, nv, b"/dev/nvhost-ctrl");
+        assert_eq!(err, 0);
+        let io = |p: &mut Process, code: u32, ws: &[u32]| {
+            let (err, out) = nv_ioctl(p, nv, ctrl, code, &words(ws)).unwrap();
+            (err, u32s(&out))
+        };
+        const READ: u32 = 0xc008_0014;
+        const READ_MAX: u32 = 0xc008_001a;
+        const INCR: u32 = 0x4004_0015;
+        const WAIT: u32 = 0xc00c_0016;
+        const WAITEX: u32 = 0xc010_0019;
+        const CLEAR: u32 = 0xc004_001c;
+        const WAIT_EVENT_EX: u32 = 0xc010_001e;
+        const ALLOC: u32 = 0xc004_001f;
+        const FREE: u32 = 0xc004_0020;
+
+        // SYNCPT_READ and READ_MAX: every syncpoint starts at 0; IDs past
+        // 191 do not exist.
+        assert_eq!(io(&mut p, READ, &[5, 9]), (0, vec![5, 0]));
+        assert_eq!(io(&mut p, READ_MAX, &[191, 9]), (0, vec![191, 0]));
+        assert_eq!(io(&mut p, READ, &[192, 0]).0, 4);
+        // SYNCPT_INCR, under "NV services"' number and libnx's.
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert_eq!(io(&mut p, 0xc004_0015, &[5]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[192]).0, 4);
+        assert_eq!(io(&mut p, READ, &[5, 0]), (0, vec![5, 3]));
+        assert_eq!(io(&mut p, READ_MAX, &[5, 0]), (0, vec![5, 3]));
+        assert_eq!(io(&mut p, READ, &[6, 0]), (0, vec![6, 0]));
+
+        // SYNCPT_WAIT and WAITEX: a threshold reached answers at once
+        // (with the value for WAITEX), as does one behind the value by
+        // wrapping; one not reached with no time to wait is Timeout.
+        assert_eq!(io(&mut p, WAIT, &[5, 3, u32::MAX]).0, 0);
+        assert_eq!(io(&mut p, WAITEX, &[5, 2, 100, 0]), (0, vec![5, 2, 100, 3]));
+        assert_eq!(io(&mut p, WAIT, &[5, 0xffff_fff0, 100]).0, 0);
+        assert_eq!(io(&mut p, WAIT, &[5, 4, 0]).0, 5);
+        assert_eq!(io(&mut p, WAITEX, &[5, 4, 0, 0]), (5, vec![5, 4, 0, 0]));
+        let e = nv_ioctl(&mut p, nv, ctrl, WAIT, &words(&[5, 4, 100])).unwrap_err();
+        assert!(e.contains("a request that blocks"), "{e}");
+
+        // Event slots: QueryEvent wants an allocated one.
+        assert_eq!(
+            nv_query_event(&mut p, nv, ctrl, 0x1000_0002),
+            Ok((4, vec![]))
+        );
+        assert_eq!(io(&mut p, ALLOC, &[2]).0, 0);
+        assert_eq!(io(&mut p, ALLOC, &[2]).0, 13, "AlreadyAllocated");
+        assert_eq!(io(&mut p, ALLOC, &[64]).0, 4);
+        // QueryEvent with libnx's ID for slot 2 (valid bit set).
+        let (err, copied) = nv_query_event(&mut p, nv, ctrl, 0x1000_0002).unwrap();
+        assert_eq!((err, copied.len()), (0, 1));
+        let event = copied[0];
+        assert_eq!(
+            p.handles.get(event).map(|(k, _)| k),
+            Some(Kind::ReadableEvent)
+        );
+        let signaled = |p: &Process| match p.handles.object(p.handles.get(event).unwrap().1) {
+            Object::Event { signaled } => *signaled,
+            o => panic!("{o:?}"),
+        };
+        assert!(!signaled(&p));
+
+        // SYNCPT_WAIT_EVENT_EX on syncpoint 5 (at 3) for 5: Timeout, with
+        // slot | id << 4 out; the event fires when the syncpoint gets
+        // there.
+        assert_eq!(
+            io(&mut p, WAIT_EVENT_EX, &[5, 5, 1000, 2]),
+            (5, vec![5, 5, 1000, 0x52])
+        );
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert!(!signaled(&p), "at 4");
+        assert_eq!(io(&mut p, INCR, &[6]).0, 0);
+        assert!(!signaled(&p), "another syncpoint");
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert!(signaled(&p), "at 5");
+        assert_eq!(p.services.nv.event(2).unwrap().wait, None);
+        // Reached already: the value out, the event untouched.
+        assert_eq!(
+            io(&mut p, WAIT_EVENT_EX, &[5, 5, 1000, 2]),
+            (0, vec![5, 5, 1000, 5])
+        );
+        assert!(signaled(&p));
+        // Arming clears the event; CLEAR_EVENT_WAIT (libnx's ID) drops the
+        // wait, so reaching the threshold later signals nothing.
+        assert_eq!(io(&mut p, WAIT_EVENT_EX, &[5, 7, 1000, 2]).0, 5);
+        assert!(!signaled(&p));
+        assert_eq!(io(&mut p, CLEAR, &[0x1000_0002]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert!(!signaled(&p), "cleared");
+        // A slot not allocated takes no wait.
+        assert_eq!(io(&mut p, WAIT_EVENT_EX, &[5, 9, 1000, 3]).0, 4);
+        assert_eq!(io(&mut p, WAIT_EVENT_EX, &[192, 9, 1000, 2]).0, 4);
+
+        // FREE_EVENT and FREE_EVENT_BATCH.
+        assert_eq!(io(&mut p, FREE, &[2]).0, 0);
+        assert_eq!(io(&mut p, FREE, &[2]).0, 4);
+        assert_eq!(
+            nv_query_event(&mut p, nv, ctrl, 0x1000_0002),
+            Ok((4, vec![]))
+        );
+        assert_eq!(io(&mut p, ALLOC, &[3]).0, 0);
+        assert_eq!(io(&mut p, ALLOC, &[40]).0, 0);
+        let mask = 1u64 << 3 | 1 << 40 | 1 << 9;
+        assert_eq!(
+            io(&mut p, 0x4008_0021, &[mask as u32, (mask >> 32) as u32]).0,
+            0
+        );
+        assert_eq!(p.services.nv.event(3), None);
+        assert_eq!(p.services.nv.event(40), None);
+        assert_eq!(io(&mut p, ALLOC, &[3]).0, 0);
+
+        // QueryEvent on another device stops, named; on no device it is
+        // BadParameter. Unknown ioctls stop.
+        let (map, _) = nv_open(&mut p, nv, b"/dev/nvmap");
+        let e = nv_query_event(&mut p, nv, map, 1).unwrap_err();
+        assert!(
+            e.contains("unimplemented: nvdrv QueryEvent 0x1 on /dev/nvmap"),
+            "{e}"
+        );
+        assert_eq!(nv_query_event(&mut p, nv, 99, 1), Ok((4, vec![])));
+        let e = nv_ioctl(&mut p, nv, ctrl, 0xc183_001b, &[0; 0x183]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl ioctl 0xc183001b"), "{e}");
+    }
+
+    /// nvdrv Ioctl2 over pointers, as libnx's nvIoctl2 sends a small one:
+    /// the argument, a second input; (NvError, the argument after it), or
+    /// the stop.
+    fn nv_ioctl2(
+        p: &mut Process,
+        nv: u64,
+        fd: u32,
+        code: u32,
+        arg: &[u8],
+        extra: &[u8],
+    ) -> Result<(u32, Vec<u8>), String> {
+        let (input, more, output) = (STRINGS + 0x200, STRINGS + 0x400, STRINGS + 0x300);
+        p.mem.write_bytes(input, arg).unwrap();
+        p.mem.write_bytes(more, extra).unwrap();
+        let args = [fd.to_le_bytes(), code.to_le_bytes()].concat();
+        let x = [(input, arg.len() as u64), (more, extra.len() as u64)];
+        let c = [(output, arg.len() as u64)];
+        let msg = hipc(false, &[], 11, &args, &x, &[(0, 0), (0, 0)], &[(0, 0)], &c);
+        send(p, nv, &msg)?;
+        let err = u32s(&answer(p, false, 4).3)[0];
+        Ok((err, p.mem.read_vec(output, arg.len()).unwrap()))
+    }
+
+    #[test]
+    fn nvgpu_devices_describe_the_gpu_map_memory_and_set_up_a_channel() {
+        let mut p = setup();
+        let nv = nvdrv_ready(&mut p);
+        let io = |p: &mut Process, fd: u32, code: u32, arg: &[u8]| {
+            nv_ioctl(p, nv, fd, code, arg).unwrap()
+        };
+        let u64s = |b: &[u8]| -> Vec<u64> {
+            b.chunks_exact(8)
+                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        };
+
+        // /dev/nvhost-ctrl-gpu, as libnx's nvGpuInit asks.
+        let (ctrl_gpu, _) = nv_open(&mut p, nv, b"/dev/nvhost-ctrl-gpu");
+        assert_eq!(
+            io(&mut p, ctrl_gpu, 0x8004_4701, &[0xff; 4]),
+            (0, vec![0; 4])
+        );
+        let (err, info) = io(&mut p, ctrl_gpu, 0x8028_4702, &[0; 40]);
+        assert_eq!(
+            (err, u32s(&info)),
+            (0, vec![32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16])
+        );
+        let mut chars = vec![0u8; 0xb0];
+        chars[0] = 0xa0;
+        chars[8] = 1;
+        let (err, out) = io(&mut p, ctrl_gpu, 0xc0b0_4705, &chars);
+        assert_eq!(err, 0);
+        assert_eq!(u64s(&out[..8]), [0xa0]);
+        let c = u32s(&out[16..]);
+        assert_eq!(&c[..4], [0x120, 0xb, 0xa1, 1]);
+        assert_eq!(
+            &c[8..20],
+            [2, 0x20, 0x2_0000, 0x2_0000, 0x1b, 0x3_0000, 1, 0x503, 0x503, 0x80, 0x28, 0]
+        );
+        assert_eq!(&c[22..28], [0x902d, 0xb197, 0xb1c0, 0xb06f, 0xa140, 0xb0b5]);
+        assert_eq!(&out[16 + 0x90..16 + 0x95], b"gm20b");
+        assert_eq!(io(&mut p, ctrl_gpu, 0xc0b0_4705, &[0; 0xb0]).0, 4);
+        let mut tpc = vec![0u8; 24];
+        tpc[0] = 4;
+        let (err, out) = io(&mut p, ctrl_gpu, 0xc018_4706, &tpc);
+        assert_eq!((err, u32s(&out[16..])), (0, vec![3, 0]));
+        // GET_GPU_TIME: PTIMER at 1.625 ns a tick, from the system tick.
+        p.cpu.clock.skip(39);
+        let now = p.now();
+        let (err, out) = io(&mut p, ctrl_gpu, 0xc010_471c, &[0; 16]);
+        assert_eq!((err, u64s(&out)), (0, vec![now * 1250 / 39, 0]));
+        let e = nv_ioctl(&mut p, nv, ctrl_gpu, 0x8008_4714, &[0; 8]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl-gpu ioctl 0x80084714"), "{e}");
+
+        // /dev/nvhost-as-gpu: nothing before InitializeEx, which takes
+        // libnx's layout: flags, then the big page size at 8.
+        let (space, _) = nv_open(&mut p, nv, b"/dev/nvhost-as-gpu");
+        let alloc = |pages: u32, page: u32, flags: u32, at: u64| {
+            let mut a = words(&[pages, page, flags, 0]);
+            a.extend(at.to_le_bytes());
+            a
+        };
+        assert_eq!(io(&mut p, space, 0xc018_4102, &alloc(1, 0x1000, 0, 0)).0, 8);
+        let init = |big: u32| {
+            let mut a = words(&[1, 0, big, 0]);
+            a.extend([0; 24]);
+            a
+        };
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init(0x3000)).0, 4);
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init(0x1_0000)).0, 0);
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init(0x1_0000)).0, 8);
+        // GET_VA_REGIONS: small pages from 16 MiB to 16 GiB, big pages to
+        // 1 TiB.
+        let (err, out) = io(&mut p, space, 0xc040_4108, &[0; 64]);
+        assert_eq!(err, 0);
+        assert_eq!(u32s(&out[8..16]), [48, 0]);
+        assert_eq!(u64s(&out[16..24]), [0x100_0000]);
+        assert_eq!(u32s(&out[24..32]), [0x1000, 0]);
+        assert_eq!(u64s(&out[32..40]), [(0x4_0000_0000 - 0x100_0000) / 0x1000]);
+        assert_eq!(u64s(&out[40..48]), [0x4_0000_0000]);
+        assert_eq!(u32s(&out[48..56]), [0x1_0000, 0]);
+        assert_eq!(
+            u64s(&out[56..64]),
+            [(0x100_0000_0000 - 0x4_0000_0000) / 0x1_0000]
+        );
+        // ALLOC_SPACE: first fit, aligned; fixed at a free address only.
+        let (err, out) = io(&mut p, space, 0xc018_4102, &alloc(4, 0x1_0000, 0, 0));
+        assert_eq!((err, u64s(&out[16..])), (0, vec![0x4_0000_0000]));
+        let (err, out) = io(&mut p, space, 0xc018_4102, &alloc(2, 0x1000, 0, 0x4000));
+        assert_eq!((err, u64s(&out[16..])), (0, vec![0x100_0000]));
+        let (err, out) = io(&mut p, space, 0xc018_4102, &alloc(2, 0x1000, 0, 0x4000));
+        assert_eq!((err, u64s(&out[16..])), (0, vec![0x100_4000]));
+        assert_eq!(
+            io(&mut p, space, 0xc018_4102, &alloc(1, 0x1000, 1, 0x100_1000)).0,
+            4
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc018_4102, &alloc(1, 0x2000, 0, 0)).0,
+            4,
+            "page size"
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc018_4102, &alloc(1, 0x1000, 1, 0x200_0000)).0,
+            0
+        );
+        let free = |at: u64, pages: u32, page: u32| {
+            let mut a = at.to_le_bytes().to_vec();
+            a.extend(words(&[pages, page]));
+            a
+        };
+        assert_eq!(
+            io(&mut p, space, 0xc010_4103, &free(0x200_0000, 1, 0x1000)).0,
+            0
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc010_4103, &free(0x200_0000, 1, 0x1000)).0,
+            4
+        );
+
+        // An nvmap object of 0x3_0000 bytes with memory, as nvMapCreate
+        // makes it.
+        let fb = 0x50_0000;
+        p.mem.map(fb, 0x3_0000, Perm::RW, "gpu").unwrap();
+        p.services.nv.maps.push(Some(nv::MapObject {
+            size: 0x3_0000,
+            addr: Some(fb),
+            align: 0x1_0000,
+            kind: 0,
+            refs: 1,
+        }));
+        let map = |flags: u32, kind: u32, handle: u32, page: u32, off: u64, size: u64, at: u64| {
+            let mut a = words(&[flags, kind, handle, page]);
+            for v in [off, size, at] {
+                a.extend(v.to_le_bytes());
+            }
+            a
+        };
+        // MAP_BUFFER_EX: the whole object on big pages, after the
+        // reservation; the page size written back.
+        let (err, out) = io(
+            &mut p,
+            space,
+            0xc028_4106,
+            &map(4, 0xfe, 1, 0x1_0000, 0, 0, 0),
+        );
+        assert_eq!(err, 0);
+        assert_eq!(u32s(&out[12..16]), [0x1_0000]);
+        assert_eq!(u64s(&out[32..40]), [0x4_0004_0000]);
+        // Fixed inside the big-page reservation; not over another mapping,
+        // not outside a reservation.
+        let (err, out) = io(
+            &mut p,
+            space,
+            0xc028_4106,
+            &map(1, 0, 1, 0x1_0000, 0x1_0000, 0x1_0000, 0x4_0001_0000),
+        );
+        assert_eq!((err, u64s(&out[32..40])), (0, vec![0x4_0001_0000]));
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(1, 0, 1, 0x1_0000, 0, 0x1_0000, 0x4_0001_0000)
+            )
+            .0,
+            4
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(1, 0, 1, 0x1_0000, 0, 0x1_0000, 0x5_0000_0000)
+            )
+            .0,
+            4
+        );
+        // No such object, past its end; an unaligned size panics on a
+        // console, so it stops.
+        assert_eq!(
+            io(&mut p, space, 0xc028_4106, &map(0, 0, 9, 0, 0, 0, 0)).0,
+            4
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(0, 0, 1, 0, 0x2_0000, 0x2_0000, 0)
+            )
+            .0,
+            4
+        );
+        let e = nv_ioctl(
+            &mut p,
+            nv,
+            space,
+            0xc028_4106,
+            &map(0, 0, 1, 0, 0, 0x800, 0),
+        )
+        .unwrap_err();
+        assert!(e.contains("not page-aligned"), "{e}");
+        // Modify: a range of the first mapping takes another kind.
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(0x100, 0xdb, 0, 0, 0x1_0000, 0x1_0000, 0x4_0004_0000)
+            )
+            .0,
+            0
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(0x100, 0xdb, 0, 0, 0x2_0000, 0x2_0000, 0x4_0004_0000)
+            )
+            .0,
+            4
+        );
+        let s = &p.services.nv.gpu.address_spaces[&space];
+        assert_eq!(s.mappings[0].modified, vec![(0x1_0000, 0x1_0000, 0xdb)]);
+        assert_eq!((s.mappings[0].kind, s.mappings[0].cacheable), (0xfe, true));
+        // UNMAP_BUFFER at a mapping's start; FREE_SPACE takes the
+        // reservation and what is mapped in it.
+        assert_eq!(
+            io(&mut p, space, 0xc008_4105, &0x4_0004_1000u64.to_le_bytes()).0,
+            4
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc008_4105, &0x4_0004_0000u64.to_le_bytes()).0,
+            0
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc010_4103,
+                &free(0x4_0000_0000, 4, 0x1_0000)
+            )
+            .0,
+            0
+        );
+        assert!(p.services.nv.gpu.address_spaces[&space].mappings.is_empty());
+
+        // /dev/nvhost-gpu, as libnx's nvGpuChannelCreate sets it up.
+        let (map_fd, _) = nv_open(&mut p, nv, b"/dev/nvmap");
+        let (ch, _) = nv_open(&mut p, nv, b"/dev/nvhost-gpu");
+        assert_eq!(
+            io(&mut p, ch, 0x4004_4801, &words(&[space])).0,
+            4,
+            "not nvmap"
+        );
+        assert_eq!(io(&mut p, ch, 0x4004_4801, &words(&[map_fd])).0, 0);
+        let gpfifo = |n: u32| {
+            let mut a = words(&[n, 0, 1]);
+            a.extend([0; 20]);
+            a
+        };
+        assert_eq!(
+            io(&mut p, ch, 0xc020_481a, &gpfifo(0x800)).0,
+            8,
+            "not bound"
+        );
+        assert_eq!(io(&mut p, space, 0x4004_4101, &words(&[map_fd])).0, 4);
+        assert_eq!(io(&mut p, space, 0x4004_4101, &words(&[ch])).0, 0);
+        assert_eq!(
+            io(&mut p, space, 0x4004_4101, &words(&[ch])).0,
+            8,
+            "bound once"
+        );
+        // The channel's fence: syncpoint 1, at its current value.
+        let (err, out) = io(&mut p, ch, 0xc020_481a, &gpfifo(0x800));
+        assert_eq!((err, u32s(&out[12..20])), (0, vec![1, 0]));
+        assert_eq!(
+            io(&mut p, ch, 0xc020_481a, &gpfifo(0x800)).0,
+            8,
+            "one queue"
+        );
+        let obj = |class: u32| {
+            let mut a = words(&[class, 0]);
+            a.extend([0; 8]);
+            a
+        };
+        assert_eq!(io(&mut p, ch, 0xc010_4809, &obj(0x1234)).0, 4);
+        let (err, out) = io(&mut p, ch, 0xc010_4809, &obj(0xb197));
+        assert_eq!((err, u64s(&out[8..])), (0, vec![1]));
+        assert_eq!(io(&mut p, ch, 0xc010_4809, &obj(0xb1c0)).0, 13);
+        // The error notifier's event, then the notifier and the priority.
+        let (err, copied) = nv_query_event(&mut p, nv, ch, 3).unwrap();
+        assert_eq!((err, copied.len()), (0, 1));
+        assert_eq!(
+            p.handles.get(copied[0]).map(|(k, _)| k),
+            Some(Kind::ReadableEvent)
+        );
+        let e = nv_query_event(&mut p, nv, ch, 4).unwrap_err();
+        assert!(e.contains("QueryEvent 0x4 on /dev/nvhost-gpu"), "{e}");
+        let mut notifier = vec![0u8; 24];
+        notifier[16] = 1;
+        assert_eq!(io(&mut p, ch, 0xc018_480c, &notifier).0, 0);
+        assert_eq!(io(&mut p, ch, 0x4004_480d, &words(&[0x64])).0, 0);
+        assert_eq!(io(&mut p, ch, 0x4004_480d, &words(&[0x65])).0, 4);
+        let c = &p.services.nv.gpu.channels[&ch];
+        assert_eq!(
+            (
+                c.address_space,
+                c.gpfifo_entries,
+                c.syncpoint,
+                c.class,
+                c.error_notifier,
+                c.priority
+            ),
+            (
+                Some(space),
+                Some(0x800),
+                Some(1),
+                Some(0xb197),
+                true,
+                Some(0x64)
+            )
+        );
+        // KickoffPb (SUBMIT_GPFIFO2 through Ioctl2): the entries are
+        // recorded, then the program stops, named.
+        let mut submit = 0u64.to_le_bytes().to_vec();
+        submit.extend(words(&[2, 4, 0, 0]));
+        let entries = [0x1122_3344_5566_7788u64, 0x99];
+        let entry_bytes: Vec<u8> = entries.iter().flat_map(|e| e.to_le_bytes()).collect();
+        let e = nv_ioctl2(&mut p, nv, ch, 0xc018_481b, &submit, &entry_bytes).unwrap_err();
+        assert!(e.contains("2 GPFIFO entries submitted"), "{e}");
+        assert!(e.contains("phase 5B"), "{e}");
+        assert_eq!(p.services.nv.gpu.channels[&ch].submitted, entries);
+        // Closing the channel frees its address space's binding.
+        let close = hipc(false, &[], 2, &ch.to_le_bytes(), &[], &[], &[], &[]);
+        assert_eq!(send(&mut p, nv, &close), Ok(0));
+        assert!(!p.services.nv.gpu.channels.contains_key(&ch));
+        assert_eq!(p.services.nv.gpu.address_spaces[&space].channel, None);
     }
 
     /// A parcel as libnx's parcelTransact sends it: the header, then
@@ -2065,9 +2635,9 @@ mod tests {
         assert_eq!(transact(&mut p, 11, &words(&[2])), Ok(words(&[0])));
         assert_eq!(dequeue(&mut p).unwrap()[2] as i32, -11);
         // What kestrel does not know stops.
-        let e = transact(&mut p, 9, &words(&[0])).unwrap_err();
+        let e = transact(&mut p, 12, &words(&[0])).unwrap_err();
         assert!(
-            e.contains("unimplemented: IGraphicBufferProducer transaction 9"),
+            e.contains("unimplemented: IGraphicBufferProducer transaction 12"),
             "{e}"
         );
         let mut bad = parcel(&[]);
@@ -2094,6 +2664,190 @@ mod tests {
         assert_eq!(send(&mut p, relay, &msg), Ok(0));
         let r = p.mem.read_vec(output, 0x24).unwrap();
         assert_eq!(u32s(&r), [0x14, 0x10, 0, 0x24, 1280, 720, 0, 0, 0]);
+    }
+
+    /// vi:u's display service and relay with the "Default" display and
+    /// the layer open, as libnx's __nx_win_init leaves them: (display
+    /// service, relay).
+    fn vi_layer_open(p: &mut Process) -> (u64, u64) {
+        let vi = open(p, b"vi:u");
+        let get = |p: &mut Process, h: u64, n: u32, args: &[u8]| {
+            assert_eq!(send(p, h, &cmif(4, false, n, args)), Ok(0));
+            reply(p, true).1[0] as u64
+        };
+        let ads = get(p, vi, 0, &[0; 4]);
+        let relay = get(p, ads, 100, &[]);
+        let mut display = [0u8; 0x40];
+        display[..7].copy_from_slice(b"Default");
+        assert_eq!(send(p, ads, &cmif(4, false, 1010, &display)), Ok(0));
+        p.services.vi.layer_made = true;
+        let mut args = display.to_vec();
+        args.extend(vi::LAYER_ID.to_le_bytes());
+        args.extend(PROCESS_ID.to_le_bytes());
+        let window = STRINGS + 0x100;
+        let open_layer = hipc(true, &[], 2020, &args, &[], &[], &[(window, 0x100)], &[]);
+        assert_eq!(send(p, ads, &open_layer), Ok(0));
+        (ads, relay)
+    }
+
+    /// A buffer queue transaction as TransactParcelAuto with pointers: the
+    /// reply's payload, or the stop.
+    fn bq_transact(p: &mut Process, relay: u64, code: u32, args: &[u8]) -> Result<Vec<u8>, String> {
+        let (input, output) = (STRINGS + 0x200, STRINGS + 0x600);
+        let req = parcel(args);
+        p.mem.write_bytes(input, &req).unwrap();
+        let (x, c) = ([(input, req.len() as u64)], [(output, 0x200)]);
+        let a = words(&[1, code, 0]);
+        let msg = hipc(false, &[], 3, &a, &x, &[(0, 0)], &[(0, 0)], &c);
+        send(p, relay, &msg)?;
+        assert_eq!(answer(p, false, 0).0, 0);
+        let r = p.mem.read_vec(output, 0x200).unwrap();
+        let (size, off) = (u32s(&r[..4])[0] as usize, u32s(&r[4..8])[0] as usize);
+        Ok(r[off..off + size].to_vec())
+    }
+
+    /// QUEUE_BUFFER's arguments: the slot and libnx's BqBufferInput with a
+    /// swap interval and fences.
+    fn queue_input(slot: u32, swap_interval: u32, fences: &[(u32, u32)]) -> Vec<u8> {
+        let mut input = [0u8; 0x54];
+        input[0x2c..0x30].copy_from_slice(&swap_interval.to_le_bytes());
+        input[0x30..0x34].copy_from_slice(&(fences.len() as u32).to_le_bytes());
+        for (i, &(id, value)) in fences.iter().enumerate() {
+            input[0x34 + 8 * i..0x38 + 8 * i].copy_from_slice(&id.to_le_bytes());
+            input[0x38 + 8 * i..0x3c + 8 * i].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut args = words(&[slot]);
+        args.extend(flattened(&input));
+        args
+    }
+
+    #[test]
+    fn vi_swap_intervals_fences_queries_and_the_vsync_event() {
+        let mut p = setup();
+        let (ads, relay) = vi_layer_open(&mut p);
+        let tx = |p: &mut Process, code: u32, args: &[u8]| {
+            bq_transact(p, relay, code, args).map(|r| u32s(&r))
+        };
+        let query = |p: &mut Process, what: u32| tx(p, 9, &words(&[what]));
+        assert_eq!(tx(&mut p, 10, &words(&[0, 2, 0])).unwrap()[4], 0);
+        // QUERY before buffers: the default size and format (RGBA 8888).
+        assert_eq!(query(&mut p, 0), Ok(vec![1280, 0]));
+        assert_eq!(query(&mut p, 7), Ok(vec![720, 0]));
+        assert_eq!(query(&mut p, 2), Ok(vec![1, 0]));
+        // Two 32x8 RGB 565 buffers.
+        let fb = 0x50_0000;
+        p.mem.map(fb, 0x1000, Perm::RW, "fb").unwrap();
+        p.services.nv.maps.push(Some(nv::MapObject {
+            size: 0x800,
+            addr: Some(fb),
+            align: 0x1000,
+            kind: 0,
+            refs: 1,
+        }));
+        for slot in 0..2u32 {
+            let mut args = words(&[slot, 1]);
+            args.extend(flattened(&graphic_buffer(1, slot * 0x400)));
+            assert_eq!(tx(&mut p, 14, &args), Ok(vec![]));
+        }
+        // QUERY: the buffers' size and format, no transform, no backlog;
+        // the rest stops, named.
+        for (what, value) in [(0, 32), (1, 8), (2, 4), (6, 32), (7, 8), (8, 0), (9, 0)] {
+            assert_eq!(query(&mut p, what), Ok(vec![value, 0]), "query {what}");
+        }
+        let e = query(&mut p, 3).unwrap_err();
+        assert!(
+            e.contains("unimplemented: IGraphicBufferProducer QUERY 3"),
+            "{e}"
+        );
+
+        let dequeue = |p: &mut Process| tx(p, 3, &words(&[1, 32, 8, 4, 0xb00])).unwrap()[0];
+        let release =
+            |p: &Process, slot: usize| match p.services.vi.slots[slot].as_ref().unwrap().state {
+                vi::SlotState::Queued { release } => release,
+                s => panic!("{s:?}"),
+            };
+        let period = vi::VSYNC_PERIOD;
+        // Swap interval 2, two frames in one vsync period: the first is on
+        // screen from the first vsync for two, the second after it.
+        p.cpu.clock.skip(1000);
+        assert_eq!(dequeue(&mut p), 0);
+        assert_eq!(tx(&mut p, 7, &queue_input(0, 2, &[])).unwrap()[3], 1);
+        assert_eq!(dequeue(&mut p), 1);
+        assert_eq!(tx(&mut p, 7, &queue_input(1, 2, &[])).unwrap()[3], 2);
+        assert_eq!((release(&p, 0), release(&p, 1)), (2 * period, 4 * period));
+        assert_eq!(query(&mut p, 9), Ok(vec![1, 0]), "running behind");
+        // Swap interval 0: freed at the next vsync, not waiting its turn.
+        p.cpu.clock.skip(2 * period);
+        p.vsync_tick();
+        assert_eq!(dequeue(&mut p), 0);
+        assert_eq!(tx(&mut p, 7, &queue_input(0, 0, &[])).unwrap()[3], 2);
+        assert_eq!(release(&p, 0), 3 * period);
+        // Swap interval 1 after them: from the end of slot 1's turn.
+        p.cpu.clock.skip(period);
+        p.vsync_tick();
+        assert_eq!(dequeue(&mut p), 0);
+        tx(&mut p, 7, &queue_input(0, 1, &[])).unwrap();
+        assert_eq!(release(&p, 0), 5 * period);
+
+        // Fences: reached ones are fine; one not reached stops, as does a
+        // syncpoint that does not exist or more than four fences.
+        p.cpu.clock.skip(2 * period);
+        p.vsync_tick();
+        assert_eq!(dequeue(&mut p), 0, "freed in one tick, slot 0 first");
+        let e = tx(&mut p, 7, &queue_input(0, 1, &[(3, 0), (5, 1)])).unwrap_err();
+        assert!(
+            e.contains("waiting for syncpoint 5 to reach 1 (it is at 0)"),
+            "{e}"
+        );
+        let e = tx(&mut p, 7, &queue_input(0, 1, &[(192, 0)])).unwrap_err();
+        assert!(e.contains("syncpoint 192, which does not exist"), "{e}");
+        let mut five = queue_input(0, 1, &[]);
+        five[4 + 8 + 0x30] = 5;
+        let e = tx(&mut p, 7, &five).unwrap_err();
+        assert!(e.contains("an NvMultiFence of 5 fences"), "{e}");
+        assert!(p.syncpoint_incr(5).is_some());
+        assert_eq!(
+            tx(&mut p, 7, &queue_input(0, 1, &[(3, 0), (5, 1)])).unwrap()[4],
+            0
+        );
+
+        // GetDisplayVsyncEvent: the open display's event, signalled at
+        // each vsync; a thread waiting on it wakes at the next one.
+        assert_eq!(tx(&mut p, 11, &words(&[2])), Ok(vec![0]));
+        let e = send(&mut p, ads, &cmif(4, false, 5202, &2u64.to_le_bytes())).unwrap_err();
+        assert!(e.contains("vi display 2, which is not open"), "{e}");
+        let vsync_event = |p: &mut Process| {
+            assert_eq!(
+                send(p, ads, &cmif(4, false, 5202, &1u64.to_le_bytes())),
+                Ok(0)
+            );
+            let (rc, copied, _, _, _) = answer(p, false, 0);
+            assert_eq!((rc, copied.len()), (0, 1));
+            copied[0]
+        };
+        let event = vsync_event(&mut p);
+        let again = vsync_event(&mut p);
+        assert_ne!(event, again);
+        assert_eq!(
+            p.handles.get(event).unwrap().1,
+            p.handles.get(again).unwrap().1
+        );
+        let signaled = |p: &Process| match p.handles.object(p.handles.get(event).unwrap().1) {
+            Object::Event { signaled } => *signaled,
+            o => panic!("{o:?}"),
+        };
+        p.vsync_tick();
+        assert!(!signaled(&p), "no vsync since it was made");
+        let start = p.now();
+        p.cpu.clock.skip(period);
+        p.vsync_tick();
+        assert!(signaled(&p));
+        assert_eq!(p.reset_signal(event as u64), Ok(()));
+        let list = STRINGS + 0xf00;
+        p.mem.write_bytes(list, &event.to_le_bytes()).unwrap();
+        svc(&mut p, nr::WAIT_SYNCHRONIZATION, &[0, list, 1, u64::MAX]);
+        assert_eq!((p.cpu.x[0], p.cpu.x[1]), (0, 0));
+        assert_eq!(p.now(), (start / period + 2) * period);
     }
 
     #[test]
