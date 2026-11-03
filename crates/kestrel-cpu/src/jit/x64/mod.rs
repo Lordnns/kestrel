@@ -89,6 +89,10 @@ pub struct Helpers {
     pub store_exclusive: usize,
     /// `clear_exclusive(ctx)`.
     pub clear_exclusive: usize,
+    /// `zero_block(ctx, addr)`: DC ZVA's 64 bytes.
+    pub zero_block: usize,
+    /// `counter(ctx) -> ticks`: the system counter.
+    pub counter: usize,
 }
 
 /// Where host code finds things, as byte offsets.
@@ -103,6 +107,9 @@ pub struct Layout {
     pub fpsr: i32,
     pub pc: i32,
     pub retired: i32,
+    /// V0..V31, 16 bytes each, the low half first (x86_64 is little
+    /// endian, as `u128` is laid out there).
+    pub vregs: i32,
     /// N, Z, C and V, one byte each (0 or 1).
     pub n: i32,
     pub z: i32,
@@ -332,7 +339,8 @@ fn result(op: &Op) -> Option<Val> {
         | Op::Select { dst, .. }
         | Op::GetNzcv { dst }
         | Op::Load { dst, .. }
-        | Op::LoadExclusive { dst, .. } => Some(dst),
+        | Op::LoadExclusive { dst, .. }
+        | Op::Counter { dst } => Some(dst),
         Op::StoreExclusive { status, .. } => Some(status),
         _ => None,
     }
@@ -349,7 +357,9 @@ fn operands(op: &Op) -> Vec<Val> {
         | Op::Extend { a, .. }
         | Op::IsZero { a, .. } => vec![a],
         Op::Select { c, a, b, .. } => vec![c, a, b],
-        Op::Load { addr, .. } | Op::LoadExclusive { addr, .. } => vec![addr],
+        Op::Load { addr, .. } | Op::LoadExclusive { addr, .. } | Op::ZeroBlock { addr } => {
+            vec![addr]
+        }
         Op::Store { addr, src, .. } | Op::StoreExclusive { addr, src, .. } => vec![addr, src],
         _ => Vec::new(),
     }
@@ -375,6 +385,8 @@ impl Gen<'_> {
             Reg::TpidrRo => self.l.tpidrro,
             Reg::Fpcr => self.l.fpcr,
             Reg::Fpsr => self.l.fpsr,
+            Reg::VLo(n) => self.l.vregs + 16 * n as i32,
+            Reg::VHi(n) => self.l.vregs + 16 * n as i32 + 8,
         }
     }
 
@@ -716,6 +728,35 @@ impl Gen<'_> {
                 let [a0, _, _] = self.abi.args();
                 self.a.mov_rr(W64, a0, CTX);
                 self.call(self.h.clear_exclusive);
+            }
+            Op::ZeroBlock { addr } => {
+                self.get(RCX, addr);
+                // One walk for the whole block: aligned, it stays in the page.
+                let slow = self.walk(Perm::W, 64);
+                self.a.alu_rr(Alu::Xor, W32, RDX, RDX);
+                for k in 0..8 {
+                    self.a.store(W64, M(RAX, 8 * k), RDX);
+                }
+                let done = self.a.jmp();
+                for f in slow {
+                    self.a.bind(f);
+                }
+                let [a0, a1, _] = self.abi.args();
+                self.a.mov_rr(W64, a1, RCX);
+                self.a.mov_rr(W64, a0, CTX);
+                self.call(self.h.zero_block);
+                self.check_fault();
+                self.a.bind(done);
+            }
+            Op::Counter { dst } => {
+                // The counted clock reads the retired count, which must
+                // hold the instructions before this one, as `Op::Interp`.
+                self.retire(self.index - self.flushed);
+                self.flushed = self.index;
+                let [a0, _, _] = self.abi.args();
+                self.a.mov_rr(W64, a0, CTX);
+                self.call(self.h.counter);
+                self.put(dst, RAX);
             }
             Op::Interp { insn } => {
                 self.retire(self.index - self.flushed);

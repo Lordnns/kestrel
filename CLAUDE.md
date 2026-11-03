@@ -50,10 +50,14 @@ sessions learned. The plan and the status live elsewhere; read them first:
 - `v0.1.20` (2026-11-03, `main` after PR #5, every job green) is the
   first release with the recompiler and the threaded cores.
 - The recompiler translates the one-source group (RBIT, REV*, CLZ,
-  CLS) since 2026-11-03 (branch `claude/rev-clz-rbit`). Next: the
-  ROADMAP's "Next task", CPU track B step 2's rest (DC ZVA, the
-  counters, exclusive pairs, LSE atomics); the graphics track (5A) has
-  not started.
+  CLS) since 2026-11-03 (PR #6), and on branch `claude/dc-zva-counters`
+  DC ZVA, the counters and the first part of step 3 (the owner's choice,
+  2026-11-03): SIMD and FP loads and stores, moves, logic and
+  immediates, with a V register as two 64-bit IR halves. Only lane
+  arithmetic and scalar floating point still run in the interpreter in
+  the measured programs; next, SSE2 for the integer lanes (ROADMAP
+  "Next task", step 3). The graphics track (5A) runs in a separate cloud
+  session (branch `claude/graphics-5a`) since 2026-11-03.
 
 ## How the owner works
 

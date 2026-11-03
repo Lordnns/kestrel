@@ -35,15 +35,20 @@ pub struct Case {
 
 const BRK: u32 = 0xd4200000;
 
-/// Run one case and describe every mismatch.
+/// Run one case on the interpreter and describe every mismatch.
 fn run(case: &Case) -> Vec<String> {
+    run_on(case, &mut Interpreter::new())
+}
+
+/// Run one case on `backend` and describe every mismatch.
+pub(crate) fn run_on(case: &Case, backend: &mut dyn CpuBackend) -> Vec<String> {
     let (mut s, m) = setup(&[case.insn, BRK]);
     s.v = V;
     s.x[..4].copy_from_slice(&X);
     s.fpcr = case.fpcr;
     s.flags = Flags::from_nzcv((case.nzcv_in as u64) << 28);
     m.write_bytes(MEM_BASE, &MEM).unwrap();
-    let exit = Interpreter::new().run(&mut s, &m, 10);
+    let exit = backend.run(&mut s, &m, 10);
     if exit != Exit::Breakpoint(0) {
         return vec![format!("stopped with {exit:?}")];
     }

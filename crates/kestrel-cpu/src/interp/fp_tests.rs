@@ -5,6 +5,9 @@
 //! in Python (`struct`, `math.fma`, `fractions`), or, for NaN handling,
 //! flush-to-zero and the estimate instructions, worked by hand from the Arm
 //! pseudocode as each comment says. None comes from running kestrel.
+//!
+//! Where the recompiler is built, every instruction also runs on it in
+//! both calling conventions, which must end in the interpreter's state.
 
 use super::tests::setup;
 use super::Interpreter;
@@ -22,8 +25,22 @@ fn exec(insn: u32, fpcr: u64, init: impl FnOnce(&mut CpuState)) -> CpuState {
     let (mut s, m) = setup(&[insn, BRK]);
     s.fpcr = fpcr;
     init(&mut s);
+    #[cfg(jit_host)]
+    let start = s.clone();
     let exit = Interpreter::new().run(&mut s, &m, 10);
     assert_eq!(exit, Exit::Breakpoint(0), "{insn:08x}");
+    #[cfg(jit_host)]
+    for abi in [crate::jit::x64::Abi::SysV, crate::jit::x64::Abi::Win64] {
+        let (mut j, m) = setup(&[insn, BRK]);
+        j.clone_from(&start);
+        let exit = crate::jit::Jit::with_abi(abi).unwrap().run(&mut j, &m, 10);
+        assert_eq!(exit, Exit::Breakpoint(0), "{insn:08x} on {abi:?}");
+        assert_eq!(
+            (j.x, j.v, j.flags, j.fpcr, j.fpsr, j.pc, j.retired),
+            (s.x, s.v, s.flags, s.fpcr, s.fpsr, s.pc, s.retired),
+            "{insn:08x} on {abi:?}"
+        );
+    }
     s
 }
 
@@ -166,6 +183,52 @@ fn nan_rules() {
     );
     // fmov s0, s1 copies 32 bits and clears the rest of V0.
     check(0x1e204020, 0, &[0xaaaa_aaaa_aaaa_aaaa], 0xaaaa_aaaa);
+}
+
+#[test]
+fn moves_between_general_and_fp_registers() {
+    // The Arm ARM's FMOV (general): the bits are copied; a write to an FP
+    // register clears the rest of it, except the D[1] form, which keeps
+    // the low half; a write to Wd clears the top of Xd.
+    let v1: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    let x1 = 0x8899_aabb_ccdd_eeff;
+    let to_x = |insn: u32| {
+        exec(insn, 0, |s| {
+            s.x[0] = u64::MAX;
+            s.v[1] = v1;
+        })
+        .x[0]
+    };
+    assert_eq!(to_x(0x1e26_0020), 0x7654_3210); // fmov w0, s1
+    assert_eq!(to_x(0x9e66_0020), 0xfedc_ba98_7654_3210); // fmov x0, d1
+    assert_eq!(to_x(0x9eae_0020), 0x0123_4567_89ab_cdef); // fmov x0, v1.d[1]
+    let to_v = |insn: u32| {
+        exec(insn, 0, |s| {
+            s.v[0] = u128::MAX;
+            s.x[1] = x1;
+        })
+        .v[0]
+    };
+    assert_eq!(to_v(0x1e27_0020), 0xccdd_eeff); // fmov s0, w1
+    assert_eq!(to_v(0x9e67_0020), 0x8899_aabb_ccdd_eeff); // fmov d0, x1
+    assert_eq!(
+        to_v(0x9eaf_0020), // fmov v0.d[1], x1
+        0x8899_aabb_ccdd_eeff_ffff_ffff_ffff_ffff
+    );
+    // Between FP registers, only the format's bits, the rest cleared.
+    check(
+        0x1e60_4020,
+        0,
+        &[0xaaaa_aaaa_aaaa_aaaa],
+        0xaaaa_aaaa_aaaa_aaaa,
+    ); // fmov d0, d1
+    check(
+        0x1e60_c020,
+        0,
+        &[0xbff0_0000_0000_0000],
+        0x3ff0_0000_0000_0000,
+    ); // fabs d0, d1
+    check(0x1e21_4020, 0, &[0x1234_5678_3f80_0000], 0xbf80_0000); // fneg s0, s1
 }
 
 #[test]

@@ -50,6 +50,9 @@ pub enum Reg {
     TpidrRo,
     Fpcr,
     Fpsr,
+    /// The low and high 64 bits of V0..V31.
+    VLo(u8),
+    VHi(u8),
 }
 
 /// Two-operand integer operations. Shifts and rotates take their amount
@@ -214,6 +217,18 @@ pub enum Op {
     },
     /// Clear the exclusive monitor (CLREX).
     ClearExclusive,
+    /// Zero the 64 bytes at `addr`, a multiple of 64 (DC ZVA, with the
+    /// block size DCZID_EL0 gives). The block lies in one page, so a fault
+    /// writes none of it.
+    ZeroBlock {
+        addr: Val,
+    },
+    /// The system counter (CNTPCT_EL0, CNTVCT_EL0), as
+    /// `CpuState::counter` gives it with the instructions before this one
+    /// retired.
+    Counter {
+        dst: Val,
+    },
     /// A full fence: every access before it, by this core, is seen by
     /// other cores before any after it (DMB, DSB, and STLR's own order).
     Fence,

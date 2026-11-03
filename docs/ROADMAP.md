@@ -1352,9 +1352,36 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
           assembler (the same LLVM MC layer) where llvm-mc is missing,
           as in LLVM's Windows installer; it reproduces every earlier
           case byte for byte.
-        - Next: DC ZVA, the counters (the retired count flushed first,
-          as `Op::Interp` does), exclusive pairs and the LSE atomics;
-          measure first (below) to order them.
+        - Done (2026-11-03): DC ZVA and the counters, chosen by
+          measuring first. In 100 million instructions of hello-world
+          and of barrier, 166,000 of the 171,000 instructions run in the
+          interpreter were DC ZVA, then MRS of CNTPCT_EL0 (about 180);
+          the rest was floating point and NEON. No exclusive pair or LSE
+          atomic appeared there or in the self-test, whose 76,000 are
+          all NEON and floating point. IR operations `ZeroBlock` (one
+          page-table walk for the aligned 64 bytes, eight zero stores
+          inline, a helper with the interpreter's `write_bytes`
+          otherwise) and `Counter` (the retired count flushed first, as
+          `Op::Interp` does, then `CpuState::counter` through a helper,
+          for both clocks). Now 4,300 instructions in 100 million run in
+          the interpreter in hello-world, all floating point and NEON.
+          Tests: DC ZVA on an unaligned address zeroes its block and not
+          a byte more, and faults on code and on unmapped memory after
+          the stores before it; the counters, read twice in one block
+          across tick boundaries on the counted clock, against values
+          computed from the 52-instruction rule. Mutation checks, each
+          caught: no flush before the counter, the counter counted as
+          retired, seven zero stores instead of eight, a 32-byte
+          alignment (only the new test catches that one; the vectors'
+          addresses give the same block). Self-test 27/27 and `kestrel
+          diff --backend jit` zero divergences (Windows x86_64); the four
+          libnx examples pass on the recompiler. Speed (three alternating
+          runs each against the commit before): no change beyond the
+          noise, hello-world about 560 MIPS on both, the self-test 553 to
+          688 on both; DC ZVA was 0.17% of hello-world's instructions.
+        - Left: exclusive pairs and the LSE atomics (no measured program
+          uses them yet; libnx is built for plain ARMv8.0). The owner
+          chose step 3 first (2026-11-03).
         - How to measure what still runs in the interpreter: count each
           `insn` in `jit::interp` (a temporary `static` map, not
           committed), run the self-test programs and a libnx example
@@ -1368,6 +1395,50 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         host SSE where the Arm rules allow (round-to-nearest arithmetic
         on finite values, with the NaN and flush-to-zero handling of
         `float.rs` around it).
+        - Done (2026-11-03): the tests first. Every NEON vector case runs
+          on the recompiler in both conventions (`neon_tests::run_on`, as
+          `int_tests` has), and each scalar floating-point test checks
+          the recompiler's state against the interpreter's.
+        - Done (2026-11-03): what only moves bits, translated on the
+          integer IR. A SIMD and FP register is two IR registers, `VLo`
+          and `VHi` (its 64-bit halves). The loads and stores of B to Q
+          registers (single, pair, literal; every addressing mode): a Q
+          access is two 64-bit accesses, as `Memory::read128` and
+          `write128` split it, both halves read before the register is
+          written and the low half stored first, a pair one register
+          after the other, so a fault part-way leaves the interpreter's
+          state. DUP (element and general, by a multiply), INS, UMOV,
+          SMOV, the scalar DUP, the vector logic (AND, BIC, ORR, ORN,
+          EOR, BSL, BIT, BIF), the modified immediates (the constant from
+          `decode_modified_imm`, split out of the interpreter's
+          `modified_imm`), and the scalar FMOV (general, register,
+          immediate), FABS and FNEG. Tests: 32-byte accesses across a
+          page boundary at six offsets; faults in Q loads, Q stores and
+          pairs at the end of a mapping against the interpreter; FMOV
+          between general and S, D and D[1] registers (new cases in
+          `fp_tests.rs`, worked from the Arm ARM); every vector case of
+          these instructions is checked to translate with no
+          `Op::Interp`. Mutation checks, each caught: Q halves written
+          early, stored in the wrong order, a pair's registers in the
+          wrong order, Q scaled as 8 bytes (caught only by the
+          translation check: the frontend then hands Q to the
+          interpreter), BIT as BIF, DUP replicating bytes for every
+          size, INS clearing the wrong bits, BIC (immediate) without its
+          inversion, FMOV Vd.D[1] clearing the low half, FABS clearing
+          all but the sign, SMOV to W keeping the top half. In 100
+          million instructions of hello-world, 556 run in the
+          interpreter (1,307 before); in the self-test 47,694 (67,402).
+        - What is left, measured: lane arithmetic (in the self-test
+          USHLL, SHLL, SHL, CMGT, UZP1, XTN, LD4 from sha256-neon; in
+          hello-world libc's UMINP, CMEQ, SHRN, ADDP, CMHS from strlen and
+          memchr), then scalar floating point (rare in these programs).
+          Calling the interpreter's routines directly would save only its
+          decode over `Op::Interp`, which already runs one instruction
+          from inside the block. The gain is in host code: 128-bit IR
+          values in XMM registers and SSE2 (x86_64's baseline) for the
+          integer lanes, which are exact (PADD, PSUB, PCMPEQ, PCMPGT,
+          PMINUB, PMAXUB, PSLL, PSRL, PUNPCK for widening, PAND/POR), each
+          encoding checked against llvm-mc; then scalar FP.
      4. Speed: computed jumps (RET, BR, BLR) looked up in generated code
         (a return-address stack or a small PC-indexed table) instead of
         returning to the dispatcher; guest registers kept in host

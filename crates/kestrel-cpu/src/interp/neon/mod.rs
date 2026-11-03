@@ -19,6 +19,8 @@ mod perm;
 mod vfp;
 
 pub use mem::exec as load_store;
+#[cfg(jit_host)]
+pub(crate) use perm::{decode_modified_imm, ModImm};
 
 use super::bits::*;
 use super::{Ctx, Step};

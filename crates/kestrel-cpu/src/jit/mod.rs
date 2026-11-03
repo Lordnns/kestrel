@@ -161,6 +161,7 @@ impl Jit {
             fpsr: std::mem::offset_of!(CpuState, fpsr) as i32,
             pc: std::mem::offset_of!(CpuState, pc) as i32,
             retired: std::mem::offset_of!(CpuState, retired) as i32,
+            vregs: std::mem::offset_of!(CpuState, v) as i32,
             n: flags + std::mem::offset_of!(crate::Flags, n) as i32,
             z: flags + std::mem::offset_of!(crate::Flags, z) as i32,
             c: flags + std::mem::offset_of!(crate::Flags, c) as i32,
@@ -554,6 +555,27 @@ unsafe fn clear_exclusive(ctx: *mut JitCtx) {
     (*(*ctx).state).exclusive_addr = None;
 }
 
+/// DC ZVA: zero the 64 bytes at `addr` (aligned), as the interpreter's
+/// `system` does; a fault is left in the context.
+///
+/// # Safety
+/// As [`read`].
+unsafe fn zero_block(ctx: *mut JitCtx, addr: u64) {
+    let ctx = &mut *ctx;
+    if let Err(f) = (*ctx.mem).write_bytes(addr, &[0u8; 64]) {
+        ctx.faulted = 1;
+        ctx.fault = Some(f);
+    }
+}
+
+/// CNTPCT_EL0 and CNTVCT_EL0, as the interpreter's `system` reads them.
+///
+/// # Safety
+/// As [`read`].
+unsafe fn counter(ctx: *mut JitCtx) -> u64 {
+    (*(*ctx).state).counter()
+}
+
 /// One instruction in the interpreter, from inside a block, as the
 /// interpreter's own loop runs it: 0 to go on in the block, `RET_JUMP`
 /// when it branched (the PC is set), `RET_EXIT` with the exit in the
@@ -601,6 +623,8 @@ macro_rules! helpers {
             type Step = unsafe extern $abi fn(*mut JitCtx, u64, u64) -> u64;
             type StoreEx = unsafe extern $abi fn(*mut JitCtx, u64, u64, u64) -> u64;
             type Clear = unsafe extern $abi fn(*mut JitCtx);
+            type ZeroBlock = unsafe extern $abi fn(*mut JitCtx, u64);
+            type Counter = unsafe extern $abi fn(*mut JitCtx) -> u64;
 
             unsafe extern $abi fn read1(c: *mut JitCtx, a: u64) -> u64 {
                 read(c, a, 1)
@@ -638,6 +662,12 @@ macro_rules! helpers {
             unsafe extern $abi fn clrex(c: *mut JitCtx) {
                 clear_exclusive(c)
             }
+            unsafe extern $abi fn zva(c: *mut JitCtx, a: u64) {
+                zero_block(c, a)
+            }
+            unsafe extern $abi fn cnt(c: *mut JitCtx) -> u64 {
+                counter(c)
+            }
 
             pub fn helpers() -> Helpers {
                 Helpers {
@@ -657,6 +687,8 @@ macro_rules! helpers {
                     load_exclusive: ldx as Step as usize,
                     store_exclusive: stx as StoreEx as usize,
                     clear_exclusive: clrex as Clear as usize,
+                    zero_block: zva as ZeroBlock as usize,
+                    counter: cnt as Counter as usize,
                 }
             }
         }

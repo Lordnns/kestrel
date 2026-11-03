@@ -102,7 +102,11 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   Arm's AddWithCarry and flags, extensions, conditions, selects, loads
   and stores, and `Interp`), ending in a terminator (jump, computed jump,
   conditional branch, SVC, BRK). Nothing in it names a host register or
-  instruction, so another host's code generator can read it.
+  instruction, so another host's code generator can read it. Values are
+  64 bits: a SIMD and FP register is two registers of the IR, its low
+  and high halves (`VLo`, `VHi`), so its loads, stores, moves, logic and
+  immediates use the integer operations; a Q access is two 64-bit
+  accesses, as `Memory::read128` and `write128` split it.
 - **Frontend** (`frontend.rs`): decodes up to 64 instructions, ending at
   a branch, mirroring the interpreter's files (the reference): the same
   order of loads, stores and register writes, so a fault part-way leaves
@@ -122,7 +126,11 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   arena directly; anything else (unmapped, not permitted, crossing a
   page, beyond the table) calls the `Memory` helper, which faults as the
   interpreter does, and a fault stops the block at the faulting
-  instruction.
+  instruction. DC ZVA walks the table once for its 64-byte block, which
+  an aligned block never leaves. Reading the counters (CNTPCT_EL0,
+  CNTVCT_EL0) first adds the instructions before it to
+  `CpuState::retired`, as `Interp` does, since the counted clock is
+  computed from that count.
 - **Chaining**: every block with at most 24 stack slots shares one frame,
   so a jump or branch with a known target can enter the next block's
   body directly, through a link cell (a data word, so code is never
