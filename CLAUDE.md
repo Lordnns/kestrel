@@ -49,9 +49,11 @@ sessions learned. The plan and the status live elsewhere; read them first:
   recompiler included (ROADMAP "Phase 3 notes", "Threaded cores").
 - `v0.1.20` (2026-11-03, `main` after PR #5, every job green) is the
   first release with the recompiler and the threaded cores.
-- Next: the ROADMAP's "Next task", CPU track B step 2 (REV, CLZ, RBIT
-  ... with a plan written there); the graphics track (5A) has not
-  started.
+- The recompiler translates the one-source group (RBIT, REV*, CLZ,
+  CLS) since 2026-11-03 (branch `claude/rev-clz-rbit`). Next: the
+  ROADMAP's "Next task", CPU track B step 2's rest (DC ZVA, the
+  counters, exclusive pairs, LSE atomics); the graphics track (5A) has
+  not started.
 
 ## How the owner works
 

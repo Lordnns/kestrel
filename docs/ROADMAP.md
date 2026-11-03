@@ -84,7 +84,7 @@ moved to the CPU track, for the recompiler first.
 |------|--------|----------|
 | Differential tester | done (2026-10-31) | `kestrel_testsuite::diff`, `kestrel diff`; "Phase 4 notes" |
 | IR between the ARM64 decoder and x86_64 code generation | done | `jit/ir.rs`, `jit/frontend.rs` |
-| kestrel's own x86_64 encoder, checked against llvm-mc | done | `jit/x64/asm.rs`; 5,359 cases from `scripts/gen-x64-vectors.py` |
+| kestrel's own x86_64 encoder, checked against llvm-mc | done | `jit/x64/asm.rs`; 5,752 cases from `scripts/gen-x64-vectors.py` |
 | Executable memory per OS, never writable and executable at once | done (Linux; Windows under Wine and natively on `windows-2022`, CI run 9) | `jit/code.rs` |
 | Windows x64 and System V calling conventions | done | both run in the Linux tests |
 | Blocks cached by guest address, checked through the memory's change count | done | `Jit::block`, `Jit::valid` |
@@ -1221,7 +1221,7 @@ Verified (Linux x86_64 host, this session):
 - Every one of the 494 integer vectors (`int_vectors.rs`, expected values
   from the Python models) runs as a one-instruction block, in the System V
   and the Windows convention.
-- The encoder matches llvm-mc on all 5,359 cases.
+- The encoder matches llvm-mc on all 5,359 cases (5,752 since the one-source group).
 - The self-test: 27/27 on `--backend jit`; `kestrel diff --backend jit`:
   zero divergences on all 27 programs, and the same in `cargo test` in
   both conventions, with blocks of up to 64 and of 1 instruction.
@@ -1269,8 +1269,9 @@ Verified (Linux x86_64 host, this session):
   not the console's 60 Hz pacing, which only a window's host clock has).
 - What still runs in the interpreter: 0.7% of the self-test's
   instructions (223,459 of 32,583,559): exclusives (LDXR/STXR in the
-  thread programs' spin loops), CLZ/REV/RBIT, system registers, floating
-  point and NEON.
+  thread programs' spin loops), CLZ/REV/RBIT, system registers,
+  floating point and NEON (all but floating point and NEON translated
+  since).
 - Then the chained jumps' change-count check, and system instructions,
   LDAR/STLR and the single exclusives translated (PR #5; "Next task",
   CPU track B steps 2 and 5): CI run 13 (manual, on the branch,
@@ -1328,17 +1329,32 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
           compare-and-swap fails both multi-thread tests. Not covered by
           a failing test: the fences (a litmus test would need weak
           ordering, which x86 hosts do not show).
-        - Next: REV, REV16, REV32, CLZ, CLS, RBIT (`interp/dp_reg.rs`,
-          `one_source`); then DC ZVA, the counters (the retired count
-          flushed first, as `Op::Interp` does), exclusive pairs and the
-          LSE atomics. A plan for the first: IR operations `ByteSwap`
-          and `Clz` (width 32 or 64); the encoder gains `bsr` (x86_64
-          has no LZCNT without BMI, so CLZ is `bsr` with the zero case
-          made the width) with llvm-mc cases in `gen-x64-vectors.py`;
-          REV16 and RBIT as shifts and masks in the IR (RBIT: swap
-          bits, pairs and nibbles with masks, then `ByteSwap`); CLS as
+        - Done (2026-11-03): the one-source group, RBIT, REV16, REV,
+          REV32, REV64, CLZ and CLS. IR operations `ByteSwap` and `Clz`
+          (width 32 or 64); the encoder gains `bsr`, with 200 cases in
+          `gen-x64-vectors.py` (x86_64 has no LZCNT without BMI, so CLZ
+          is `bsr`, with the zero case taken by a `cmov` and both made
+          the count by one xor); REV16 and RBIT as shifts and masks in
+          the IR (RBIT: swap bits, pairs and nibbles, then
+          `ByteSwap`); REV32 as `ByteSwap` then a rotate by 32; CLS as
           the interpreter computes it (CLZ of `x ^ (x asr 1)`, minus 1).
-          The integer vectors already cover all six.
+          The integer vectors cover all seven (CLZ of 0 at both widths
+          through CLS) in both conventions. Mutation checks: the `cmov`
+          on the wrong condition fails the eight CLZ and CLS vectors;
+          RBIT's nibble swap by 3 instead of 4 fails both RBIT vectors.
+          Self-test 27/27 and `kestrel diff --backend jit` zero
+          divergences (Windows x86_64); the four libnx examples pass on
+          the recompiler. Speed (Windows x86_64, three alternating runs
+          each): the self-test 711, 710, 713 MIPS against 581, 659, 683
+          before; hello-world (500 million instructions) unchanged at
+          about 580 MIPS, these instructions being rare there.
+          `gen-x64-vectors.py` now falls back to clang's integrated
+          assembler (the same LLVM MC layer) where llvm-mc is missing,
+          as in LLVM's Windows installer; it reproduces every earlier
+          case byte for byte.
+        - Next: DC ZVA, the counters (the retired count flushed first,
+          as `Op::Interp` does), exclusive pairs and the LSE atomics;
+          measure first (below) to order them.
         - How to measure what still runs in the interpreter: count each
           `insn` in `jit::interp` (a temporary `static` map, not
           committed), run the self-test programs and a libnx example

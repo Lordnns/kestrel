@@ -135,6 +135,19 @@ pub enum Op {
         dst: Val,
         a: Val,
     },
+    /// Reverse the bytes of `a` at width `w` (REV, REV64).
+    ByteSwap {
+        w: Width,
+        dst: Val,
+        a: Val,
+    },
+    /// The number of leading zero bits of `a` at width `w`: the width
+    /// for 0 (CLZ).
+    Clz {
+        w: Width,
+        dst: Val,
+        a: Val,
+    },
     /// Extend the low `bits` (8, 16 or 32) of `a` to 64 bits.
     Extend {
         dst: Val,
