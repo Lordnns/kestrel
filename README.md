@@ -138,8 +138,9 @@ distribution).
 
 ### The standard homebrew examples
 
-`scripts/build-examples.sh` builds four of the public homebrew examples
-(hello world, reading the controller, listing the SD card, threads) from
+`scripts/build-examples.sh` builds six of the public homebrew examples
+(hello world, reading the controller, listing the SD card, threads, the
+console's colours and cursor codes, an RGBA framebuffer) from
 source with the official homebrew toolchain in Docker, and
 `scripts/run-examples.sh` runs them in kestrel and checks what each one
 shows. CI does both on every platform. To try one yourself after

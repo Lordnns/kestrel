@@ -396,7 +396,8 @@ method; the methods live next to the state they change:
   scripted controller (`--press`) and saves its last frame as a PNG
   (`--save-frame`); `scripts/run-examples.sh` uses both to run the
   standard homebrew examples, and `check-examples.py` reads the frames
-  back as text with libnx's font.
+  back as text with libnx's font, or compares them pixel for pixel with
+  a model (vt52-demo, simplegfx).
 - Whatever kestrel does not implement (an SVC, a named port, a service,
   a command or a CMIF control command) stops the program with
   `Stop::Unimplemented`, which names it with its identifiers; services

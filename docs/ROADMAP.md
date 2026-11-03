@@ -1281,6 +1281,79 @@ Verified (Linux x86_64 host, this session):
   (2026-11-03, release run 21, every job green): the first release with
   the recompiler as the default and the threaded cores.
 
+### Phase 5 notes
+
+The graphics track (owner, 2026-10-31: 5A, then 5B, on Vulkan; "Next
+task" item 2). Started 2026-11-03 on branch `claude/graphics-5a`, in a
+cloud session (Linux x86_64) while a local session works on the CPU
+track.
+
+#### 5A acceptance: the framebuffer and 2D examples
+
+The pinned switch-examples commit (669786898205b7beb25ff1731e72982e6d0397d3,
+the one phase 2 uses) has six examples in `graphics/`. Each was built
+and run headless with `--save-frame` (2026-11-03):
+
+| Example | What it needs | Result |
+|---------|---------------|--------|
+| `graphics/printing/vt52-demo` | libnx's console (RGB 565), cursor escapes, colours, bold, faint, reverse, underline, strikethrough | displays correctly with phase 2's screen path; now an acceptance example |
+| `graphics/simplegfx` | `framebufferCreate` in RGBA 8888, `framebufferMakeLinear` (libnx swizzles to block-linear itself) | displays correctly; now an acceptance example |
+| `graphics/simplegfx_moviemaker` | sockets (`bsd:u`, for nxlink's stdio; it carries on if they fail) and grc's MovieMaker (video recording to the album, `grc:c`, offscreen layers) | stops: `service "bsd:u"`. Not a display feature: waits for the owner's decision |
+| `graphics/shared_font` | pl:u's shared system font, Nintendo's font data | not run: kestrel must not ship or invent the font; waits for the owner's decision |
+| `graphics/sdl2/*`, `graphics/opengl/*`, `graphics/deko3d/*` | the GPU itself (nvhost devices, channels, command streams, shaders) | phase 5B |
+
+How the two are checked (`scripts/check-examples.py`, independent of
+kestrel):
+- vt52-demo, pixel for pixel, against a model of libnx 4.12.0's console
+  written from its source (`console.c`'s escape handling,
+  `console_sw.c`'s palette and `drawChar`, ISC) and the example's
+  `main.c`: the 80x45 text grid with each cell's colours and lines,
+  drawn with libnx's font; RGB 565 widened as kestrel's display
+  documents (each channel's top bits repeated below them).
+- simplegfx: one grey everywhere, 4 * n in each channel with n at most
+  60 (it counts frames 1 to 60, then 0). Which grey depends on how many
+  frames ran, so any is accepted. A uniform grey cannot show a channel
+  order or layout bug; `display.rs`'s unit tests cover RGBA 8888.
+
+`build-examples.sh` builds six examples, `run-examples.sh` runs all six
+single-threaded and threaded: 6/6 PASS both ways (Linux x86_64,
+recompiler). Mutation check: RGB 565 widened without repeating the top
+bits fails vt52-demo at its first coloured pixel. Time on the
+interpreter (the ARM and macOS jobs): simplegfx about 19 s a run (it
+fills 921,600 pixels a frame in guest code), vt52-demo about 6 s.
+
+#### Sources
+
+- libnx 4.12.0 (`7644c9b`, ISC), read for the protocol only:
+  `nx/source/nvidia/ioctl/*.c` (the ioctl numbers and argument layouts of
+  nvhost-ctrl, nvhost-ctrl-gpu, nvhost-as-gpu and the channels),
+  `nvidia/fence.c` (how fences wait: EventRegister, nvdrv QueryEvent
+  (4) with `0x10000000 | slot`, EventWaitAsync answering Timeout (5)
+  until the event is signalled), `services/nv.c` (NvError numbers),
+  `display/*.c`.
+- Switchbrew ("NV services", "Display services") could not be read from
+  the cloud session of 2026-11-03: its network policy refuses
+  switchbrew.org. The nvhost devices' semantics (which fields are
+  outputs, the timeouts, GetConfig, the GPU characteristics) need it,
+  so that work waits for a session that can read it (the owner's PC,
+  or a cloud environment with switchbrew.org allowed).
+
+#### Choices (kestrel's)
+
+None in the emulator yet: the two examples needed no change to it.
+
+#### Gaps left in 5A
+
+- The nvhost devices: `/dev/nvhost-ctrl` (syncpoints, events), and the
+  GPU's `/dev/nvhost-ctrl-gpu`, `/dev/nvhost-as-gpu` and `/dev/nvhost-gpu`
+  (channels): no example of 5A uses them (with no GPU the buffer queue
+  gives no fences, so libnx never waits on one); deko3d (5B) does.
+- The display gaps listed in "Phase 2 acceptance": GetDisplayVsyncEvent,
+  the swap interval, the QUERY transaction, CreateStrayLayer, layer
+  position and size; none of the examples calls them.
+- Presentation with Vulkan: the window still draws with softbuffer; a
+  Vulkan crate is a new dependency, for the owner to decide.
+
 ## Next task
 
 The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
@@ -1462,7 +1535,40 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      and `kestrel run --stats` with frame times (average, 1% low, worst)
      and instructions per second.
 2. The graphics track: phase 5A, then 5B, on Vulkan (lavapipe on Linux,
-   real GPUs on Windows).
+   real GPUs on Windows). Where it stands ("Phase 5 notes"; branch
+   `claude/graphics-5a`):
+   - Done (2026-11-03): 5A's acceptance examples. vt52-demo and
+     simplegfx display correctly with phase 2's screen path, and
+     `build-examples.sh`, `run-examples.sh` and `check-examples.py` run
+     and check them with the other four (6/6, single-threaded and
+     threaded).
+   - Waiting for the owner: (a) `graphics/shared_font` needs pl:u's
+     shared font, Nintendo's data, which kestrel must not ship or make
+     up (stop with a clear message, or load a font file the owner
+     dumped); (b) `graphics/simplegfx_moviemaker` needs sockets (bsd:u)
+     and grc's video recording, not display features (leave it out of
+     5A, or add them); (c) Vulkan presentation needs a new dependency
+     (PLAN.md section 5).
+   - Next, in this order, each with the service steps below (sources,
+     IPC unit tests, an `hb<service>.c` program with a model, checks):
+     1. `/dev/nvhost-ctrl`: SyncptRead (0x14), SyncptIncr (0x15),
+        SyncptWait (0x16), EventSignal (0x1c), EventWait (0x1d),
+        EventWaitAsync (0x1e), EventRegister (0x1f), EventUnregister
+        (0x20), nvdrv QueryEvent (4); GetConfig (0x1b) if Switchbrew
+        documents its answer. Needs Switchbrew's "NV services" for
+        which fields are outputs and the timeout rules: the cloud
+        session of 2026-11-03 could not reach switchbrew.org.
+     2. The buffer queue's fences (NvMultiFence on syncpoints) and the
+        display gaps ("Phase 2 acceptance": GetDisplayVsyncEvent, the
+        swap interval, QUERY).
+     3. `/dev/nvhost-as-gpu` (AllocSpace, MapBufferEx, UnmapBuffer,
+        BindChannel, GetVaRegions, InitializeEx), `/dev/nvhost-ctrl-gpu`
+        (GetCharacteristics, ZcullGetInfo, GetTpcMasks; values from
+        open-gpu-doc, envytools or Mesa), `/dev/nvhost-gpu` channel
+        setup (SetNvmapFd, AllocGpfifoEx2, SubmitGpfifo recording the
+        entries without running them): what libnx's `nvGpu*` and deko3d
+        open before 5B's command processing.
+     4. Vulkan presentation, once the owner has chosen the dependency.
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,
