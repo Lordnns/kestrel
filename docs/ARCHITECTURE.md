@@ -520,3 +520,13 @@ cross-platform window and presentation layer, fed by the display services
 and buffer queue. Presentation is done for Windows and Linux x86_64
 (`kestrel-cli/src/vulkan.rs`): each frame the display decodes is copied
 into an image and blitted into the window's swapchain image.
+
+The GPU level has started (`kestrel-hle/src/gpu/`): a channel's command
+lists run when submitted, before the ioctl returns. GPFIFO entries name
+pushbuffers in the channel's GPU address space; the pushbuffer's
+commands become method writes; methods below 0x100 go to the channel
+(semaphores, syncpoints), the rest to the engine object bound to the
+subchannel (2D, 3D, compute, inline-to-memory, DMA copy), which keeps
+them as registers and runs the ones that act. The engines' methods
+come from NVIDIA's headers through `scripts/gen-gpu-methods.py`
+(`gpu/methods.rs`); an action kestrel does not run yet stops, named.

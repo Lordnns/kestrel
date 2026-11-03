@@ -1600,9 +1600,82 @@ doubled (as in the software path); integer scales are even.
 | GPU | the first with a graphics queue that can present to the window |
 | Vulkan stops mid-run | a note, then softbuffer for the rest of the run |
 
-#### Gaps left in 5A
+#### 5B, step 1: the command processor (2026-11-03)
 
-- Running GPU command lists (5B): the channel records them and stops.
+What it is for: a program draws by writing command lists ("pushbuffers")
+into memory and submitting them on its channel; the GPU reads them as a
+stream of method writes to its engines (2D, 3D, compute,
+inline-to-memory, DMA copy) and to the channel itself (semaphores,
+syncpoints). This step reads and runs that stream; the engines' real
+work (macros, copies, clears, draws, shaders) comes next, one stop at a
+time.
+
+Sources: NVIDIA's open-gpu-doc class headers (MIT, commit 9fdf5c4):
+`clb06f.h` (MAXWELL_CHANNEL_GPFIFO_A: GPFIFO entries, the command
+formats, host methods), `cla26f.h` (the Tegra K1 channel class: the
+syncpoint methods SYNCPOINTA/B, 0x70 and 0x74, which GM20B's channel
+also takes, as deko3d uses them), `clb197.h`, `clb1c0.h`, `cla140.h`,
+`clb0b5.h`, `cl902d.h` (the engines' methods); envytools (MIT, commit
+f102b82) `docs/hw/fifo/dma-pusher.rst` (IB entries, GF100 command
+forms) and `rnndb/graph/gf100_3d.xml` (array lengths, CSAA_ENABLE);
+deko3d 0.5.0 (zlib) read for what it sends.
+
+Implemented:
+- `scripts/gen-gpu-methods.py` writes `hle/src/gpu/methods.rs` from the
+  headers (with NVIDIA's licence notice): every method of the five
+  engines, 1,052 in all, with its name, offset and array shape; SET_
+  methods are state, the others (and SET_REPORT_SEMAPHORE_D) act. Array
+  lengths are not in the headers: up to the next method, capped by
+  envytools' where it gives one; the unconfirmed ones are listed in the
+  file. `--check` compares, as the other generators.
+- `hle/src/gpu/`: GPFIFO entries decoded (address, length, control
+  entries), pushbuffers read through the channel's address space (an
+  unmapped address is a GPU page fault and stops), commands decoded
+  (incrementing, non-incrementing, immediate, increment-once, the old
+  forms, end of segment), SET_OBJECT binding the five classes to
+  subchannels, one engine object per class per channel with its method
+  registers.
+- Host methods: SET_OBJECT, NOP, SEMAPHOREA-D (4-byte release, acquire,
+  acquire >=), SYNCPOINTA/B (wait, increment), FB_FLUSH, MEM_OP_A-D,
+  SET_REFERENCE, WFI, YIELD.
+- Engine actions: NO_OPERATION, 3D WAIT_FOR_IDLE, the LOAD_MME_* macro
+  memory loads, 3D INCREMENT_SYNC_POINT, 3D SET_REPORT_SEMAPHORE_D's
+  one-word release. Every other action, a method no header names, a
+  method on a subchannel with no object, and any other host method stop,
+  named ("GPU 3D method CALL_MME_MACRO(5) (0x3828) = 0x1340").
+- SUBMIT_GPFIFO and SUBMIT_GPFIFO2 run the entries before they return
+  and answer the channel's fence (its syncpoint at its new value).
+
+The three deko3d examples now run their first submission's device and
+queue setup (object bindings, hundreds of 3D state writes, macro
+uploads) and stop at their first macro call,
+`CALL_MME_MACRO(5)`: running macros (the MME) is the next step.
+
+Tests: `gpu::tests` (method lookup, every command form, GPFIFO entries);
+`gpu_command_lists_run_when_submitted` (IPC: a list binding the 3D
+engine, releasing and acquiring semaphores, incrementing and waiting on
+the channel's syncpoint, loading macro memory, then each named stop);
+`hbnvgpu` submits a list through Ioctl2 as libnx's nvGpuChannelKickoff
+does and prints what the GPU wrote and its fence, modelled in
+`gen-expected.py`: self-test 29/29 on both backends, the same output at
+`-O3 -march=armv8.2-a`. Mutation check: INCREMENT_SYNC_POINT doing
+nothing fails hbnvgpu (its own syncpoint wait stops) and the IPC test.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| When lists run | at submission, in order, before the ioctl returns (no GPU runs beside the CPU, so waits on its work are always already met) |
+| State or action | NVIDIA's naming: SET_ methods set a register, others act; SET_REPORT_SEMAPHORE_D acts |
+| Array lengths | up to the next method in the header, capped by envytools' length where it gives one |
+| Methods the header does not name | stop, except reviewed envytools registers kept as state under their envytools name (so far 3D 0x15b4, CSAA_ENABLE, which deko3d writes 0 to) |
+| Flushes, membars, TLB invalidations, WFI, YIELD, WAIT_FOR_IDLE | nothing to do: no caches, TLB or concurrency |
+| Semaphore acquire >= | a wrapping 32-bit compare, as for syncpoints |
+| Waits and acquires not met | stop, named: nothing would ever meet them |
+| SUBMIT flags | 0 (fence_wait, must be met), 1, 2, 4, 5 and libnx's undocumented bit 8 (the list's own increments count); others stop |
+| The fence out | always written: the channel's syncpoint at its value after the lists |
+| Macro memories | grown as loaded, up to 0x10000 code and 0x1000 start-address words (no source gives GM20B's sizes) |
+| Four-word semaphore and report releases, reports, reductions | stop, named (the four-word timestamp's format is not in the headers) |
+
+#### Gaps left in 5A
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
   QUERY's other constants.
@@ -1823,9 +1896,20 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         lavapipe, and confirmed on the owner's Windows PC (RTX 2060
         SUPER: the test, the window, 60 fps in simplegfx; "Phase 5
         notes").
-     Next: phase 5B, running the command lists the channel records
-     (Maxwell's GPFIFO, the 3D, compute and copy engines), starting with
-     what deko_basic submits first.
+     Phase 5B, in this order, each until the deko3d examples stop
+     further on ("Phase 5 notes"):
+     1. Done (2026-11-03): the command processor (GPFIFO, pushbuffer
+        commands, host methods, engine registers from NVIDIA's headers,
+        semaphores and syncpoints); the deko3d examples stop at their
+        first macro call, `CALL_MME_MACRO(5)`.
+     2. The MME (macro method expander): Maxwell's macro ISA, from
+        Mesa's description of the Fermi-generation MME (MIT, the plan's
+        Mesa reference), with tests from an independent model.
+     3. The copy and upload engines (inline-to-memory, DMA copy),
+        block-linear layouts reused from the display.
+     4. Clears and render targets, presented: a deko3d frame reaching
+        the window through the queue.
+     5. Draws: vertex fetch, Maxwell shader decoding to SPIR-V, textures.
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,
