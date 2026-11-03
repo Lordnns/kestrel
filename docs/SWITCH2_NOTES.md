@@ -89,6 +89,19 @@ the owner legally has) but never includes its code or data.
   It answers the Switch 1 syncpoint and event ioctls since 2026-11-03
   (ROADMAP "Phase 5 notes").
 
+### The GPU's description changes
+
+- Kind: public source
+- Source: Switchbrew, "NV services", /dev/nvhost-ctrl-gpu,
+  NVGPU_GPU_IOCTL_GET_CHARACTERISTICS ([S2] rows).
+- Behaviour: on Switch 2, GET_CHARACTERISTICS is 0xc0e04705 (0xe0
+  bytes, through Ioctl3) and describes an Ampere GPU (arch 0x170, 3D
+  class 0xc797 AMPERE_B, compute 0xc7c0, GPFIFO 0xc76f, DMA 0xc7b5, six
+  TPCs, chip "ga10f", no big pages); several other ioctls change size.
+- Used by: not implemented; `hle/service/nvgpu.rs` answers the Switch 1
+  form (GM20B, Maxwell) homebrew uses and stops on the [S2] numbers,
+  named (phase 5C).
+
 ## Observations
 
 None yet.

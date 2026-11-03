@@ -60,9 +60,10 @@ sessions learned. The plan and the status live elsewhere; read them first:
 - The graphics track (5A), in a separate cloud session since 2026-11-03:
   vt52-demo and simplegfx display and are checked with the examples;
   /dev/nvhost-ctrl's syncpoints and events, the buffer queue's swap
-  interval and fences, QUERY and the vsync event run (branch
-  `claude/graphics-5a`); next the GPU's nvhost devices (ROADMAP "Next
-  task" item 2).
+  interval and fences, QUERY, the vsync event and the GPU's nvhost
+  devices run, and the deko3d examples reach their first command
+  submission (branch `claude/graphics-5a`); next Vulkan presentation
+  with `ash` (ROADMAP "Next task" item 2).
 
 ## How the owner works
 

@@ -1461,11 +1461,80 @@ the self-test has no wall-clock limit for that).
 | QUERY CONSUMER_RUNNING_BEHIND | more than one buffer queued and not freed, as libnx reads numPendingBuffers |
 | GetDisplayVsyncEvent | each call copies a handle to the same event; the first signal is the first vsync after the first call |
 
+#### The GPU's nvdrv devices (2026-11-03)
+
+What they are for: before a program draws with the GPU (deko3d, and
+through it the deko3d examples of 5B), it asks the GPU what it is
+(`/dev/nvhost-ctrl-gpu`), builds a GPU address space and maps its memory
+into it (`/dev/nvhost-as-gpu`), and opens a channel with a command
+queue, a syncpoint for its fences and an engine (`/dev/nvhost-gpu`).
+
+Sources: Switchbrew, "NV services" (the three devices' ioctl tables and
+layouts, GET_CHARACTERISTICS's values on a Switch, PTIMER's 1.625 ns,
+Ioctl2); libnx 4.12.0 `nvidia/*.c` and `nvidia/ioctl.h` (the requests
+and their order, the ZCULL info a console answers); deko3d 0.5.0
+(zlib, read for the calls it makes: big-page address space, code
+segment reservation with fixed mappings, Modify for image kinds).
+
+Implemented (`hle/service/nvgpu.rs`, wired in `nv.rs`):
+- /dev/nvhost-ctrl-gpu: ZCULL_GET_CTX_SIZE, ZCULL_GET_INFO,
+  GET_CHARACTERISTICS, GET_TPC_MASKS, GET_GPU_TIME.
+- /dev/nvhost-as-gpu, one address space per descriptor: ALLOC_AS_EX
+  (libnx's InitializeEx), BIND_CHANNEL, ALLOC_SPACE, FREE_SPACE,
+  MAP_BUFFER_EX (placed, fixed, modify), UNMAP_BUFFER, GET_VA_REGIONS.
+- /dev/nvhost-gpu, one channel per descriptor: SET_NVMAP_FD,
+  SET_TIMEOUT, ALLOC_GPFIFO_EX2, ALLOC_OBJ_CTX, ZCULL_BIND,
+  SET_ERROR_NOTIFIER, SET_PRIORITY, QueryEvent 1 to 3; SUBMIT_GPFIFO
+  (Ioctl, entries inline) and SUBMIT_GPFIFO2 (nvdrv Ioctl2, 11, libnx's
+  KickoffPb) record the entries in `Channel::submitted`, then stop,
+  named ("GPU command lists do not run yet (phase 5B)").
+- am ISelfController LockExit (1) and UnlockExit (2), which
+  deko_examples calls: recorded, as kestrel has no HOME menu.
+- Still stopping, named: the other ioctls of the three devices (ZBC,
+  debug, power and clock controls, the error notification reads), the
+  [S2] variants (GET_CHARACTERISTICS 0xc0e04705 and the rest),
+  nvdrv Ioctl3 (12).
+
+The deko3d examples of the pinned switch-examples (`graphics/deko3d/
+deko_basic`, `deko_console`, `deko_examples`, with A pressed to pick an
+example) now set up their device, memory and queue, and stop at their
+first command submission. That is where 5B starts.
+
+Tests: `nvgpu_devices_describe_the_gpu_map_memory_and_set_up_a_channel`
+(IPC, Ioctl2 included); `guest/src/nro/hbnvgpu.c`, as libnx and deko3d
+send the requests, modelled in `gen-expected.py`: self-test 29/29 on
+both backends, the same output at `-O3 -march=armv8.2-a`. Mutation
+checks: a fixed mapping allowed over another fails hbnvgpu ("over it")
+and the unit test; first fit ignoring the alignment fails the unit test
+(hbnvgpu's addresses happen to be aligned either way).
+
+Switchbrew and libnx disagree on ALLOC_AS_EX: Switchbrew has the big
+page size first and flags third, libnx sends flags (1) first and the big
+page size third. Homebrew runs on consoles with libnx's layout, so
+kestrel reads that.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| GET_CHARACTERISTICS impl | 0xb (GM20B; Switchbrew also lists 0xe, GM20B_B) |
+| ZCULL_GET_CTX_SIZE | 0: no source gives a console's value, and kestrel's GPU keeps no ZCULL context (deko3d then binds none) |
+| GET_TPC_MASKS | 0b11: one GPC with two TPCs, as GET_CHARACTERISTICS says |
+| GET_GPU_TIME | PTIMER starts with the system tick: ticks times 1250 / 39 |
+| "Must not be NULL" fields | BadParameter when 0 |
+| GPU address layout (GET_VA_REGIONS) | small pages from 16 MiB to 16 GiB, big pages from 16 GiB to 1 TiB (40 bits) |
+| Placing ALLOC_SPACE and MAP_BUFFER_EX | first fit, lowest address, aligned to the page size or the alignment asked; page size 0 means small pages |
+| Fixed mappings | inside a reservation, on its page size, over no other mapping |
+| FREE_SPACE | exactly one reservation; mappings inside it go with it |
+| MAP_BUFFER_EX not page-aligned | stops: "the driver panics on a console" ("NV services") |
+| Modify | a range of the mapping that starts at the address given |
+| Before ALLOC_AS_EX, a second ALLOC_AS_EX | InvalidState |
+| Channels | one per address space; must be bound before ALLOC_GPFIFO_EX2 and ALLOC_OBJ_CTX (InvalidState); one queue; one object context (AlreadyAllocated); object ID 1 |
+| Channel syncpoints | the first channel takes 1, the next 2, ...; the fence is the syncpoint at its current value |
+| SET_PRIORITY | 0x32, 0x64, 0x96, else BadParameter |
+| Submissions | recorded, then stop, named |
+
 #### Gaps left in 5A
 
-- The GPU's nvhost devices: `/dev/nvhost-ctrl-gpu`, `/dev/nvhost-as-gpu`
-  and `/dev/nvhost-gpu` (channels): no example of 5A uses them; deko3d
-  (5B) does.
+- Running GPU command lists (5B): the channel records them and stops.
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
   QUERY's other constants.
@@ -1675,13 +1744,11 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      2. Done (2026-11-03): the buffer queue's swap interval (frames
         take turns, so 60 fps at 1) and fences (reached ones; others
         stop, named), QUERY, GetDisplayVsyncEvent ("Phase 5 notes").
-     3. `/dev/nvhost-as-gpu` (AllocSpace, MapBufferEx, UnmapBuffer,
-        BindChannel, GetVaRegions, InitializeEx), `/dev/nvhost-ctrl-gpu`
-        (GetCharacteristics, ZcullGetInfo, GetTpcMasks; values from
-        open-gpu-doc, envytools or Mesa), `/dev/nvhost-gpu` channel
-        setup (SetNvmapFd, AllocGpfifoEx2, SubmitGpfifo recording the
-        entries without running them): what libnx's `nvGpu*` and deko3d
-        open before 5B's command processing.
+     3. Done (2026-11-03): the GPU's devices, /dev/nvhost-ctrl-gpu,
+        /dev/nvhost-as-gpu and /dev/nvhost-gpu, as libnx and deko3d use
+        them (submissions recorded, then a named stop); am LockExit and
+        UnlockExit. The three deko3d examples reach their first command
+        submission ("Phase 5 notes").
      4. Vulkan presentation, once the owner has chosen the dependency.
 
 Other candidates, when the owner asks for them: a licence-notices file in

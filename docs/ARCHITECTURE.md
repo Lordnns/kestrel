@@ -397,7 +397,12 @@ method; the methods live next to the state they change:
   /dev/nvhost-ctrl keeps
   the syncpoints and the events programs wait on for fences; with no
   GPU yet, only the program's own increments move them
-  (`Process::syncpoint_incr`, where the GPU will).
+  (`Process::syncpoint_incr`, where the GPU will). The GPU's devices
+  (`hle/service/nvgpu.rs`) describe a GM20B, keep a GPU address space
+  per /dev/nvhost-as-gpu descriptor (reservations and nvmap objects
+  mapped at GPU addresses) and a channel per /dev/nvhost-gpu
+  descriptor; submitted command lists are recorded for phase 5B, which
+  will run them.
 - Unattended runs: `kestrel-cli/src/unattended.rs` gives a program a
   scripted controller (`--press`) and saves its last frame as a PNG
   (`--save-frame`); `scripts/run-examples.sh` uses both to run the
