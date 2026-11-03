@@ -1574,8 +1574,22 @@ check: a linear filter fails the first shape. By hand on Linux
 (Xvfb, lavapipe): vt52-demo in a window, "note: video: Vulkan on
 llvmpipe", the same picture as its checked PNG; `--video software`, and
 `auto` with no driver (VK_ICD_FILENAMES pointing nowhere) falling back
-with its note. Windows is type-checked here (x86_64 and ARM64), not
-run: the owner's PC will be its first real run.
+with its note.
+
+On Windows x86_64 (the owner's PC, NVIDIA GeForce RTX 2060 SUPER,
+2026-11-03, `main` after PR #8): the Vulkan test passes with
+KESTREL_REQUIRE_VULKAN=1; vt52-demo shows through Vulkan ("note: video:
+Vulkan on NVIDIA GeForce RTX 2060 SUPER"), the same picture as its
+checked PNG; resizing, maximizing and minimizing show no artefacts.
+simplegfx with `--stats`: 575 frames, average 16.65 ms (60.0 fps), 1%
+low 44.9 fps, worst 28.4 ms. The slow frames are the CPU's: simplegfx
+runs about 10.5 million guest instructions a frame (it fills 921,600
+pixels in guest code), 16.7 ms at the recompiler's 629 MIPS, the whole
+of a 60 Hz frame, so a slightly slow frame misses a vsync. A Switch 2's
+CPU (about 1 GHz) would take about 10.5 ms: a target for the CPU track,
+not the presenter. At 125% Windows display scaling the 1280x720 frame
+is drawn at about 1600x900, so with sharp pixels every fourth pixel is
+doubled (as in the software path); integer scales are even.
 
 | Choice (kestrel's) | Value |
 |--------------------|-------|
@@ -1592,8 +1606,8 @@ run: the owner's PC will be its first real run.
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
   QUERY's other constants.
-- Vulkan presentation on Windows has not run yet (type-checked only);
-  macOS and ARM hosts keep softbuffer until after the Windows milestone.
+- Vulkan presentation runs on Windows and Linux x86_64; macOS and ARM
+  hosts keep softbuffer until after the Windows milestone.
 
 ## Next task
 
@@ -1806,11 +1820,12 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      4. Done (2026-11-03): Vulkan presentation with `ash` on Windows and
         Linux x86_64 (`--video auto|vulkan|software`), softbuffer as the
         fallback; tested off-screen against the software scaler with
-        lavapipe ("Phase 5 notes").
+        lavapipe, and confirmed on the owner's Windows PC (RTX 2060
+        SUPER: the test, the window, 60 fps in simplegfx; "Phase 5
+        notes").
      Next: phase 5B, running the command lists the channel records
      (Maxwell's GPFIFO, the 3D, compute and copy engines), starting with
-     what deko_basic submits first; first, the owner's PC runs the
-     window on Windows with a real GPU.
+     what deko_basic submits first.
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,
