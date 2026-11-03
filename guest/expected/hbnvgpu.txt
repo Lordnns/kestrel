@@ -97,6 +97,24 @@ KickoffPb with a macro: 0x0000000000000000
   macro's report: 0x0000000000000077
   constant buffer word 1: 0x000000000000aaaa
   constant buffer word 2: 0x000000000000bbbb
+KickoffPb with copies: 0x0000000000000000
+  fence value: 0x0000000000000002
+  inline line 1: 0x0000000004030201
+  inline line 1, end: 0x0000000000000605
+  inline line 2: 0x000000000a090807
+  inline semaphore: 0x0000000000000099
+  block-linear word at: 0x0000000000000658
+  block-linear word at: 0x000000000000065c
+  block-linear word at: 0x0000000000000670
+  block-linear word at: 0x0000000000000674
+  copied back: 0x00000000c0ffee01
+  copied back: 0x00000000c0ffee02
+  copied back: 0x00000000c0ffee03
+  copied back: 0x00000000c0ffee04
+  copy semaphore: 0x000000000000005a
+  buffer copy word 0: 0x0000000004030201
+  buffer copy word 4: 0x000000000a090807
+  buffer copy word 5: 0x0000000000000c0b
 SET_ERROR_NOTIFIER off: 0x0000000000000000
 close the error event: 0x0000000000000000
 Close /dev/nvhost-gpu: 0x0000000000000000

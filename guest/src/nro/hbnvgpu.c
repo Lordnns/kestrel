@@ -9,7 +9,8 @@
 // host semaphore and a 3D report semaphore, and increments the channel's
 // syncpoint twice: what the GPU wrote and the fence it answers are printed.
 // A second list uploads a macro (MME) and calls it, and fills a constant
-// buffer. The expected output is modelled in scripts/gen-expected.py.
+// buffer. A third copies: inline-to-memory and DMA copy, pitch and block
+// linear. The expected output is modelled in scripts/gen-expected.py.
 #include "hb.h"
 
 #define CUR_PROCESS 0xffff8001u
@@ -490,6 +491,66 @@ void hb_main(const config_entry *config, u64 x1) {
     hex("  macro's report: ", *(volatile u32 *)(heap + 0x808));
     hex("  constant buffer word 1: ", *(volatile u32 *)(heap + 0x904));
     hex("  constant buffer word 2: ", *(volatile u32 *)(heap + 0x908));
+
+    // Copies (`clb197.h`'s inline-to-memory methods, `clb0b5.h`'s DMA
+    // copy). Inline-to-memory through the 3D engine: two lines of 6 bytes
+    // 0x10 apart at +0x2000, releasing a one-word semaphore at +0x2100;
+    // then 16 bytes into a block-linear surface at +0x4000, 192 bytes by 16
+    // rows in blocks 2 GOBs high, from byte 72 of row 11. DMA copy, bound to
+    // subchannel 4 as deko3d does, copies those 16 bytes back to +0x2200
+    // (a semaphore at +0x2104), then 0x18 bytes from +0x2000 to +0x2300 as
+    // one line, as dkCmdBufCopyBuffer does.
+#define INCS(s, m, n) (1u << 29 | (n) << 16 | (s) << 13 | (m) >> 2)
+#define IMM(m, v) (4u << 29 | (v) << 16 | (m) >> 2)
+    static const u32 copies[] = {
+        INC(0x180, 5), 6, 2, 0, 0x2000, 0x10, // LINE_LENGTH_IN..PITCH_OUT
+        INC(0x1dc, 3), 0, 0x2100, 0x99,       // SET_I2M_SEMAPHORE_A-C
+        IMM(0x1b0, 1 | 2 << 4 | 1 << 12),     // LAUNCH_DMA: pitch, release
+        NON(0x1b4, 3), 0x04030201, 0x08070605, 0x0c0b0a09,
+        INC(0x194, 7), 1 << 4, 192, 16, 1, 0, 72, 11, // SET_DST_BLOCK_SIZE..
+        INC(0x180, 4), 16, 1, 0, 0x4000,
+        IMM(0x1b0, 0), // LAUNCH_DMA: block linear
+        NON(0x1b4, 4), 0xc0ffee01, 0xc0ffee02, 0xc0ffee03, 0xc0ffee04,
+        INCS(4, 0x000, 1), 0xb0b5,                         // SET_OBJECT
+        INCS(4, 0x728, 6), 1 << 12 | 1 << 4, 192, 16, 1, 0, 72 | 11 << 16,
+        INCS(4, 0x400, 4), 0, 0x4000, 0, 0x2200,           // OFFSET_IN, OUT
+        INCS(4, 0x410, 4), 0, 0x100, 16, 1,                // PITCH_IN..
+        INCS(4, 0x240, 3), 0, 0x2104, 0x5a,                // SET_SEMAPHORE_*
+        INCS(4, 0x300, 1), 2 | 1 << 3 | 1 << 8 | 1 << 9,   // LAUNCH_DMA
+        INCS(4, 0x400, 4), 0, 0x2000, 0, 0x2300,
+        INCS(4, 0x418, 1), 0x18,
+        INCS(4, 0x300, 1), 2 | 1 << 2 | 1 << 7 | 1 << 8,
+    };
+    n = 0;
+    for (u32 i = 0; i < sizeof copies / 4; i++) list[n++] = copies[i];
+    // The addresses: each method's upper word, then its lower word, is
+    // written above as 0 and an offset from the mapping.
+    for (u32 i = 0; i + 1 < n; i++)
+        if (list[i] == 0 && list[i + 1] >= 0x2000 && list[i + 1] < 0x5000) {
+            list[i] = hi;
+            list[i + 1] += lo;
+            i++;
+        }
+    entry = (u32)list_va | ((list_va >> 32 & 0xff) | (u64)n << 10) << 32;
+    kick.fence_id = kick.fence_value = 0;
+    hex("KickoffPb with copies: ", ioctl2(ch, 0xc018481b, &kick, sizeof kick, &entry, sizeof entry));
+    hex("  fence value: ", kick.fence_value);
+    volatile u32 *w = (volatile u32 *)heap;
+    hex("  inline line 1: ", w[0x2000 / 4]);
+    hex("  inline line 1, end: ", w[0x2004 / 4]);
+    hex("  inline line 2: ", w[0x2010 / 4]);
+    hex("  inline semaphore: ", w[0x2100 / 4]);
+    for (u32 k = 0; k < 4; k++) {
+        u32 at = 0xffffffff;
+        for (u32 i = 0; i < 3 * 1024 / 4; i++)
+            if (w[0x4000 / 4 + i] == 0xc0ffee01 + k) at = i * 4;
+        hex("  block-linear word at: ", at);
+    }
+    for (u32 k = 0; k < 4; k++) hex("  copied back: ", w[0x2200 / 4 + k]);
+    hex("  copy semaphore: ", w[0x2104 / 4]);
+    hex("  buffer copy word 0: ", w[0x2300 / 4]);
+    hex("  buffer copy word 4: ", w[0x2310 / 4]);
+    hex("  buffer copy word 5: ", w[0x2314 / 4]);
 
     // nvGpuChannelClose, nvAddressSpaceClose, nvGpuExit, nvMapExit.
     notifier[4] = 0;

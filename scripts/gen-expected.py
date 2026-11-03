@@ -1478,6 +1478,32 @@ def mme_run(code, params):
     return sent
 
 
+def block_linear(x, y, z, width, height, log2):
+    """The offset of byte x of row y of slice z in a block-linear surface
+    `width` bytes by `height` rows, blocks 2^log2[0] GOBs wide, 2^log2[1]
+    high, 2^log2[2] deep: envytools' pseudocode ("Blocklinear surfaces",
+    docs/hw/memory/g80-surface.rst, GF100 and later: GOBs 64 bytes by 8
+    rows), and inside a GOB Mesa's Tegra colour GOB (nil's tiling.rs,
+    GOBType::TegraColor): 32-byte sectors of two 16-byte rows, numbered by
+    the table below (rows of sectors down, 16-byte columns across)."""
+    gob_x, gob_y, gob_bytes = 64, 8, 512
+    per_x, per_y, per_z = (1 << n for n in log2)
+    bytes_x, bytes_y, bytes_z = gob_x * per_x, gob_y * per_y, per_z
+    block_bytes = gob_bytes * per_x * per_y * per_z
+    blocks_x = -(-width // bytes_x)
+    blocks_y = -(-height // bytes_y)
+    block = (block_bytes * (x // bytes_x)
+             + block_bytes * blocks_x * (y // bytes_y)
+             + block_bytes * blocks_x * blocks_y * (z // bytes_z))
+    xb, yb, zb = x % bytes_x, y % bytes_y, z % bytes_z
+    gob = (gob_bytes * (xb // gob_x) + gob_bytes * per_x * (yb // gob_y)
+           + gob_bytes * per_x * per_y * zb)
+    gx, gy = xb % gob_x, yb % gob_y
+    sectors = [[0, 1, 8, 9], [2, 3, 10, 11], [4, 5, 12, 13], [6, 7, 14, 15]]
+    sector = sectors[gy // 2][gx // 16]
+    return block + gob + sector * 32 + (gy % 2) * 16 + gx % 16
+
+
 def hbnvgpu():
     """guest/src/nro/hbnvgpu.c: the GPU's nvdrv devices, sent as libnx's
     nvGpuInit, nvAddressSpace*, nvMapCreate and nvGpuChannelCreate send
@@ -1622,6 +1648,47 @@ def hbnvgpu():
         f"  macro's report: {hex64(report[0x808])}",
         f"  constant buffer word 1: {hex64(0xAAAA)}",
         f"  constant buffer word 2: {hex64(0xBBBB)}",
+    ]
+    # The copies, on a model of the mapped memory (offsets from the
+    # mapping): inline-to-memory writes its data bytes in order (little-
+    # endian words) as lines; DMA copy reads lines and writes them.
+    mem = bytearray(0x5000)
+    data = b"".join(w.to_bytes(4, "little")
+                    for w in [0x04030201, 0x08070605, 0x0C0B0A09])
+    for line in range(2):
+        mem[0x2000 + 0x10 * line:0x2006 + 0x10 * line] = data[6 * line:6 * line + 6]
+    mem[0x2100:0x2104] = (0x99).to_bytes(4, "little")
+    marks = [0xC0FFEE01 + k for k in range(4)]
+    surface = dict(width=192, height=16, log2=(0, 1, 0))
+    for i, b in enumerate(b"".join(m.to_bytes(4, "little") for m in marks)):
+        mem[0x4000 + block_linear(72 + i, 11, 0, **surface)] = b
+    for i in range(16):
+        mem[0x2200 + i] = mem[0x4000 + block_linear(72 + i, 11, 0, **surface)]
+    mem[0x2104:0x2108] = (0x5A).to_bytes(4, "little")
+    mem[0x2300:0x2318] = mem[0x2000:0x2018]
+
+    def word(at):
+        return int.from_bytes(mem[at:at + 4], "little")
+
+    found = []
+    for m in marks:
+        at = [i * 4 for i in range(3 * 1024 // 4) if word(0x4000 + i * 4) == m]
+        found.append(at[-1] if at else M32)
+    out += [
+        f"KickoffPb with copies: {ok}",
+        f"  fence value: {hex64(2)}",
+        f"  inline line 1: {hex64(word(0x2000))}",
+        f"  inline line 1, end: {hex64(word(0x2004))}",
+        f"  inline line 2: {hex64(word(0x2010))}",
+        f"  inline semaphore: {hex64(word(0x2100))}",
+    ]
+    out += [f"  block-linear word at: {hex64(at)}" for at in found]
+    out += [f"  copied back: {hex64(word(0x2200 + 4 * k))}" for k in range(4)]
+    out += [
+        f"  copy semaphore: {hex64(word(0x2104))}",
+        f"  buffer copy word 0: {hex64(word(0x2300))}",
+        f"  buffer copy word 4: {hex64(word(0x2310))}",
+        f"  buffer copy word 5: {hex64(word(0x2314))}",
     ]
     out += [
         f"SET_ERROR_NOTIFIER off: {ok}",
