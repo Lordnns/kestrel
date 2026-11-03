@@ -107,6 +107,9 @@ pub struct Layout {
     pub fpsr: i32,
     pub pc: i32,
     pub retired: i32,
+    /// V0..V31, 16 bytes each, the low half first (x86_64 is little
+    /// endian, as `u128` is laid out there).
+    pub vregs: i32,
     /// N, Z, C and V, one byte each (0 or 1).
     pub n: i32,
     pub z: i32,
@@ -382,6 +385,8 @@ impl Gen<'_> {
             Reg::TpidrRo => self.l.tpidrro,
             Reg::Fpcr => self.l.fpcr,
             Reg::Fpsr => self.l.fpsr,
+            Reg::VLo(n) => self.l.vregs + 16 * n as i32,
+            Reg::VHi(n) => self.l.vregs + 16 * n as i32 + 8,
         }
     }
 

@@ -8,12 +8,14 @@
 //! interpreter, so every program runs whatever the coverage.
 //!
 //! Translated so far: all of data processing (immediate); data
-//! processing (register) except CRC32; branches, SVC and BRK; general-purpose loads and stores
-//! (single, pair, literal; every addressing mode); LDAR, STLR and the
-//! single-register exclusives; hints, barriers, cache maintenance, DC
+//! processing (register) except CRC32; branches, SVC and BRK; loads and
+//! stores of general-purpose registers and of SIMD and FP registers (B
+//! to Q) (single, pair, literal; every addressing mode); LDAR, STLR and
+//! the single-register exclusives; hints, barriers, cache maintenance, DC
 //! ZVA, CLREX, MRS/MSR of the system registers kept in `CpuState`, and
-//! the counters. Floating point, NEON, exclusive pairs, compare-and-swap
-//! and the other atomics go to the interpreter.
+//! the counters. Floating point and NEON arithmetic, the structure loads
+//! and stores (LD1 to ST4), exclusive pairs, compare-and-swap and the
+//! other atomics go to the interpreter.
 
 use super::ir::{BinOp, Block, Carry, Op, Reg, Term, Val, Width};
 use crate::interp::bits::{bit, decode_bit_masks, field, sext};
@@ -78,6 +80,10 @@ impl B {
                 src,
             });
         }
+    }
+
+    fn set(&mut self, reg: Reg, src: Val) {
+        self.ops.push(Op::Set { reg, src });
     }
 
     fn set_xsp(&mut self, n: u32, src: Val) {
@@ -629,15 +635,21 @@ fn ldst(b: &mut B, i: u32, pc: u64) -> Option<Next> {
     if field(i, 29, 24) == 0b00_1000 {
         return exclusive(b, i).map(|()| Next::On);
     }
-    if bit(i, 26) {
-        // SIMD and FP registers.
-        return None;
-    }
     match field(i, 29, 27) {
         0b011 if field(i, 25, 24) == 0 => {
             let rt = field(i, 4, 0);
             let addr = pc.wrapping_add(sext((field(i, 23, 5) as u64) << 2, 21) as u64);
             let addr = b.k(addr);
+            if bit(i, 26) {
+                let bytes = match field(i, 31, 30) {
+                    0 => 4,
+                    1 => 8,
+                    2 => 16,
+                    _ => return None,
+                };
+                load_v(b, addr, field(i, 4, 0), bytes);
+                return Some(Next::On);
+            }
             match field(i, 31, 30) {
                 0 => {
                     let v = b.load(addr, 4);
@@ -657,8 +669,7 @@ fn ldst(b: &mut B, i: u32, pc: u64) -> Option<Next> {
         }
         0b101 if !bit(i, 25) => pair(b, i)?,
         0b111 if bit(i, 24) => {
-            let size = field(i, 31, 30);
-            let off = (field(i, 21, 10) as u64) << size;
+            let off = (field(i, 21, 10) as u64) << log2_bytes(i);
             let base = b.xsp(field(i, 9, 5));
             let addr = b.bin_k(BinOp::Add, Width::W64, base, off);
             single(b, i, addr)?;
@@ -685,7 +696,7 @@ fn ldst(b: &mut B, i: u32, pc: u64) -> Option<Next> {
             if option & 0b010 == 0 {
                 return None;
             }
-            let amount = if bit(i, 12) { field(i, 31, 30) } else { 0 };
+            let amount = if bit(i, 12) { log2_bytes(i) } else { 0 };
             let m = b.xr(field(i, 20, 16));
             let off = b.ext_reg(m, option, amount);
             let base = b.xsp(field(i, 9, 5));
@@ -697,11 +708,62 @@ fn ldst(b: &mut B, i: u32, pc: u64) -> Option<Next> {
     Some(Next::On)
 }
 
-/// A general-purpose load or store of one register at `addr`.
+/// The log2 of a single load or store's size: 4 for a Q register.
+fn log2_bytes(i: u32) -> u32 {
+    let size = field(i, 31, 30);
+    if bit(i, 26) && size == 0 && bit(i, 23) {
+        4
+    } else {
+        size
+    }
+}
+
+/// Load `bytes` at `addr` into Vt, as `interp/ldst.rs`'s `load_v`: the
+/// rest of the register is cleared, and a Q register's two halves are
+/// read (as `Memory::read128` reads them) before it is written.
+fn load_v(b: &mut B, addr: Val, rt: u32, bytes: u8) {
+    let (lo, hi) = if bytes == 16 {
+        let lo = b.load(addr, 8);
+        let addr8 = b.bin_k(BinOp::Add, Width::W64, addr, 8);
+        (lo, b.load(addr8, 8))
+    } else {
+        (b.load(addr, bytes), b.k(0))
+    };
+    b.set(Reg::VLo(rt as u8), lo);
+    b.set(Reg::VHi(rt as u8), hi);
+}
+
+/// Store the low `bytes` of Vt at `addr`, as `store_v`: a Q register as
+/// two halves, the low one first, as `Memory::write128` writes them.
+fn store_v(b: &mut B, addr: Val, rt: u32, bytes: u8) {
+    let lo = b.get(Reg::VLo(rt as u8));
+    if bytes == 16 {
+        let hi = b.get(Reg::VHi(rt as u8));
+        b.store(addr, lo, 8);
+        let addr8 = b.bin_k(BinOp::Add, Width::W64, addr, 8);
+        b.store(addr8, hi, 8);
+    } else {
+        b.store(addr, lo, bytes);
+    }
+}
+
+/// A load or store of one register at `addr`.
 fn single(b: &mut B, i: u32, addr: Val) -> Option<()> {
     let rt = field(i, 4, 0);
     let size = field(i, 31, 30);
-    let bytes = 1u8 << size;
+    let bytes = 1u8 << log2_bytes(i);
+    if bit(i, 26) {
+        let opc = field(i, 23, 22);
+        if bytes != 16 && opc >> 1 != 0 {
+            return None;
+        }
+        if opc & 1 == 0 {
+            store_v(b, addr, rt, bytes);
+        } else {
+            load_v(b, addr, rt, bytes);
+        }
+        return Some(());
+    }
     match field(i, 23, 22) {
         0b00 => {
             let v = b.xr(rt);
@@ -731,12 +793,14 @@ fn single(b: &mut B, i: u32, addr: Val) -> Option<()> {
 fn pair(b: &mut B, i: u32) -> Option<()> {
     let opc = field(i, 31, 30);
     let load = bit(i, 22);
-    let bytes: u8 = match opc {
-        0 | 1 => 4,
-        2 => 8,
+    let simd = bit(i, 26);
+    let bytes: u8 = match (simd, opc) {
+        (true, 0) | (false, 0 | 1) => 4,
+        (true, 1) | (false, 2) => 8,
+        (true, 2) => 16,
         _ => return None,
     };
-    if opc == 1 && !load {
+    if !simd && opc == 1 && !load {
         return None;
     }
     let (rt, rt2, rn) = (field(i, 4, 0), field(i, 14, 10), field(i, 9, 5));
@@ -746,7 +810,17 @@ fn pair(b: &mut B, i: u32) -> Option<()> {
     let moved = b.bin_k(BinOp::Add, Width::W64, base, off);
     let addr = if mode == 0b01 { base } else { moved };
     let addr2 = b.bin_k(BinOp::Add, Width::W64, addr, bytes as u64);
-    if load {
+    if simd {
+        // One register after the other, as the interpreter does: a fault
+        // on the second leaves the first written.
+        if load {
+            load_v(b, addr, rt, bytes);
+            load_v(b, addr2, rt2, bytes);
+        } else {
+            store_v(b, addr, rt, bytes);
+            store_v(b, addr2, rt2, bytes);
+        }
+    } else if load {
         let mut x = b.load(addr, bytes);
         let mut y = b.load(addr2, bytes);
         if opc == 1 {

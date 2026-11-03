@@ -111,8 +111,8 @@ fn same(words: &[u32], init: impl Fn(&mut CpuState), budget: u64) -> (Vec<Exit>,
         let exits = run_all(&mut Jit::with_abi(abi).unwrap(), &mut s, &mut m, budget);
         assert_eq!(exits, exits0, "{abi:?}, budget {budget}");
         assert_eq!(
-            (s.x, s.sp, s.pc, s.flags, s.retired),
-            (s0.x, s0.sp, s0.pc, s0.flags, s0.retired),
+            (s.x, s.sp, s.pc, s.flags, s.retired, s.v),
+            (s0.x, s0.sp, s0.pc, s0.flags, s0.retired, s0.v),
             "{abi:?}, budget {budget}"
         );
         let stack = |m: &Memory| m.read_vec(STACK_BASE, 0x1_0000).unwrap();
@@ -238,6 +238,94 @@ fn an_access_crossing_into_a_page_elsewhere_in_the_arena_is_whole() {
         assert_eq!(m.read32(b).unwrap(), 0x1122_3344, "{abi:?}");
         assert_eq!(m.read64(0x50_0000).unwrap(), 0x5555_5555_5555_5555);
     }
+}
+
+/// Bytes `from..from + 16` of the sequence 0, 1, 2, ... as a Q register.
+fn bytes_from(from: u8) -> u128 {
+    u128::from_le_bytes(std::array::from_fn(|k| from + k as u8))
+}
+
+#[test]
+fn simd_accesses_crossing_a_page_see_the_bytes_in_order() {
+    let words = [
+        0xad00_0c62, // stp q2, q3, [x3]
+        0x3cc0_8060, // ldur q0, [x3, #8]
+        0x3cc0_3061, // ldur q1, [x3, #3]
+        0x6d41_1464, // ldp d4, d5, [x3, #16]
+        BRK,
+    ];
+    // The 32 bytes straddle a page boundary at each of these offsets.
+    for at in [0xff0, 0xff8, 0xffc, 0xfe8, 0xfe3, 0x10] {
+        let (exits, s) = same(
+            &words,
+            |s| {
+                s.v[2] = bytes_from(0);
+                s.v[3] = bytes_from(16);
+                s.x[3] = STACK_BASE + at;
+            },
+            100,
+        );
+        assert_eq!(exits, [Exit::Breakpoint(0)], "at {at:#x}");
+        assert_eq!((s.v[0], s.v[1]), (bytes_from(8), bytes_from(3)));
+        let d = |from| bytes_from(from) & u128::from(u64::MAX);
+        assert_eq!((s.v[4], s.v[5]), (d(16), d(24)), "at {at:#x}");
+    }
+}
+
+#[test]
+fn simd_and_fp_loads_and_stores_are_translated() {
+    // Every vector case of the load and store class (op0 x1x0) on a SIMD
+    // and FP register, except the structure loads and stores (LD1..ST4).
+    let simd_ldst = |i: u32| i >> 25 & 0b101 == 0b100 && i >> 26 & 1 == 1 && i >> 27 & 7 != 0b001;
+    let mut n = 0;
+    for c in int_vectors::CASES.iter().filter(|c| simd_ldst(c.insn)) {
+        let (_, m) = setup(&[c.insn]);
+        let (block, _) = super::frontend::translate(&m, CODE, 1).unwrap();
+        let interp = block
+            .ops
+            .iter()
+            .any(|op| matches!(op, super::ir::Op::Interp { .. }));
+        assert!(
+            !interp,
+            "{} ({:08x}) runs in the interpreter",
+            c.asm, c.insn
+        );
+        n += 1;
+    }
+    assert!(n >= 30, "{n} cases");
+}
+
+#[test]
+fn simd_faults_leave_what_the_interpreter_leaves() {
+    // The stack region ends at `end`, with nothing mapped after it.
+    let end = STACK_BASE + 0x1_0000;
+    let init = |x3: u64| {
+        move |s: &mut CpuState| {
+            for k in 0..4 {
+                s.v[k] = bytes_from(0x40 + 16 * k as u8);
+            }
+            s.x[3] = x3;
+        }
+    };
+    let faults = |exits: &[Exit]| matches!(exits, [Exit::Fault { pc: CODE, .. }]);
+    // A Q load whose high half is not mapped writes nothing.
+    for x3 in [end - 8, end - 4, end - 12] {
+        let (exits, s) = same(&[0x3dc0_0060, BRK], init(x3), 100); // ldr q0, [x3]
+        assert!(faults(&exits), "{exits:?}");
+        assert_eq!(s.v[0], bytes_from(0x40));
+    }
+    // A Q store stores the bytes before the unmapped page (`same` compares
+    // the memory with the interpreter's).
+    for x3 in [end - 8, end - 4, end - 12] {
+        let (exits, _) = same(&[0x3d80_0061, BRK], init(x3), 100); // str q1, [x3]
+        assert!(faults(&exits), "{exits:?}");
+    }
+    // A pair whose second register faults has written the first.
+    let (exits, s) = same(&[0xad40_0460, BRK], init(end - 16), 100); // ldp q0, q1, [x3]
+    assert!(faults(&exits), "{exits:?}");
+    assert_eq!((s.v[0], s.v[1]), (0, bytes_from(0x50)));
+    let (exits, _) = same(&[0xad00_0c62, BRK], init(end - 16), 100); // stp q2, q3, [x3]
+    assert!(faults(&exits), "{exits:?}");
 }
 
 #[test]

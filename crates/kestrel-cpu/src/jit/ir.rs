@@ -50,6 +50,9 @@ pub enum Reg {
     TpidrRo,
     Fpcr,
     Fpsr,
+    /// The low and high 64 bits of V0..V31.
+    VLo(u8),
+    VHi(u8),
 }
 
 /// Two-operand integer operations. Shifts and rotates take their amount

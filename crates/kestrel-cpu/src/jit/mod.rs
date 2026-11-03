@@ -161,6 +161,7 @@ impl Jit {
             fpsr: std::mem::offset_of!(CpuState, fpsr) as i32,
             pc: std::mem::offset_of!(CpuState, pc) as i32,
             retired: std::mem::offset_of!(CpuState, retired) as i32,
+            vregs: std::mem::offset_of!(CpuState, v) as i32,
             n: flags + std::mem::offset_of!(crate::Flags, n) as i32,
             z: flags + std::mem::offset_of!(crate::Flags, z) as i32,
             c: flags + std::mem::offset_of!(crate::Flags, c) as i32,
