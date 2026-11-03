@@ -39,6 +39,17 @@ Phase 5A acceptance (PLAN.md), the framebuffer and 2D examples:
   by libnx, filled each frame with one grey, 4 * cnt in each byte, where
   cnt counts frames from 1 to 60 and back to 0. The frame must be that
   one grey everywhere; which one depends on how many frames ran.
+- deko_basic (graphics/deko3d/deko_basic) and deko_examples' second
+  example ("02: Triangle"): the GPU draws a triangle with the vertex
+  colours red, green and blue, its shaders translated from Maxwell to
+  SPIR-V and run on the host's GPU. Each pixel well inside must be the
+  colours' barycentric mix (within 2), each pixel well outside the clear
+  colour.
+- deko_examples' third and fourth examples ("03: Cube", "04: Textured
+  Cube"): a turning cube with depth, coloured, then with a BC1 texture.
+  Which frame is saved depends on the run's length, so what every frame
+  shows is checked: black around the edges, the cube in the middle and
+  covering a plausible share, many colours.
 - deko_examples (graphics/deko3d/deko_examples), its first example
   ("01: Simple Setup", A pressed in the menu): the GPU clears an RGBA8
   render target in four scissored rectangles, Example01_SimpleSetup.cpp's
@@ -355,6 +366,98 @@ def check_deko_examples(path, font):
     return None
 
 
+def triangle_check(path, clear):
+    """deko3d's triangle (deko_basic's triangle_vsh.glsl, deko_examples'
+    Example02_Triangle.cpp): clip-space (0, 1) red, (-1, -1) green, (1, -1)
+    blue, on a 1280x720 target with the viewport covering it and clip-space
+    +Y up (deko3d's default origin): window (640, 0), (0, 720), (1280,
+    720). A pixel whose centre is more than 1.5 pixels inside every edge
+    must be its barycentric mix of the three colours (each channel within
+    2 of the 8-bit rounding: the host's interpolation may differ in its
+    last bits); one more than 1.5 pixels outside an edge the clear colour
+    exactly. Pixels near the edges are not checked (the host GPU's
+    rasterisation rules decide them)."""
+    width, height, rows = read_png(path)
+    if (width, height) != (1280, 720):
+        return f"a {width}x{height} frame, not its 1280x720"
+    verts = [(640.0, 0.0), (0.0, 720.0), (1280.0, 720.0)]
+    colours = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+
+    def edge(a, b, x, y):
+        # Twice the signed area of (a, b, (x, y)).
+        (ax, ay), (bx, by) = a, b
+        return (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+
+    def length(a, b):
+        return ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+
+    sign = 1 if edge(verts[0], verts[1], *verts[2]) > 0 else -1
+    inside = outside = 0
+    for y, row in enumerate(rows):
+        for x, p in enumerate(row):
+            cx, cy = x + 0.5, y + 0.5
+            e = [sign * edge(verts[i], verts[(i + 1) % 3], cx, cy) for i in range(3)]
+            # Distances from the edges, in pixels.
+            d = [e[i] / length(verts[i], verts[(i + 1) % 3]) for i in range(3)]
+            if min(d) > 1.5:
+                # Barycentric weights: the area opposite each vertex (edge i
+                # joins vertices i and i + 1, opposite vertex i + 2).
+                w = [e[(i + 1) % 3] for i in range(3)]
+                total = sum(w)
+                want = tuple(round(255 * sum(w[k] / total * colours[k][c] for k in range(3)))
+                             for c in range(3))
+                if any(abs(p[c] - want[c]) > 2 for c in range(3)):
+                    return f"pixel ({x}, {y}) is {p}, not {want} (within 2)"
+                inside += 1
+            elif min(d) < -1.5:
+                if p != clear:
+                    return f"pixel ({x}, {y}) is {p}, not the clear colour {clear}"
+                outside += 1
+    if not inside or not outside:
+        return "no pixels to check"
+    return None
+
+
+def check_deko_basic(path, font):
+    # deko_basic's main.c clears to 0.125, 0.294, 0.478.
+    unorm8 = lambda v: int(v * 255 + 0.5)
+    return triangle_check(path, (unorm8(0.125), unorm8(0.294), unorm8(0.478)))
+
+
+def check_deko_triangle(path, font):
+    # Example02_Triangle.cpp clears to black.
+    return triangle_check(path, (0, 0, 0))
+
+
+def cube_check(path, min_colours):
+    """deko_examples' cubes (Example03_Cube.cpp, Example04_TexturedCube.cpp):
+    a cube turning with time in the middle of a 1920x1080 frame cleared to
+    black, with depth. Which frame is saved depends on how long the program
+    ran, so the check is of what every frame shows: black within 100
+    pixels of each edge (the cube stays in the middle), the middle pixel
+    the cube's, the cube covering between 5% and 40% of the frame, and at
+    least `min_colours` different colours (the vertex colours' blends, or
+    the texture)."""
+    width, height, rows = read_png(path)
+    if (width, height) != (1920, 1080):
+        return f"a {width}x{height} frame, not its 1920x1080"
+    black = (0, 0, 0)
+    for y, row in enumerate(rows):
+        for x, p in enumerate(row):
+            edge = x < 100 or x >= width - 100 or y < 100 or y >= height - 100
+            if edge and p != black:
+                return f"pixel ({x}, {y}) near the edge is {p}, not black"
+    if rows[height // 2][width // 2] == black:
+        return "the middle pixel is black: no cube"
+    lit = sum(p != black for row in rows for p in row)
+    if not 0.05 <= lit / (width * height) <= 0.40:
+        return f"the cube covers {lit} pixels of {width * height}"
+    colours = len({p for row in rows for p in row})
+    if colours < min_colours:
+        return f"{colours} colours, fewer than {min_colours}"
+    return None
+
+
 def check_barrier(lines):
     if not lines or lines[0] != "Creating threads":
         return f"expected 'Creating threads' first, read {lines[:1]!r}"
@@ -403,6 +506,10 @@ def main():
         "vt52-demo": check_vt52_demo,
         "simplegfx": check_simplegfx,
         "deko_examples": check_deko_examples,
+        "deko_basic": check_deko_basic,
+        "deko_triangle": check_deko_triangle,
+        "deko_cube": lambda path, font: cube_check(path, 10000),
+        "deko_textured_cube": lambda path, font: cube_check(path, 50000),
     }
     failed = 0
     results = [(n, c(screen_text(frames / f"{n}.png", table)))
