@@ -1352,9 +1352,37 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
           assembler (the same LLVM MC layer) where llvm-mc is missing,
           as in LLVM's Windows installer; it reproduces every earlier
           case byte for byte.
-        - Next: DC ZVA, the counters (the retired count flushed first,
-          as `Op::Interp` does), exclusive pairs and the LSE atomics;
-          measure first (below) to order them.
+        - Done (2026-11-03): DC ZVA and the counters, chosen by
+          measuring first. In 100 million instructions of hello-world
+          and of barrier, 166,000 of the 171,000 instructions run in the
+          interpreter were DC ZVA, then MRS of CNTPCT_EL0 (about 180);
+          the rest was floating point and NEON. No exclusive pair or LSE
+          atomic appeared there or in the self-test, whose 76,000 are
+          all NEON and floating point. IR operations `ZeroBlock` (one
+          page-table walk for the aligned 64 bytes, eight zero stores
+          inline, a helper with the interpreter's `write_bytes`
+          otherwise) and `Counter` (the retired count flushed first, as
+          `Op::Interp` does, then `CpuState::counter` through a helper,
+          for both clocks). Now 4,300 instructions in 100 million run in
+          the interpreter in hello-world, all floating point and NEON.
+          Tests: DC ZVA on an unaligned address zeroes its block and not
+          a byte more, and faults on code and on unmapped memory after
+          the stores before it; the counters, read twice in one block
+          across tick boundaries on the counted clock, against values
+          computed from the 52-instruction rule. Mutation checks, each
+          caught: no flush before the counter, the counter counted as
+          retired, seven zero stores instead of eight, a 32-byte
+          alignment (only the new test catches that one; the vectors'
+          addresses give the same block). Self-test 27/27 and `kestrel
+          diff --backend jit` zero divergences (Windows x86_64); the four
+          libnx examples pass on the recompiler. Speed (three alternating
+          runs each against the commit before): no change beyond the
+          noise, hello-world about 560 MIPS on both, the self-test 553 to
+          688 on both; DC ZVA was 0.17% of hello-world's instructions.
+        - Next: the owner chooses between exclusive pairs and the LSE
+          atomics (no measured program uses them yet; libnx is built for
+          plain ARMv8.0) and step 3, floating point and NEON, which is
+          now all that runs in the interpreter.
         - How to measure what still runs in the interpreter: count each
           `insn` in `jit::interp` (a temporary `static` map, not
           committed), run the self-test programs and a libnx example

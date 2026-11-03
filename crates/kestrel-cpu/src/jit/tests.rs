@@ -206,6 +206,69 @@ fn an_access_crossing_into_a_page_elsewhere_in_the_arena_is_whole() {
 }
 
 #[test]
+fn dc_zva_zeroes_its_aligned_block_or_faults_writing_nothing() {
+    let words = [
+        0xf900_0080, // str x0, [x4]
+        0xf900_1c80, // str x0, [x4, #56]
+        0xf900_00a0, // str x0, [x5]
+        0xf900_00c0, // str x0, [x6]
+        0xd50b_7423, // dc zva, x3
+        0xf940_0087, // ldr x7, [x4]
+        0xf940_1c8a, // ldr x10, [x4, #56]
+        0xf940_00a8, // ldr x8, [x5]
+        0xf940_00c9, // ldr x9, [x6]
+        BRK,
+    ];
+    let block = STACK_BASE + 0x1c0;
+    let init = |x3: u64| {
+        move |s: &mut CpuState| {
+            s.x[0] = 0x1122_3344_5566_7788;
+            s.x[3] = x3;
+            s.x[4] = block;
+            s.x[5] = block + 64;
+            s.x[6] = block - 8;
+        }
+    };
+    // Unaligned: the 64-byte block holding the address, not a byte more.
+    let (exits, s) = same(&words, init(block + 0x27), 100);
+    assert_eq!(exits, [Exit::Breakpoint(0)]);
+    assert_eq!((s.x[7], s.x[10]), (0, 0));
+    assert_eq!((s.x[8], s.x[9]), (s.x[0], s.x[0]));
+    // Not writable (the code) or not mapped: a fault at the DC ZVA, after
+    // the four stores.
+    for x3 in [CODE + 0x10, 0x5000_0000] {
+        let (exits, s) = same(&words, init(x3), 100);
+        assert!(
+            matches!(exits[..], [Exit::Fault { pc, .. }] if pc == CODE + 16),
+            "{exits:?}"
+        );
+        assert_eq!(s.retired, 4);
+    }
+}
+
+#[test]
+fn the_counters_see_the_instructions_retired_before_them() {
+    // On the counted clock a tick is 52 instructions (PLAN.md section 3):
+    // retired / 52 + skipped. 1037 + 3 = 1040 = 20 x 52 at the first MRS;
+    // 1040 + 1 + 51 = 1092 = 21 x 52 at the second.
+    let mut words = vec![0x9100_0442; 3]; // add x2, x2, #1
+    words.push(0xd53b_e020); // mrs x0, cntpct_el0
+    words.extend([0x9100_0442; 51]);
+    words.push(0xd53b_e041); // mrs x1, cntvct_el0
+    words.push(BRK);
+    let init = |s: &mut CpuState| {
+        s.retired = 1037;
+        s.clock = crate::Clock::Counted { skipped: 5 };
+    };
+    for budget in [10_000, 30] {
+        let (exits, s) = same(&words, init, budget);
+        assert_eq!(exits.last(), Some(&Exit::Breakpoint(0)));
+        assert_eq!((s.x[0], s.x[1], s.x[2]), (25, 26, 54));
+        assert_eq!(s.retired, 1037 + 56);
+    }
+}
+
+#[test]
 fn a_chained_loop_sees_code_another_core_rewrote() {
     // One core spins in a block chained to itself; another rewrites the
     // block's code and then maps a page elsewhere, which moves the

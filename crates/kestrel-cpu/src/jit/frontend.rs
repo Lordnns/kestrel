@@ -10,9 +10,9 @@
 //! Translated so far: all of data processing (immediate); data
 //! processing (register) except CRC32; branches, SVC and BRK; general-purpose loads and stores
 //! (single, pair, literal; every addressing mode); LDAR, STLR and the
-//! single-register exclusives; hints, barriers, cache maintenance, CLREX,
-//! and MRS/MSR of the system registers kept in `CpuState`. Floating
-//! point, NEON, DC ZVA, the counters, exclusive pairs, compare-and-swap
+//! single-register exclusives; hints, barriers, cache maintenance, DC
+//! ZVA, CLREX, MRS/MSR of the system registers kept in `CpuState`, and
+//! the counters. Floating point, NEON, exclusive pairs, compare-and-swap
 //! and the other atomics go to the interpreter.
 
 use super::ir::{BinOp, Block, Carry, Op, Reg, Term, Val, Width};
@@ -505,9 +505,10 @@ fn branch(b: &mut B, i: u32, pc: u64) -> Option<Next> {
 /// and the cache maintenance EL0 may do are nothing (IC IVAU too:
 /// rewritten code is caught by the blocks' own checks, `jit/mod.rs`); DMB
 /// and DSB are a full host fence, which other cores on other host threads
-/// rely on; CLREX, and MRS and MSR of the registers kept in `CpuState` and
-/// the constant ID registers. DC ZVA, the counters (which need the
-/// retired count) and everything else go to the interpreter.
+/// rely on; DC ZVA; CLREX, MRS and MSR of the registers kept in
+/// `CpuState` and the constant ID registers, and MRS of the counters
+/// (`Op::Counter`, which sees the retired count). Everything else goes to
+/// the interpreter.
 fn system(b: &mut B, i: u32) -> Option<()> {
     use crate::interp::system::*;
     let (l, op0, rt) = (bit(i, 21), field(i, 20, 19), field(i, 4, 0));
@@ -531,6 +532,13 @@ fn system(b: &mut B, i: u32) -> Option<()> {
             _ => None,
         },
         1 if !l && op1 == 3 && crn == 7 && op2 == 1 && matches!(crm, 5 | 10..=14) => Some(()),
+        // DC ZVA.
+        1 if !l && op1 == 3 && crn == 7 && op2 == 1 && crm == 4 => {
+            let v = b.xr(rt);
+            let addr = b.bin_k(BinOp::And, Width::W64, v, !63);
+            b.ops.push(Op::ZeroBlock { addr });
+            Some(())
+        }
         2 | 3 => {
             let reg = field(i, 19, 5);
             let sys = match reg {
@@ -551,6 +559,11 @@ fn system(b: &mut B, i: u32) -> Option<()> {
                     (CTR_EL0, _) => b.k(CTR_VALUE),
                     (DCZID_EL0, _) => b.k(DCZID_VALUE),
                     (CNTFRQ_EL0, _) => b.k(crate::state::COUNTER_HZ),
+                    (CNTPCT_EL0 | CNTVCT_EL0, _) => {
+                        let dst = b.val();
+                        b.ops.push(Op::Counter { dst });
+                        dst
+                    }
                     _ => return None,
                 };
                 b.set_xr(rt, v);

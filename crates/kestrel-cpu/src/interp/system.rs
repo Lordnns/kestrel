@@ -18,8 +18,8 @@ pub(crate) const TPIDRRO_EL0: u32 = sysreg(3, 3, 13, 0, 3);
 pub(crate) const CTR_EL0: u32 = sysreg(3, 3, 0, 0, 1);
 pub(crate) const DCZID_EL0: u32 = sysreg(3, 3, 0, 0, 7);
 pub(crate) const CNTFRQ_EL0: u32 = sysreg(3, 3, 14, 0, 0);
-const CNTPCT_EL0: u32 = sysreg(3, 3, 14, 0, 1);
-const CNTVCT_EL0: u32 = sysreg(3, 3, 14, 0, 2);
+pub(crate) const CNTPCT_EL0: u32 = sysreg(3, 3, 14, 0, 1);
+pub(crate) const CNTVCT_EL0: u32 = sysreg(3, 3, 14, 0, 2);
 
 /// CTR_EL0: 64-byte cache lines for the I and D caches.
 pub(crate) const CTR_VALUE: u64 = 0x8444_c004;

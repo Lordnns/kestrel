@@ -122,7 +122,11 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   arena directly; anything else (unmapped, not permitted, crossing a
   page, beyond the table) calls the `Memory` helper, which faults as the
   interpreter does, and a fault stops the block at the faulting
-  instruction.
+  instruction. DC ZVA walks the table once for its 64-byte block, which
+  an aligned block never leaves. Reading the counters (CNTPCT_EL0,
+  CNTVCT_EL0) first adds the instructions before it to
+  `CpuState::retired`, as `Interp` does, since the counted clock is
+  computed from that count.
 - **Chaining**: every block with at most 24 stack slots shares one frame,
   so a jump or branch with a known target can enter the next block's
   body directly, through a link cell (a data word, so code is never
