@@ -8,7 +8,8 @@
 // nvGpuChannelKickoff does (Ioctl2), which binds the 3D engine, releases a
 // host semaphore and a 3D report semaphore, and increments the channel's
 // syncpoint twice: what the GPU wrote and the fence it answers are printed.
-// The expected output is modelled in scripts/gen-expected.py.
+// A second list uploads a macro (MME) and calls it, and fills a constant
+// buffer. The expected output is modelled in scripts/gen-expected.py.
 #include "hb.h"
 
 #define CUR_PROCESS 0xffff8001u
@@ -436,6 +437,59 @@ void hb_main(const config_entry *config, u64 x1) {
     hex("  fence value: ", kick.fence_value);
     hex("  host semaphore: ", *(volatile u32 *)(heap + 0x800));
     hex("  report semaphore: ", *(volatile u32 *)(heap + 0x804));
+
+    // A macro (the MME's encoding, `gpu/mme.rs`): it sends its three
+    // parameters to SET_REPORT_SEMAPHORE_A-C and releases it with D = 1 << 28
+    // (1 shifted left by 28). Loaded at word 0x40 as macro 2, called with
+    // increment-once data: CALL_MME_MACRO(2) takes the first word,
+    // CALL_MME_DATA(2) the rest. Then a constant buffer of 12 bytes at
+    // +0x900, filled from offset 4.
+#define MADDI(as, d, a, v) (1u | (as) << 4 | (d) << 8 | (a) << 11 | (u32)(v) << 14)
+#define MALU(as, d, a) ((u32)(as) << 4 | (d) << 8 | (a) << 11)
+#define MSHL(as, a, b, sz) (4u | (as) << 4 | (a) << 11 | (b) << 14 | (sz) << 22)
+#define ONCE(m, n) (5u << 29 | (n) << 16 | (m) >> 2)
+    static const u32 mme[] = {
+        MADDI(2, 0, 0, 0x1000 | 0x1b00 >> 2), // method 0x1b00, increment 1
+        MALU(4, 0, 1),                        // send r1
+        MALU(0, 2, 0),                        // parm r2
+        MALU(4, 0, 2),                        // send r2
+        MALU(0, 3, 0),                        // parm r3
+        MALU(4, 0, 3),                        // send r3
+        MADDI(1, 4, 0, 1),                    // r4 = 1
+        MADDI(1, 5, 0, 28),                   // r5 = 28
+        MSHL(4, 5, 4, 1) | 1u << 7,           // send 1 << 28, exit
+        MALU(1, 0, 0),                        // the exit's delay slot
+    };
+    n = 0;
+    list[n++] = INC(0x114, 1);
+    list[n++] = 0x40;
+    list[n++] = NON(0x118, sizeof mme / 4);
+    for (u32 i = 0; i < sizeof mme / 4; i++) list[n++] = mme[i];
+    list[n++] = INC(0x11c, 2);
+    list[n++] = 2;
+    list[n++] = 0x40;
+    list[n++] = ONCE(0x3810, 3);
+    list[n++] = hi;
+    list[n++] = lo + 0x808;
+    list[n++] = 0x77;
+    list[n++] = INC(0x2380, 4); // SET_CONSTANT_BUFFER_SELECTOR_A-C, offset
+    list[n++] = 12;
+    list[n++] = hi;
+    list[n++] = lo + 0x900;
+    list[n++] = 4;
+    list[n++] = ONCE(0x238c, 3); // LOAD_CONSTANT_BUFFER_OFFSET, then data
+    list[n++] = 4;
+    list[n++] = 0xaaaa;
+    list[n++] = 0xbbbb;
+    entry = (u32)list_va | ((list_va >> 32 & 0xff) | (u64)n << 10) << 32;
+    kick.entries = 1;
+    kick.flags = 1u << 2;
+    kick.fence_id = kick.fence_value = 0;
+    hex("KickoffPb with a macro: ", ioctl2(ch, 0xc018481b, &kick, sizeof kick, &entry, sizeof entry));
+    hex("  fence value: ", kick.fence_value);
+    hex("  macro's report: ", *(volatile u32 *)(heap + 0x808));
+    hex("  constant buffer word 1: ", *(volatile u32 *)(heap + 0x904));
+    hex("  constant buffer word 2: ", *(volatile u32 *)(heap + 0x908));
 
     // nvGpuChannelClose, nvAddressSpaceClose, nvGpuExit, nvMapExit.
     notifier[4] = 0;
