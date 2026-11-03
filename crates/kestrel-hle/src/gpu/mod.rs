@@ -18,6 +18,7 @@
 //! the program makes them. Engines keep their method registers; methods
 //! that act are executed or stop the program, named.
 
+pub mod clear;
 pub mod methods;
 pub mod mme;
 mod run;
@@ -241,6 +242,9 @@ enum Step {
 pub struct Engine {
     pub class: u32,
     pub regs: Vec<u32>,
+    /// The 3D engine's MME shadow RAM: the method values its macros read,
+    /// kept as SET_MME_SHADOW_RAM_CONTROL says (`gpu/run.rs`).
+    pub shadow: Vec<u32>,
     pub mme_code: Vec<u32>,
     pub mme_code_pointer: u32,
     pub mme_start: Vec<u32>,
@@ -258,6 +262,7 @@ impl Engine {
         Engine {
             class,
             regs: vec![0; METHODS],
+            shadow: vec![0; METHODS],
             mme_code: Vec::new(),
             mme_code_pointer: 0,
             mme_start: Vec::new(),
@@ -269,6 +274,13 @@ impl Engine {
 
     pub fn reg(&self, offset: u32) -> u32 {
         self.regs[(offset / 4) as usize]
+    }
+
+    /// Set a register as the engine itself does (a method's side effect):
+    /// the value and its shadow.
+    pub fn set(&mut self, offset: u32, value: u32) {
+        self.regs[(offset / 4) as usize] = value;
+        self.shadow[(offset / 4) as usize] = value;
     }
 }
 

@@ -2716,6 +2716,108 @@ mod tests {
         let e = submit(&mut p, 0x300, &[inc(4, 0x300, 1), 2 | 1 << 10]).unwrap_err();
         assert!(e.contains("LAUNCH_DMA = 0x402: component remapping"), "{e}");
 
+        // A clear (`gpu/clear.rs`): colour target 0, 32x16 pixels of
+        // A8B8G8R8 (0xd5) at +0x4000, block linear in blocks 2 GOBs high;
+        // SET_CT_SELECT one target; the surface clip the whole target;
+        // the clear limited to scissor 0, x 4 to 12, y 9 to 11. Pixel
+        // (4, 9) is byte 16 of row 9: the second GOB, sector 1's second
+        // row, +0x230; (11, 10), byte 44, is in the second 32-byte column,
+        // sector 10, +0x34c; (3, 9), (12, 10) and (4, 11) are outside,
+        // +0x21c, +0x360 (sector 11), +0x270. The colour 0.0, 0.25, 0.5, 1.0
+        // packs as 0xff804000.
+        let f = |v: f32| v.to_bits();
+        let list = [
+            inc(0, 0x800, 9),
+            hi,
+            lo + 0x4000,
+            32,
+            16,
+            0xd5,
+            1 << 4,
+            1,
+            0,
+            0,
+            imm(0, 0x121c, 1),
+            inc(0, 0xff4, 2),
+            32 << 16,
+            16 << 16,
+            imm(0, 0x10f8, 1 << 8),
+            inc(0, 0xe00, 3),
+            1,
+            4 | 12 << 16,
+            9 | 11 << 16,
+            inc(0, 0xd80, 4),
+            f(0.0),
+            f(0.25),
+            f(0.5),
+            f(1.0),
+            imm(0, 0x19d0, 0x3c),
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        let cleared = 0xff80_4000;
+        assert_eq!(
+            [0x4230, 0x434c, 0x421c, 0x4360, 0x4270].map(|a| read(&p, a)),
+            [cleared, cleared, 0, 0, 0]
+        );
+        // The MME shadow RAM: a green clear value written in PASSTHROUGH
+        // (2) is used, then REPLAY (3) puts back the one recorded; a clear
+        // of green alone keeps the other channels.
+        let list = [
+            imm(0, 0x124, 2),
+            inc(0, 0xd84, 1),
+            f(1.0),
+            imm(0, 0x19d0, 1 << 3),
+            imm(0, 0x124, 3),
+            inc(0, 0xd84, 1),
+            0,
+            imm(0, 0x124, 1),
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!(read(&p, 0x4230), 0xff80_ff00);
+        let e = &p.services.nv.gpu.channels[&ch].engine.engines[&0xb197];
+        assert_eq!((e.reg(0xd84), e.shadow[0xd84 / 4]), (f(0.25), f(0.25)));
+        // Target 1, R5G6B5 (0xe8), pitch linear (64 bytes a row, so 32
+        // pixels) at +0x5000, 4 rows: SET_CT_SELECT lists targets 0 and 1,
+        // MRT_SELECT 1; no scissor; red and blue only.
+        let list = [
+            inc(0, 0x840, 9),
+            hi,
+            lo + 0x5000,
+            64,
+            4,
+            0xe8,
+            1 << 12,
+            1,
+            0,
+            0,
+            inc(0, 0x121c, 1),
+            2 | 1 << 7,
+            imm(0, 0x10f8, 0),
+            inc(0, 0xd80, 3),
+            f(1.0),
+            f(1.0),
+            f(1.0),
+            imm(0, 0x19d0, 1 << 2 | 1 << 4 | 1 << 6),
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!(
+            [0x5000, 0x5000 + 3 * 64 + 60, 0x5000 + 4 * 64].map(|a| read(&p, a)),
+            [0xf81f_f81f, 0xf81f_f81f, 0]
+        );
+        // A depth clear; a colour format kestrel does not write.
+        let e = submit(&mut p, 0x300, &[imm(0, 0x19d0, 1)]).unwrap_err();
+        assert!(
+            e.contains("CLEAR_SURFACE = 0x1: a depth or stencil clear"),
+            "{e}"
+        );
+        let e = submit(
+            &mut p,
+            0x300,
+            &[inc(0, 0x810, 1), 0xc1, imm(0, 0x19d0, 0x3c)],
+        )
+        .unwrap_err();
+        assert!(e.contains("colour format 0xc1"), "{e}");
+
         // What does not run yet stops, named: a macro whose start was
         // never loaded; a method on a subchannel with no object; one
         // NVIDIA's header does not name; a semaphore acquire nothing would
