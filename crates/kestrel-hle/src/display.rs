@@ -54,15 +54,43 @@ const GOB_SIZE: usize = GOB_WIDTH * GOB_HEIGHT;
 /// bytes wide (a multiple of 64) with blocks 2^`block_height_log2` GOBs
 /// high.
 pub fn block_linear_offset(x: usize, y: usize, pitch: usize, block_height_log2: u32) -> usize {
-    let gobs_per_block = 1usize << block_height_log2;
-    let block_rows = GOB_HEIGHT * gobs_per_block;
-    let blocks_per_row = pitch / GOB_WIDTH;
-    let block = (y / block_rows) * blocks_per_row + x / GOB_WIDTH;
-    let gob = (y % block_rows) / GOB_HEIGHT;
-    let (gx, gy) = (x % GOB_WIDTH, y % GOB_HEIGHT);
-    let sector = (gx / 32) * 8 + (gy / 2) * 2 + (gx % 32) / 16;
-    let in_gob = sector * 32 + (gy % 2) * 16 + gx % 16;
-    (block * gobs_per_block + gob) * GOB_SIZE + in_gob
+    let blocks = Blocks {
+        width: pitch,
+        height: 0,
+        log2: [0, block_height_log2, 0],
+    };
+    blocks.offset(x, y, 0)
+}
+
+/// A block-linear surface in three dimensions, as envytools gives it in
+/// full ("Blocklinear surfaces"): `width` bytes by `height` rows (the
+/// rows of one slice), blocks 2^`log2[0]` GOBs wide, 2^`log2[1]` high and
+/// 2^`log2[2]` deep (a GOB is one slice deep). Blocks are stored across,
+/// then down, then back through the slices; a block's GOBs across, then
+/// down, then back. The surface is aligned up to whole blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Blocks {
+    pub width: usize,
+    pub height: usize,
+    pub log2: [u32; 3],
+}
+
+impl Blocks {
+    /// The offset of byte `x` of row `y` of slice `z`.
+    pub fn offset(&self, x: usize, y: usize, z: usize) -> usize {
+        let [w, h, d] = self.log2;
+        let (bx, by, bz) = (GOB_WIDTH << w, GOB_HEIGHT << h, 1usize << d);
+        let block_bytes = GOB_SIZE << (w + h + d);
+        let across = self.width.div_ceil(bx);
+        let down = self.height.div_ceil(by);
+        let block = x / bx + (y / by) * across + (z / bz) * across * down;
+        let (xb, yb, zb) = (x % bx, y % by, z % bz);
+        let gob = xb / GOB_WIDTH + ((yb / GOB_HEIGHT) << w) + (zb << (w + h));
+        let (gx, gy) = (xb % GOB_WIDTH, yb % GOB_HEIGHT);
+        let sector = (gx / 32) * 8 + (gy / 2) * 2 + (gx % 32) / 16;
+        let in_gob = sector * 32 + (gy % 2) * 16 + gx % 16;
+        block * block_bytes + gob * GOB_SIZE + in_gob
+    }
 }
 
 /// The bytes one pixel of `format` takes.
@@ -176,6 +204,31 @@ mod tests {
             }
         }
         assert_eq!(block_linear_offset(63, 7, 64, 0), 511);
+    }
+
+    #[test]
+    fn blocks_in_three_dimensions_follow_envytools_order() {
+        // Blocks 2 GOBs wide, 2 high, 2 deep (8 GOBs, 4 KiB) on a surface
+        // 200 bytes by 20 rows: 2 blocks across (128 bytes each), 2 down
+        // (16 rows each), 4 a slice of blocks.
+        let b = Blocks {
+            width: 200,
+            height: 20,
+            log2: [1, 1, 1],
+        };
+        let block = 8 * 512;
+        // Inside a block, GOBs go across, then down, then back.
+        assert_eq!(b.offset(64, 0, 0), 512);
+        assert_eq!(b.offset(0, 8, 0), 2 * 512);
+        assert_eq!(b.offset(0, 0, 1), 4 * 512);
+        assert_eq!(b.offset(64, 8, 1), 7 * 512);
+        // Blocks go across, then down, then back.
+        assert_eq!(b.offset(128, 0, 0), block);
+        assert_eq!(b.offset(0, 16, 0), 2 * block);
+        assert_eq!(b.offset(0, 0, 2), 4 * block);
+        // Inside the last block: the second GOB slice, row 1, byte 2.
+        assert_eq!(b.offset(130, 17, 3) - b.offset(128, 16, 2), 4 * 512 + 18);
+        assert_eq!(b.offset(128, 16, 2), 7 * block);
     }
 
     #[test]
