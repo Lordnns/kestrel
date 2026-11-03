@@ -2527,12 +2527,95 @@ mod tests {
         assert_eq!((e.mme_start.len(), e.mme_start[3]), (4, 0x40));
         assert_eq!(state.methods_run, 24);
 
-        // What does not run yet stops, named: a macro call; a method on a
-        // subchannel with no object; one NVIDIA's header does not name; a
-        // semaphore acquire nothing would release; a GPU page fault.
-        let e = submit(&mut p, 0x100, &[inc(0, 0x3808, 1), 7]).unwrap_err();
+        // A macro (`gpu/mme.rs`'s encoding): it takes the report
+        // semaphore's address and payload as parameters, sends them to
+        // SET_REPORT_SEMAPHORE_A-C and releases it (D = 1 << 28, built as 1
+        // shifted left by 28). Loaded at word 0x40 as macro 2, then called
+        // with increment-once data (SEC_OP 5): CALL_MME_MACRO(2) gets the
+        // first word, CALL_MME_DATA(2) the others.
+        let addi =
+            |assign: u32, dst: u32, a: u32, v: u32| 1 | assign << 4 | dst << 8 | a << 11 | v << 14;
+        let alu = |assign: u32, dst: u32, a: u32| assign << 4 | dst << 8 | a << 11;
+        let shl_reg = |assign: u32, a: u32, b: u32, size: u32| {
+            4 | assign << 4 | a << 11 | b << 14 | size << 22
+        };
+        let mme = [
+            addi(2, 0, 0, 0x1000 | 0x1b00 >> 2), // method 0x1b00, increment 1
+            alu(4, 0, 1),                        // send r1 (address high)
+            alu(0, 2, 0),                        // parm r2 (address low)
+            alu(4, 0, 2),                        // send r2
+            alu(0, 3, 0),                        // parm r3 (payload)
+            alu(4, 0, 3),                        // send r3
+            addi(1, 4, 0, 1),                    // r4 = 1
+            addi(1, 5, 0, 28),                   // r5 = 28
+            shl_reg(4, 5, 4, 1) | 1 << 7,        // send 1 << 28, exit
+            alu(1, 0, 0),                        // the exit's delay slot
+        ];
+        let once = |sub: u32, m: u32, n: u32| 5 << 29 | n << 16 | sub << 13 | m >> 2;
+        let mut list = vec![inc(0, 0x114, 1), 0x40, non(0, 0x118, mme.len() as u32)];
+        list.extend(mme);
+        list.extend([
+            inc(0, 0x11c, 2),
+            2,
+            0x40,
+            once(0, 0x3810, 3),
+            hi,
+            lo + 0x808,
+            0x77,
+        ]);
+        assert_eq!(submit(&mut p, 0x100, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!(read(&p, 0x808), 0x77);
+
+        // A constant buffer of 12 bytes at +0x900 (SELECTOR_A-C), filled
+        // from offset 4 by words to LOAD_CONSTANT_BUFFER(0), the offset
+        // advancing; bound to slot 3 of stage 4; the firmware's masked
+        // register write (SET_FALCON04, with value and mask in scratch 1
+        // and 2) and its completion in scratch 0; the version checks deko3d
+        // makes; a cache invalidation and PIPE_NOP, which do nothing.
+        let list = [
+            inc(0, 0x2380, 4),
+            12,
+            hi,
+            lo + 0x900,
+            4,
+            once(0, 0x238c, 3),
+            4,
+            0xaaaa,
+            0xbbbb,
+            imm(0, 0x2410 + 4 * 32, 3 << 4 | 1),
+            inc(0, 0x3400, 3),
+            0,
+            0x0f0f,
+            0x00ff,
+            inc(0, 0x2310, 1),
+            0x41_8800,
+            inc(0, 0x16a8, 1),
+            0x3_0003,
+            inc(0, 0x1794, 1),
+            0x2_0002,
+            imm(0, 0x1288, 0),
+            imm(0, 0x1a2c, 0),
+        ];
+        assert_eq!(submit(&mut p, 0x200, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!((read(&p, 0x904), read(&p, 0x908)), (0xaaaa, 0xbbbb));
+        let state = &p.services.nv.gpu.channels[&ch].engine;
+        let e = &state.engines[&0xb197];
+        assert_eq!(e.constant_buffers[&(4, 3)], (va + 0x900, 12));
+        assert_eq!((e.reg(0x238c), e.reg(0x3400)), (12, 1));
+        assert_eq!(state.hw_regs[&0x41_8800], 0x0f);
+        // Past the buffer's end; a version deko3d does not use.
+        let e = submit(&mut p, 0x200, &[inc(0, 0x2390, 1), 1]).unwrap_err();
+        assert!(e.contains("LOAD_CONSTANT_BUFFER(0) (0x2390) = 0x1"), "{e}");
+        let e = submit(&mut p, 0x200, &[inc(0, 0x16a8, 1), 0x4_0004]).unwrap_err();
+        assert!(e.contains("CHECK_SPH_VERSION (0x16a8) = 0x40004"), "{e}");
+
+        // What does not run yet stops, named: a macro whose start was
+        // never loaded; a method on a subchannel with no object; one
+        // NVIDIA's header does not name; a semaphore acquire nothing would
+        // release; a GPU page fault.
+        let e = submit(&mut p, 0x200, &[inc(0, 0x3848, 1), 7]).unwrap_err();
         assert!(
-            e.contains("GPU 3D method CALL_MME_MACRO(1) (0x3808) = 0x7"),
+            e.contains("GPU 3D macro 9 called, whose start address was never loaded"),
             "{e}"
         );
         let e = submit(&mut p, 0x100, &[inc(3, 0x2c8, 1), 1]).unwrap_err();
