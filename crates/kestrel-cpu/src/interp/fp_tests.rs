@@ -5,6 +5,9 @@
 //! in Python (`struct`, `math.fma`, `fractions`), or, for NaN handling,
 //! flush-to-zero and the estimate instructions, worked by hand from the Arm
 //! pseudocode as each comment says. None comes from running kestrel.
+//!
+//! Where the recompiler is built, every instruction also runs on it in
+//! both calling conventions, which must end in the interpreter's state.
 
 use super::tests::setup;
 use super::Interpreter;
@@ -22,8 +25,22 @@ fn exec(insn: u32, fpcr: u64, init: impl FnOnce(&mut CpuState)) -> CpuState {
     let (mut s, m) = setup(&[insn, BRK]);
     s.fpcr = fpcr;
     init(&mut s);
+    #[cfg(jit_host)]
+    let start = s.clone();
     let exit = Interpreter::new().run(&mut s, &m, 10);
     assert_eq!(exit, Exit::Breakpoint(0), "{insn:08x}");
+    #[cfg(jit_host)]
+    for abi in [crate::jit::x64::Abi::SysV, crate::jit::x64::Abi::Win64] {
+        let (mut j, m) = setup(&[insn, BRK]);
+        j.clone_from(&start);
+        let exit = crate::jit::Jit::with_abi(abi).unwrap().run(&mut j, &m, 10);
+        assert_eq!(exit, Exit::Breakpoint(0), "{insn:08x} on {abi:?}");
+        assert_eq!(
+            (j.x, j.v, j.flags, j.fpcr, j.fpsr, j.pc, j.retired),
+            (s.x, s.v, s.flags, s.fpcr, s.fpsr, s.pc, s.retired),
+            "{insn:08x} on {abi:?}"
+        );
+    }
     s
 }
 
