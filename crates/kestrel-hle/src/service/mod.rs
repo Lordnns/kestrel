@@ -933,6 +933,12 @@ mod tests {
         }
         let e = send(&mut p, h, &get(b"nosuch")).unwrap_err();
         assert!(e.starts_with("unimplemented: service \"nosuch\""), "{e}");
+        // The shared font is Nintendo's data: a clear stop.
+        for font in [&b"pl:u"[..], b"pl:s"] {
+            let e = send(&mut p, h, &get(font)).unwrap_err();
+            assert!(e.contains("shared system font"), "{e}");
+            assert!(e.contains("kestrel does not include"), "{e}");
+        }
         // A session to the test service, used through its handle.
         assert_eq!(send(&mut p, h, &get(b"test")), Ok(0));
         let (rc, moved, _) = reply(&p, true);

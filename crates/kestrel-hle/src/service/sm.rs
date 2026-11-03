@@ -18,6 +18,14 @@ pub mod result {
 /// then vi:s, then vi:u.
 const NOT_ALLOWED: &[&str] = &["vi:m", "vi:s"];
 
+/// The shared font service (Switchbrew, "Shared Database services"): it
+/// hands programs the console's system fonts, which are Nintendo's data.
+/// kestrel does not include them and does not make stand-ins (the
+/// owner's decision, 2026-11-03), so a program asking for it stops with
+/// a message saying why. Loading a font file the user dumped from their
+/// own console comes later.
+const SHARED_FONT: &[&str] = &["pl:u", "pl:s"];
+
 impl Process {
     /// RegisterClient (0) takes the process ID descriptor; GetServiceHandle
     /// (1) takes an 8-byte name and hands out a session. Asking before
@@ -46,6 +54,13 @@ impl Process {
                     Some(&(_, interface)) => Ok(Out::object(interface)),
                     None if NOT_ALLOWED.contains(&name.as_str()) => {
                         Ok(Out::error(result::NOT_ALLOWED))
+                    }
+                    None if SHARED_FONT.contains(&name.as_str()) => {
+                        Err(IpcError::Unimplemented(format!(
+                            "service \"{name}\", the console's shared system font: it is \
+                             Nintendo's data, which kestrel does not include (loading a font \
+                             file dumped from your own console comes later)"
+                        )))
                     }
                     None => Err(IpcError::Unimplemented(format!("service \"{name}\""))),
                 }

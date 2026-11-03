@@ -1302,6 +1302,18 @@ and run headless with `--save-frame` (2026-11-03):
 | `graphics/shared_font` | pl:u's shared system font, Nintendo's font data | not run: kestrel must not ship or invent the font; waits for the owner's decision |
 | `graphics/sdl2/*`, `graphics/opengl/*`, `graphics/deko3d/*` | the GPU itself (nvhost devices, channels, command streams, shaders) | phase 5B |
 
+The owner's decisions (2026-11-03):
+- `graphics/shared_font`: pl:u's shared font is Nintendo's data; kestrel
+  does not ship it or make a stand-in. sm: now stops on pl:u and pl:s
+  with a message saying so (`service/sm.rs`); loading a font file the
+  user dumped from their own console comes later.
+- `graphics/simplegfx_moviemaker` (sockets, grc's video recording) is
+  not part of 5A.
+- Vulkan presentation uses `ash` (MIT or Apache 2.0), the new
+  dependency PLAN.md section 5 asks about.
+- Everything of 5A, the GPU's nvhost devices included, goes in one pull
+  request.
+
 How the two are checked (`scripts/check-examples.py`, independent of
 kestrel):
 - vt52-demo, pixel for pixel, against a model of libnx 4.12.0's console
@@ -1648,13 +1660,10 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      `build-examples.sh`, `run-examples.sh` and `check-examples.py` run
      and check them with the other four (6/6, single-threaded and
      threaded).
-   - Waiting for the owner: (a) `graphics/shared_font` needs pl:u's
-     shared font, Nintendo's data, which kestrel must not ship or make
-     up (stop with a clear message, or load a font file the owner
-     dumped); (b) `graphics/simplegfx_moviemaker` needs sockets (bsd:u)
-     and grc's video recording, not display features (leave it out of
-     5A, or add them); (c) Vulkan presentation needs a new dependency
-     (PLAN.md section 5).
+   - Decided by the owner (2026-11-03, "Phase 5 notes"): shared_font
+     stops with a clear message (done: sm: on pl:u and pl:s), a font
+     file the user dumped comes later; moviemaker is not part of 5A;
+     Vulkan presentation with `ash`; all of 5A in one pull request.
    - Next, in this order, each with the service steps below (sources,
      IPC unit tests, an `hb<service>.c` program with a model, checks):
      1. Done (2026-11-03): `/dev/nvhost-ctrl`'s syncpoints and events
