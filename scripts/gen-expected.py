@@ -1407,6 +1407,130 @@ def hbnvctrl():
     return "".join(line + "\n" for line in out)
 
 
+def hbnvgpu():
+    """guest/src/nro/hbnvgpu.c: the GPU's nvdrv devices, sent as libnx's
+    nvGpuInit, nvAddressSpace*, nvMapCreate and nvGpuChannelCreate send
+    them. Switchbrew ("NV services"): GET_CHARACTERISTICS answers the
+    GM20B's description (arch 0x120, big page size 0x20000, available
+    0x30000, 40 address bits, 3D class 0xB197, GPFIFO class 0xB06F, chip
+    "gm20b") and its buffer size as 0xA0; GET_VA_REGIONS answers its
+    buffer size as two regions (48); NvError 4 is BadParameter; a channel
+    takes one object context. libnx's nvidia/ioctl.h: the ZCULL info a
+    console answers (32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16), NvError
+    13 AlreadyAllocated. Kestrel's documented choices (docs/ROADMAP.md,
+    "Phase 5 notes"): impl 0xB; ZCULL context size 0; TPC mask 0b11 for
+    one GPC of two TPCs; PTIMER from the system tick; small pages from
+    16 MiB to 16 GiB, big pages from there to 1 TiB; first fit, lowest
+    address, aligned to the page size or the alignment asked; a fixed
+    mapping inside a reservation and over no other mapping; channel
+    syncpoints from 1, at value 0; object ID 1; descriptors count from
+    1."""
+    ok = hex64(0)
+    bad = hex64(4)
+    small_start, big_start, va_end = 0x100_0000, 0x4_0000_0000, 1 << 40
+    big = 0x20000
+    out = [
+        "homebrew GPU devices test",
+        f"sm: register: {ok}",
+        f"SetHeapSize: {ok}",
+        f"CreateTransferMemory: {ok}",
+        f"nvdrv: {ok}",
+        f"Initialize: {ok}",
+        f"  error: {ok}",
+        f"SetAruid: {ok}",
+        f"  error: {ok}",
+    ]
+
+    def opened(path, fd):
+        out.extend([path, f"  open: {ok}", f"  fd: {hex64(fd)}", f"  error: {ok}"])
+
+    opened("/dev/nvmap", 1)
+    out += [f"NVMAP_IOC_CREATE: {ok}", f"NVMAP_IOC_ALLOC: {ok}"]
+    opened("/dev/nvhost-ctrl-gpu", 2)
+    out += [
+        f"GET_CHARACTERISTICS: {ok}",
+        f"  size: {hex64(0xA0)}",
+        f"  arch: {hex64(0x120)}",
+        f"  impl: {hex64(0xB)}",
+        f"  big page size: {hex64(big)}",
+        f"  available big page sizes: {hex64(0x30000)}",
+        "  GPU address bits: 40",
+        f"  3D class: {hex64(0xB197)}",
+        f"  GPFIFO class: {hex64(0xB06F)}",
+        "  chip: gm20b",
+        f"ZCULL_GET_CTX_SIZE: {ok}",
+        f"  size: {ok}",
+        f"ZCULL_GET_INFO: {ok}",
+    ]
+    out += [f"  {v}" for v in [32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16]]
+    out += [
+        f"GET_TPC_MASKS: {ok}",
+        f"  GPC 0: {hex64(0b11)}",
+        f"GET_GPU_TIME: {ok}",
+        f"  running: {hex64(1)}",
+    ]
+    opened("/dev/nvhost-as-gpu", 3)
+    out += [
+        f"InitializeEx: {ok}",
+        f"GET_VA_REGIONS: {ok}",
+        f"  size: {hex64(48)}",
+        f"  region: {hex64(small_start)}",
+        f"    page size: {hex64(0x1000)}",
+        f"    pages: {hex64((big_start - small_start) // 0x1000)}",
+        f"  region: {hex64(big_start)}",
+        f"    page size: {hex64(big)}",
+        f"    pages: {hex64((va_end - big_start) // big)}",
+    ]
+    # The code segment: four big pages at the start of the big region; two
+    # small pages at the start of the small region.
+    segment = big_start
+    out += [f"ALLOC_SPACE: {ok}", f"  at: {hex64(segment)}"]
+    out += [f"ALLOC_SPACE small pages: {ok}", f"  at: {hex64(small_start)}"]
+    # The whole object (0x30000) on big pages: after the segment.
+    pitch = segment + 4 * big
+    out += [f"MAP_BUFFER_EX: {ok}", f"  at: {hex64(pitch)}"]
+    out += [f"MAP_BUFFER_EX fixed: {ok}", f"  at: {hex64(segment + big)}"]
+    out += [
+        f"MAP_BUFFER_EX over it: {bad}",
+        f"MAP_BUFFER_EX outside: {bad}",
+        f"MAP_BUFFER_EX modify: {ok}",
+        f"UNMAP_BUFFER: {ok}",
+        f"UNMAP_BUFFER again: {bad}",
+    ]
+    opened("/dev/nvhost-gpu", 4)
+    out += [
+        f"SET_NVMAP_FD: {ok}",
+        f"BIND_CHANNEL: {ok}",
+        f"ALLOC_GPFIFO_EX2: {ok}",
+        f"  syncpoint: {hex64(1)}",
+        f"  value: {ok}",
+        f"ALLOC_OBJ_CTX: {ok}",
+        f"  id: {hex64(1)}",
+        f"ALLOC_OBJ_CTX again: {hex64(13)}",
+        f"QueryEvent: {ok}",
+        f"  error: {ok}",
+        f"  event handed out: {hex64(1)}",
+        f"SET_ERROR_NOTIFIER: {ok}",
+        f"SET_PRIORITY: {ok}",
+        f"SET_ERROR_NOTIFIER off: {ok}",
+        f"close the error event: {ok}",
+        f"Close /dev/nvhost-gpu: {ok}",
+        f"  error: {ok}",
+        f"FREE_SPACE: {ok}",
+        f"Close /dev/nvhost-as-gpu: {ok}",
+        f"  error: {ok}",
+        f"Close /dev/nvhost-ctrl-gpu: {ok}",
+        f"  error: {ok}",
+        f"NVMAP_IOC_FREE: {ok}",
+        f"Close /dev/nvmap: {ok}",
+        f"  error: {ok}",
+        f"close nvdrv: {ok}",
+        f"close the transfer memory: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -1431,6 +1555,7 @@ PROGRAMS = {
     "hbinput": hbinput,
     "hbdisplay": hbdisplay,
     "hbnvctrl": hbnvctrl,
+    "hbnvgpu": hbnvgpu,
 }
 
 

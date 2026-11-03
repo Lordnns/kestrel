@@ -210,6 +210,10 @@ pub const CASES: &[Case] = &[
         "hbnvctrl",
         "homebrew NRO: nvhost-ctrl syncpoints and events"
     ),
+    homebrew!(
+        "hbnvgpu",
+        "homebrew NRO: the GPU's devices, address space, channel"
+    ),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.
