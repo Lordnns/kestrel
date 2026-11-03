@@ -23,6 +23,8 @@ pub mod error {
     pub const NOT_INITIALIZED: u32 = 3;
     pub const BAD_PARAMETER: u32 = 4;
     pub const TIMEOUT: u32 = 5;
+    pub const INSUFFICIENT_MEMORY: u32 = 6;
+    pub const INVALID_STATE: u32 = 8;
     /// libnx's nvConvertError names 13 AlreadyAllocated.
     pub const ALREADY_ALLOCATED: u32 = 13;
 }
@@ -116,6 +118,10 @@ mod nvmap {
 pub enum Device {
     Nvmap,
     NvhostCtrl,
+    /// The GPU's devices (`nvgpu.rs`).
+    NvhostCtrlGpu,
+    NvhostAsGpu,
+    NvhostGpu,
 }
 
 impl Device {
@@ -131,6 +137,9 @@ impl Device {
 const DEVICES: &[(&str, Device)] = &[
     ("/dev/nvmap", Device::Nvmap),
     ("/dev/nvhost-ctrl", Device::NvhostCtrl),
+    ("/dev/nvhost-ctrl-gpu", Device::NvhostCtrlGpu),
+    ("/dev/nvhost-as-gpu", Device::NvhostAsGpu),
+    ("/dev/nvhost-gpu", Device::NvhostGpu),
 ];
 
 /// An nvmap object: memory registered with the driver.
@@ -161,6 +170,8 @@ pub struct State {
     pub syncpts: Vec<Syncpoint>,
     /// Syncpoint event slots, grown as they are allocated.
     pub events: Vec<Option<SyncptEvent>>,
+    /// The GPU's address spaces and channels (`nvgpu.rs`).
+    pub gpu: super::nvgpu::Gpu,
 }
 
 impl State {
@@ -206,16 +217,20 @@ impl State {
         self.maps.get_mut((id as usize).checked_sub(1)?)?.as_mut()
     }
 
-    fn file(&self, fd: u32) -> Option<Device> {
+    pub(super) fn file(&self, fd: u32) -> Option<Device> {
         *self.files.get((fd as usize).checked_sub(1)?)?
     }
 }
 
-fn u32_at(b: &[u8], at: usize) -> u32 {
+pub(super) fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().expect("four bytes"))
 }
 
-fn put_u32(b: &mut [u8], at: usize, v: u32) {
+pub(super) fn u64_at(b: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(b[at..at + 8].try_into().expect("eight bytes"))
+}
+
+pub(super) fn put_u32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
 
@@ -256,9 +271,22 @@ impl Process {
                 });
                 nv_state.files[i] = Some(device);
                 let fd = i as u32 + 1;
+                // The GPU's devices keep state per descriptor.
+                match device {
+                    Device::NvhostAsGpu => {
+                        nv_state.gpu.address_spaces.insert(fd, Default::default());
+                    }
+                    Device::NvhostGpu => {
+                        nv_state.gpu.channels.insert(fd, Default::default());
+                    }
+                    _ => {}
+                }
                 Ok(Out::ok([fd, error::SUCCESS].map(u32::to_le_bytes).concat()))
             }
-            1 => self.nv_ioctl(call),
+            1 => self.nv_ioctl(call, false),
+            // Ioctl2: Ioctl with a second input buffer (Switchbrew, "NV
+            // services"), as libnx's nvIoctl2 sends SUBMIT_GPFIFO2.
+            11 => self.nv_ioctl(call, true),
             // Close: a descriptor.
             2 => {
                 let fd = u32::from_le_bytes(call.arg(0)?);
@@ -270,6 +298,15 @@ impl Process {
                 {
                     Some(f @ Some(_)) => {
                         *f = None;
+                        let gpu = &mut self.services.nv.gpu;
+                        gpu.address_spaces.remove(&fd);
+                        if gpu.channels.remove(&fd).is_some() {
+                            for space in gpu.address_spaces.values_mut() {
+                                if space.channel == Some(fd) {
+                                    space.channel = None;
+                                }
+                            }
+                        }
                         Ok(nv(error::SUCCESS))
                     }
                     _ => Ok(nv(error::BAD_PARAMETER)),
@@ -317,6 +354,16 @@ impl Process {
                             Err(code) => Ok(Out::error(code as u32)),
                         }
                     }
+                    Some(Device::NvhostGpu) => match self.channel_event(fd, id) {
+                        Some(Ok(h)) => Ok(Out {
+                            copy_handles: vec![h],
+                            ..nv(error::SUCCESS)
+                        }),
+                        Some(Err(code)) => Ok(Out::error(code as u32)),
+                        None => Err(IpcError::Unimplemented(format!(
+                            "nvdrv QueryEvent {id:#x} on /dev/nvhost-gpu"
+                        ))),
+                    },
                     Some(device) => Err(IpcError::Unimplemented(format!(
                         "nvdrv QueryEvent {id:#x} on {}",
                         device.path()
@@ -334,8 +381,9 @@ impl Process {
 
     /// Ioctl: a descriptor and an ioctl number, the ioctl's input in
     /// auto-select input buffer 0 and its output in auto-select output
-    /// buffer 0, then an NvError.
-    fn nv_ioctl(&mut self, call: &Call) -> Result<Out, IpcError> {
+    /// buffer 0, then an NvError. Ioctl2 (`extra`) also takes auto-select
+    /// input buffer 1.
+    fn nv_ioctl(&mut self, call: &Call, extra: bool) -> Result<Out, IpcError> {
         let fd = u32::from_le_bytes(call.arg(0)?);
         let code = u32::from_le_bytes(call.arg(4)?);
         let Some(device) = self.services.nv.file(fd) else {
@@ -356,9 +404,17 @@ impl Process {
             }
             arg.copy_from_slice(&input[..size]);
         }
+        let extra = if extra {
+            Some(self.read_auto(call.req, 1)?)
+        } else {
+            None
+        };
         let err = match device {
             Device::Nvmap => self.nvmap_ioctl(code, &mut arg)?,
             Device::NvhostCtrl => self.nvhost_ctrl_ioctl(code, &mut arg)?,
+            Device::NvhostCtrlGpu => self.nvhost_ctrl_gpu_ioctl(code, &mut arg)?,
+            Device::NvhostAsGpu => self.nvhost_as_gpu_ioctl(fd, code, &mut arg)?,
+            Device::NvhostGpu => self.nvhost_gpu_ioctl(fd, code, &mut arg, extra.as_deref())?,
         };
         if code & 1 << 31 != 0 && size > 0 {
             if Self::auto_room(call.req, 0)? < size as u64 {

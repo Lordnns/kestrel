@@ -93,6 +93,17 @@ impl Process {
             (SelfController, 11 | 12 | 16) => call.u8(0).and_then(|_| ok()),
             // SetFocusHandlingMode: three u8 flags.
             (SelfController, 13) => call.arg::<3>(0).and_then(|_| ok()),
+            // LockExit and UnlockExit: no input or output ("Applet Manager
+            // services"). They hold off the HOME menu's close; kestrel has
+            // no HOME menu, so it only records the lock.
+            (SelfController, 1) => {
+                self.services.exit_locked = true;
+                ok()
+            }
+            (SelfController, 2) => {
+                self.services.exit_locked = false;
+                ok()
+            }
             // CreateManagedDisplayLayer: the layer the program then opens
             // with vi's OpenLayer.
             (SelfController, 40) => {

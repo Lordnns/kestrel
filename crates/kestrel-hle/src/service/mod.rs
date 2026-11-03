@@ -20,6 +20,7 @@ pub mod fatal;
 pub mod fs;
 pub mod hid;
 pub mod nv;
+pub mod nvgpu;
 pub mod psm;
 pub mod set;
 pub mod sm;
@@ -374,6 +375,8 @@ pub struct State {
     pub applet_message_event: Option<ObjectId>,
     /// am: the event signalled when the suspended tick count changes.
     pub suspended_tick_event: Option<ObjectId>,
+    /// am: LockExit came without an UnlockExit after it.
+    pub exit_locked: bool,
     pub hid: hid::State,
     /// time: the shared memory the clocks are read from.
     pub time_shared_memory: Option<ObjectId>,
@@ -1371,6 +1374,11 @@ mod tests {
             (0, vec![], vi::LAYER_ID.to_le_bytes().to_vec())
         );
         assert!(p.services.vi.layer_made);
+        // LockExit and UnlockExit.
+        assert_eq!(call(&mut p, selfc, 1, &[], 0).0, 0);
+        assert!(p.services.exit_locked);
+        assert_eq!(call(&mut p, selfc, 2, &[], 0).0, 0);
+        assert!(!p.services.exit_locked);
         // The events are readable events that nothing signals; asking
         // again names the same event.
         let (_, again, _) = call(&mut p, state, 0, &[], 0);
@@ -1740,9 +1748,9 @@ mod tests {
         assert_eq!(u32s(&answer(&p, false, 4).3), vec![0]);
         assert_eq!(open_dev(&mut p, b"/dev/nvmap"), Ok(vec![1, 0]));
         assert_eq!(open_dev(&mut p, b"/dev/nvhost-ctrl"), Ok(vec![2, 0]));
-        let e = open_dev(&mut p, b"/dev/nvhost-gpu").unwrap_err();
+        let e = open_dev(&mut p, b"/dev/nvhost-vic").unwrap_err();
         assert!(
-            e.contains("unimplemented: nvdrv device \"/dev/nvhost-gpu\""),
+            e.contains("unimplemented: nvdrv device \"/dev/nvhost-vic\""),
             "{e}"
         );
 
@@ -2039,6 +2047,367 @@ mod tests {
         assert_eq!(nv_query_event(&mut p, nv, 99, 1), Ok((4, vec![])));
         let e = nv_ioctl(&mut p, nv, ctrl, 0xc183_001b, &[0; 0x183]).unwrap_err();
         assert!(e.contains("/dev/nvhost-ctrl ioctl 0xc183001b"), "{e}");
+    }
+
+    /// nvdrv Ioctl2 over pointers, as libnx's nvIoctl2 sends a small one:
+    /// the argument, a second input; (NvError, the argument after it), or
+    /// the stop.
+    fn nv_ioctl2(
+        p: &mut Process,
+        nv: u64,
+        fd: u32,
+        code: u32,
+        arg: &[u8],
+        extra: &[u8],
+    ) -> Result<(u32, Vec<u8>), String> {
+        let (input, more, output) = (STRINGS + 0x200, STRINGS + 0x400, STRINGS + 0x300);
+        p.mem.write_bytes(input, arg).unwrap();
+        p.mem.write_bytes(more, extra).unwrap();
+        let args = [fd.to_le_bytes(), code.to_le_bytes()].concat();
+        let x = [(input, arg.len() as u64), (more, extra.len() as u64)];
+        let c = [(output, arg.len() as u64)];
+        let msg = hipc(false, &[], 11, &args, &x, &[(0, 0), (0, 0)], &[(0, 0)], &c);
+        send(p, nv, &msg)?;
+        let err = u32s(&answer(p, false, 4).3)[0];
+        Ok((err, p.mem.read_vec(output, arg.len()).unwrap()))
+    }
+
+    #[test]
+    fn nvgpu_devices_describe_the_gpu_map_memory_and_set_up_a_channel() {
+        let mut p = setup();
+        let nv = nvdrv_ready(&mut p);
+        let io = |p: &mut Process, fd: u32, code: u32, arg: &[u8]| {
+            nv_ioctl(p, nv, fd, code, arg).unwrap()
+        };
+        let u64s = |b: &[u8]| -> Vec<u64> {
+            b.chunks_exact(8)
+                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        };
+
+        // /dev/nvhost-ctrl-gpu, as libnx's nvGpuInit asks.
+        let (ctrl_gpu, _) = nv_open(&mut p, nv, b"/dev/nvhost-ctrl-gpu");
+        assert_eq!(
+            io(&mut p, ctrl_gpu, 0x8004_4701, &[0xff; 4]),
+            (0, vec![0; 4])
+        );
+        let (err, info) = io(&mut p, ctrl_gpu, 0x8028_4702, &[0; 40]);
+        assert_eq!(
+            (err, u32s(&info)),
+            (0, vec![32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16])
+        );
+        let mut chars = vec![0u8; 0xb0];
+        chars[0] = 0xa0;
+        chars[8] = 1;
+        let (err, out) = io(&mut p, ctrl_gpu, 0xc0b0_4705, &chars);
+        assert_eq!(err, 0);
+        assert_eq!(u64s(&out[..8]), [0xa0]);
+        let c = u32s(&out[16..]);
+        assert_eq!(&c[..4], [0x120, 0xb, 0xa1, 1]);
+        assert_eq!(
+            &c[8..20],
+            [2, 0x20, 0x2_0000, 0x2_0000, 0x1b, 0x3_0000, 1, 0x503, 0x503, 0x80, 0x28, 0]
+        );
+        assert_eq!(&c[22..28], [0x902d, 0xb197, 0xb1c0, 0xb06f, 0xa140, 0xb0b5]);
+        assert_eq!(&out[16 + 0x90..16 + 0x95], b"gm20b");
+        assert_eq!(io(&mut p, ctrl_gpu, 0xc0b0_4705, &[0; 0xb0]).0, 4);
+        let mut tpc = vec![0u8; 24];
+        tpc[0] = 4;
+        let (err, out) = io(&mut p, ctrl_gpu, 0xc018_4706, &tpc);
+        assert_eq!((err, u32s(&out[16..])), (0, vec![3, 0]));
+        // GET_GPU_TIME: PTIMER at 1.625 ns a tick, from the system tick.
+        p.cpu.clock.skip(39);
+        let now = p.now();
+        let (err, out) = io(&mut p, ctrl_gpu, 0xc010_471c, &[0; 16]);
+        assert_eq!((err, u64s(&out)), (0, vec![now * 1250 / 39, 0]));
+        let e = nv_ioctl(&mut p, nv, ctrl_gpu, 0x8008_4714, &[0; 8]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl-gpu ioctl 0x80084714"), "{e}");
+
+        // /dev/nvhost-as-gpu: nothing before InitializeEx, which takes
+        // libnx's layout: flags, then the big page size at 8.
+        let (space, _) = nv_open(&mut p, nv, b"/dev/nvhost-as-gpu");
+        let alloc = |pages: u32, page: u32, flags: u32, at: u64| {
+            let mut a = words(&[pages, page, flags, 0]);
+            a.extend(at.to_le_bytes());
+            a
+        };
+        assert_eq!(io(&mut p, space, 0xc018_4102, &alloc(1, 0x1000, 0, 0)).0, 8);
+        let init = |big: u32| {
+            let mut a = words(&[1, 0, big, 0]);
+            a.extend([0; 24]);
+            a
+        };
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init(0x3000)).0, 4);
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init(0x1_0000)).0, 0);
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init(0x1_0000)).0, 8);
+        // GET_VA_REGIONS: small pages from 16 MiB to 16 GiB, big pages to
+        // 1 TiB.
+        let (err, out) = io(&mut p, space, 0xc040_4108, &[0; 64]);
+        assert_eq!(err, 0);
+        assert_eq!(u32s(&out[8..16]), [48, 0]);
+        assert_eq!(u64s(&out[16..24]), [0x100_0000]);
+        assert_eq!(u32s(&out[24..32]), [0x1000, 0]);
+        assert_eq!(u64s(&out[32..40]), [(0x4_0000_0000 - 0x100_0000) / 0x1000]);
+        assert_eq!(u64s(&out[40..48]), [0x4_0000_0000]);
+        assert_eq!(u32s(&out[48..56]), [0x1_0000, 0]);
+        assert_eq!(
+            u64s(&out[56..64]),
+            [(0x100_0000_0000 - 0x4_0000_0000) / 0x1_0000]
+        );
+        // ALLOC_SPACE: first fit, aligned; fixed at a free address only.
+        let (err, out) = io(&mut p, space, 0xc018_4102, &alloc(4, 0x1_0000, 0, 0));
+        assert_eq!((err, u64s(&out[16..])), (0, vec![0x4_0000_0000]));
+        let (err, out) = io(&mut p, space, 0xc018_4102, &alloc(2, 0x1000, 0, 0x4000));
+        assert_eq!((err, u64s(&out[16..])), (0, vec![0x100_0000]));
+        let (err, out) = io(&mut p, space, 0xc018_4102, &alloc(2, 0x1000, 0, 0x4000));
+        assert_eq!((err, u64s(&out[16..])), (0, vec![0x100_4000]));
+        assert_eq!(
+            io(&mut p, space, 0xc018_4102, &alloc(1, 0x1000, 1, 0x100_1000)).0,
+            4
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc018_4102, &alloc(1, 0x2000, 0, 0)).0,
+            4,
+            "page size"
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc018_4102, &alloc(1, 0x1000, 1, 0x200_0000)).0,
+            0
+        );
+        let free = |at: u64, pages: u32, page: u32| {
+            let mut a = at.to_le_bytes().to_vec();
+            a.extend(words(&[pages, page]));
+            a
+        };
+        assert_eq!(
+            io(&mut p, space, 0xc010_4103, &free(0x200_0000, 1, 0x1000)).0,
+            0
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc010_4103, &free(0x200_0000, 1, 0x1000)).0,
+            4
+        );
+
+        // An nvmap object of 0x3_0000 bytes with memory, as nvMapCreate
+        // makes it.
+        let fb = 0x50_0000;
+        p.mem.map(fb, 0x3_0000, Perm::RW, "gpu").unwrap();
+        p.services.nv.maps.push(Some(nv::MapObject {
+            size: 0x3_0000,
+            addr: Some(fb),
+            align: 0x1_0000,
+            kind: 0,
+            refs: 1,
+        }));
+        let map = |flags: u32, kind: u32, handle: u32, page: u32, off: u64, size: u64, at: u64| {
+            let mut a = words(&[flags, kind, handle, page]);
+            for v in [off, size, at] {
+                a.extend(v.to_le_bytes());
+            }
+            a
+        };
+        // MAP_BUFFER_EX: the whole object on big pages, after the
+        // reservation; the page size written back.
+        let (err, out) = io(
+            &mut p,
+            space,
+            0xc028_4106,
+            &map(4, 0xfe, 1, 0x1_0000, 0, 0, 0),
+        );
+        assert_eq!(err, 0);
+        assert_eq!(u32s(&out[12..16]), [0x1_0000]);
+        assert_eq!(u64s(&out[32..40]), [0x4_0004_0000]);
+        // Fixed inside the big-page reservation; not over another mapping,
+        // not outside a reservation.
+        let (err, out) = io(
+            &mut p,
+            space,
+            0xc028_4106,
+            &map(1, 0, 1, 0x1_0000, 0x1_0000, 0x1_0000, 0x4_0001_0000),
+        );
+        assert_eq!((err, u64s(&out[32..40])), (0, vec![0x4_0001_0000]));
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(1, 0, 1, 0x1_0000, 0, 0x1_0000, 0x4_0001_0000)
+            )
+            .0,
+            4
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(1, 0, 1, 0x1_0000, 0, 0x1_0000, 0x5_0000_0000)
+            )
+            .0,
+            4
+        );
+        // No such object, past its end; an unaligned size panics on a
+        // console, so it stops.
+        assert_eq!(
+            io(&mut p, space, 0xc028_4106, &map(0, 0, 9, 0, 0, 0, 0)).0,
+            4
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(0, 0, 1, 0, 0x2_0000, 0x2_0000, 0)
+            )
+            .0,
+            4
+        );
+        let e = nv_ioctl(
+            &mut p,
+            nv,
+            space,
+            0xc028_4106,
+            &map(0, 0, 1, 0, 0, 0x800, 0),
+        )
+        .unwrap_err();
+        assert!(e.contains("not page-aligned"), "{e}");
+        // Modify: a range of the first mapping takes another kind.
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(0x100, 0xdb, 0, 0, 0x1_0000, 0x1_0000, 0x4_0004_0000)
+            )
+            .0,
+            0
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc028_4106,
+                &map(0x100, 0xdb, 0, 0, 0x2_0000, 0x2_0000, 0x4_0004_0000)
+            )
+            .0,
+            4
+        );
+        let s = &p.services.nv.gpu.address_spaces[&space];
+        assert_eq!(s.mappings[0].modified, vec![(0x1_0000, 0x1_0000, 0xdb)]);
+        assert_eq!((s.mappings[0].kind, s.mappings[0].cacheable), (0xfe, true));
+        // UNMAP_BUFFER at a mapping's start; FREE_SPACE takes the
+        // reservation and what is mapped in it.
+        assert_eq!(
+            io(&mut p, space, 0xc008_4105, &0x4_0004_1000u64.to_le_bytes()).0,
+            4
+        );
+        assert_eq!(
+            io(&mut p, space, 0xc008_4105, &0x4_0004_0000u64.to_le_bytes()).0,
+            0
+        );
+        assert_eq!(
+            io(
+                &mut p,
+                space,
+                0xc010_4103,
+                &free(0x4_0000_0000, 4, 0x1_0000)
+            )
+            .0,
+            0
+        );
+        assert!(p.services.nv.gpu.address_spaces[&space].mappings.is_empty());
+
+        // /dev/nvhost-gpu, as libnx's nvGpuChannelCreate sets it up.
+        let (map_fd, _) = nv_open(&mut p, nv, b"/dev/nvmap");
+        let (ch, _) = nv_open(&mut p, nv, b"/dev/nvhost-gpu");
+        assert_eq!(
+            io(&mut p, ch, 0x4004_4801, &words(&[space])).0,
+            4,
+            "not nvmap"
+        );
+        assert_eq!(io(&mut p, ch, 0x4004_4801, &words(&[map_fd])).0, 0);
+        let gpfifo = |n: u32| {
+            let mut a = words(&[n, 0, 1]);
+            a.extend([0; 20]);
+            a
+        };
+        assert_eq!(
+            io(&mut p, ch, 0xc020_481a, &gpfifo(0x800)).0,
+            8,
+            "not bound"
+        );
+        assert_eq!(io(&mut p, space, 0x4004_4101, &words(&[map_fd])).0, 4);
+        assert_eq!(io(&mut p, space, 0x4004_4101, &words(&[ch])).0, 0);
+        assert_eq!(
+            io(&mut p, space, 0x4004_4101, &words(&[ch])).0,
+            8,
+            "bound once"
+        );
+        // The channel's fence: syncpoint 1, at its current value.
+        let (err, out) = io(&mut p, ch, 0xc020_481a, &gpfifo(0x800));
+        assert_eq!((err, u32s(&out[12..20])), (0, vec![1, 0]));
+        assert_eq!(
+            io(&mut p, ch, 0xc020_481a, &gpfifo(0x800)).0,
+            8,
+            "one queue"
+        );
+        let obj = |class: u32| {
+            let mut a = words(&[class, 0]);
+            a.extend([0; 8]);
+            a
+        };
+        assert_eq!(io(&mut p, ch, 0xc010_4809, &obj(0x1234)).0, 4);
+        let (err, out) = io(&mut p, ch, 0xc010_4809, &obj(0xb197));
+        assert_eq!((err, u64s(&out[8..])), (0, vec![1]));
+        assert_eq!(io(&mut p, ch, 0xc010_4809, &obj(0xb1c0)).0, 13);
+        // The error notifier's event, then the notifier and the priority.
+        let (err, copied) = nv_query_event(&mut p, nv, ch, 3).unwrap();
+        assert_eq!((err, copied.len()), (0, 1));
+        assert_eq!(
+            p.handles.get(copied[0]).map(|(k, _)| k),
+            Some(Kind::ReadableEvent)
+        );
+        let e = nv_query_event(&mut p, nv, ch, 4).unwrap_err();
+        assert!(e.contains("QueryEvent 0x4 on /dev/nvhost-gpu"), "{e}");
+        let mut notifier = vec![0u8; 24];
+        notifier[16] = 1;
+        assert_eq!(io(&mut p, ch, 0xc018_480c, &notifier).0, 0);
+        assert_eq!(io(&mut p, ch, 0x4004_480d, &words(&[0x64])).0, 0);
+        assert_eq!(io(&mut p, ch, 0x4004_480d, &words(&[0x65])).0, 4);
+        let c = &p.services.nv.gpu.channels[&ch];
+        assert_eq!(
+            (
+                c.address_space,
+                c.gpfifo_entries,
+                c.syncpoint,
+                c.class,
+                c.error_notifier,
+                c.priority
+            ),
+            (
+                Some(space),
+                Some(0x800),
+                Some(1),
+                Some(0xb197),
+                true,
+                Some(0x64)
+            )
+        );
+        // KickoffPb (SUBMIT_GPFIFO2 through Ioctl2): the entries are
+        // recorded, then the program stops, named.
+        let mut submit = 0u64.to_le_bytes().to_vec();
+        submit.extend(words(&[2, 4, 0, 0]));
+        let entries = [0x1122_3344_5566_7788u64, 0x99];
+        let entry_bytes: Vec<u8> = entries.iter().flat_map(|e| e.to_le_bytes()).collect();
+        let e = nv_ioctl2(&mut p, nv, ch, 0xc018_481b, &submit, &entry_bytes).unwrap_err();
+        assert!(e.contains("2 GPFIFO entries submitted"), "{e}");
+        assert!(e.contains("phase 5B"), "{e}");
+        assert_eq!(p.services.nv.gpu.channels[&ch].submitted, entries);
+        // Closing the channel frees its address space's binding.
+        let close = hipc(false, &[], 2, &ch.to_le_bytes(), &[], &[], &[], &[]);
+        assert_eq!(send(&mut p, nv, &close), Ok(0));
+        assert!(!p.services.nv.gpu.channels.contains_key(&ch));
+        assert_eq!(p.services.nv.gpu.address_spaces[&space].channel, None);
     }
 
     /// A parcel as libnx's parcelTransact sends it: the header, then
