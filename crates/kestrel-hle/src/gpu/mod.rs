@@ -22,6 +22,7 @@ pub mod clear;
 pub mod methods;
 pub mod mme;
 mod run;
+pub mod shader;
 pub mod transfer;
 
 use std::collections::BTreeMap;
