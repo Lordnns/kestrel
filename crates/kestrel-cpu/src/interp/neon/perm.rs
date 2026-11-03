@@ -181,20 +181,31 @@ pub fn logic(c: &mut Ctx) -> Step {
     Ok(Flow::Next)
 }
 
-/// MOVI, MVNI, ORR and BIC (immediate), FMOV (vector, immediate).
-pub fn modified_imm(c: &mut Ctx) -> Step {
-    let i = c.insn;
-    let (q, op, cmode) = (bit(i, 30), bit(i, 29), field(i, 15, 12));
+/// What a modified-immediate instruction does to Vd, with the expanded
+/// immediate in both halves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModImm {
+    /// MOVI, MVNI and FMOV: Vd = the value.
+    Set(u128),
+    /// ORR (immediate): Vd |= the value.
+    Or(u128),
+    /// BIC (immediate): Vd &= !the value.
+    Bic(u128),
+}
+
+/// Decode MOVI, MVNI, ORR and BIC (immediate) and FMOV (vector,
+/// immediate): AdvSIMDExpandImm and the operation; `None` if unallocated.
+/// The result is then written at the instruction's width (Q).
+pub(crate) fn decode_modified_imm(i: u32) -> Option<ModImm> {
+    let (op, cmode) = (bit(i, 29), field(i, 15, 12));
     let imm8 = ((field(i, 18, 16) << 5) | field(i, 9, 5)) as u64;
     if bit(i, 11) {
         // o2 = 1 is FMOV (vector, half precision) or unallocated.
         if cmode != 0b1111 || op {
-            return Err(c.undef());
+            return None;
         }
         let h = fpu::expand_imm(imm8 as u32, Fmt::H) as u128;
-        let r = h * 0x0001_0001_0001_0001_0001_0001_0001_0001;
-        write(c, rd(i), r, if q { 128 } else { 64 });
-        return Ok(Flow::Next);
+        return Some(ModImm::Set(h * 0x0001_0001_0001_0001_0001_0001_0001_0001));
     }
     let rep32 = |w: u64| w | (w << 32);
     // AdvSIMDExpandImm.
@@ -208,20 +219,30 @@ pub fn modified_imm(c: &mut Ctx) -> Step {
             .filter(|b| (imm8 >> b) & 1 != 0)
             .fold(0u64, |acc, b| acc | 0xff << (8 * b)),
         _ if !op => rep32(fpu::expand_imm(imm8 as u32, Fmt::S)),
-        _ if q => fpu::expand_imm(imm8 as u32, Fmt::D),
-        _ => return Err(c.undef()),
+        _ if bit(i, 30) => fpu::expand_imm(imm8 as u32, Fmt::D),
+        _ => return None,
     };
-    let bits = if q { 128 } else { 64 };
     let imm = (imm64 as u128) | ((imm64 as u128) << 64);
-    let d = vreg(c, rd(i));
     // ORR and BIC are cmode 0xx1 and 10x1; MVNI inverts MOVI except where op
     // selects MOVI 64-bit or FMOV double.
-    let r = match (op, cmode) {
-        (false, 0b0001 | 0b0011 | 0b0101 | 0b0111 | 0b1001 | 0b1011) => d | imm,
-        (true, 0b0001 | 0b0011 | 0b0101 | 0b0111 | 0b1001 | 0b1011) => d & !imm,
-        (true, 0b1110 | 0b1111) | (false, _) => imm,
-        (true, _) => !imm,
+    Some(match (op, cmode) {
+        (false, 0b0001 | 0b0011 | 0b0101 | 0b0111 | 0b1001 | 0b1011) => ModImm::Or(imm),
+        (true, 0b0001 | 0b0011 | 0b0101 | 0b0111 | 0b1001 | 0b1011) => ModImm::Bic(imm),
+        (true, 0b1110 | 0b1111) | (false, _) => ModImm::Set(imm),
+        (true, _) => ModImm::Set(!imm),
+    })
+}
+
+/// MOVI, MVNI, ORR and BIC (immediate), FMOV (vector, immediate).
+pub fn modified_imm(c: &mut Ctx) -> Step {
+    let i = c.insn;
+    let d = vreg(c, rd(i));
+    let r = match decode_modified_imm(i) {
+        Some(ModImm::Set(v)) => v,
+        Some(ModImm::Or(v)) => d | v,
+        Some(ModImm::Bic(v)) => d & !v,
+        None => return Err(c.undef()),
     };
-    write(c, rd(i), r, bits);
+    write(c, rd(i), r, if bit(i, 30) { 128 } else { 64 });
     Ok(Flow::Next)
 }
