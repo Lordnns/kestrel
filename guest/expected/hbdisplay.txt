@@ -111,8 +111,68 @@ frame 3
   width: 96
   height: 40
   transform hint: 0x0000000000000000
+  pending: 2
+  status: 0
+QUERY 0
+  result: 0x0000000000000000
+  value: 96
+  status: 0
+QUERY 1
+  result: 0x0000000000000000
+  value: 40
+  status: 0
+QUERY 2
+  result: 0x0000000000000000
+  value: 4
+  status: 0
+QUERY 8
+  result: 0x0000000000000000
+  value: 0
+  status: 0
+QUERY 9
+  result: 0x0000000000000000
+  value: 1
+  status: 0
+GetDisplayVsyncEvent: 0x0000000000000000
+  event handed out: 0x0000000000000001
+wait for a vsync: 0x0000000000000000
+  reset the event: 0x0000000000000000
+wait for the next: 0x0000000000000000
+  a vsync apart: yes
+SYNCPT_INCR: 0x0000000000000000
+frame 4
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: 1
+  fence bytes: 0x0000000000000024
+  fence descriptors: 0x0000000000000000
+  fences: 0x0000000000000000
+  status: 0
+  QUEUE_BUFFER: 0x0000000000000000
+  width: 96
+  height: 40
+  transform hint: 0x0000000000000000
   pending: 1
   status: 0
+frame 5
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: 0
+  fence bytes: 0x0000000000000024
+  fence descriptors: 0x0000000000000000
+  fences: 0x0000000000000000
+  status: 0
+  QUEUE_BUFFER: 0x0000000000000000
+  width: 96
+  height: 40
+  transform hint: 0x0000000000000000
+  pending: 2
+  status: 0
+another buffer:
+  DEQUEUE_BUFFER: 0x0000000000000000
+  slot: -1
+  status: -11
+wait for the buffer-free event: 0x0000000000000000
+woken two vsyncs on: yes
+close the vsync event: 0x0000000000000000
 DISCONNECT: 0x0000000000000000
   status: 0
 NVMAP_IOC_FREE: 0x0000000000000000
@@ -132,3 +192,5 @@ close sm: 0x0000000000000000
 frame 1: 96x40, crc32 0x81b28734
 frame 2: 96x40, crc32 0x1a7f5287
 frame 3: 96x40, crc32 0x8eb4d434
+frame 4: 96x40, crc32 0x50557fa8
+frame 5: 96x40, crc32 0xb3265d62

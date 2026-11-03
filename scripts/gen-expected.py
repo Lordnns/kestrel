@@ -1121,8 +1121,16 @@ def hbdisplay():
     the pointer buffer is 0x8000 bytes; the queue reports 1280x720 before it
     has buffers; descriptors and nvmap handles count from 1; a dequeue
     answers the free buffer freed longest ago with no fences; a queued
-    buffer is shown at once and freed at the next vsync (60 Hz of the 19.2
-    MHz clock); RGB 565 becomes 8 bits a channel with the top bits
+    buffer is shown at once and freed when its turn on the screen ends:
+    frames take turns, each from the start of the vsync period it is
+    queued in or the end of the previous one's turn, whichever is later,
+    for its swap interval in vsyncs (60 Hz of the 19.2 MHz clock; the swap
+    interval is EGL's and Android's, the minimum number of vsyncs a frame
+    stays shown), so frames 1 and 2, queued in one vsync period with swap
+    interval 1, are freed at the first and second vsyncs, and frame 2 is
+    still pending when frame 3 is queued; the vsync event is signalled at
+    each vsync after it is made; RGB 565 becomes 8 bits a channel with the
+    top bits
     repeated. The self-test adds a line per frame shown: its size and the
     CRC-32 of its pixels as little-endian 0x00RRGGBB words."""
     ok = hex64(0)
@@ -1241,7 +1249,40 @@ def hbdisplay():
         f"wait for the buffer-free event: {ok}",
         "woken by the next vsync: yes",
     ]
-    out += ["frame 3"] + dequeue(0) + queue(1)
+    out += ["frame 3"] + dequeue(0) + queue(2)
+    # QUERY (Android's NATIVE_WINDOW_* constants): the buffers' size and
+    # format (RGB 565 is 4), transform hint 0, and the consumer running
+    # behind (frames 2 and 3 both pending: more than one).
+    for what, value in [(0, width), (1, height), (2, 4), (8, 0), (9, 1)]:
+        out += [f"QUERY {what}", f"  result: {ok}", f"  value: {value}", "  status: 0"]
+    # The vsync event, made after frame 3 (just past vsync 1): signalled at
+    # vsyncs 2 and 3.
+    out += [
+        f"GetDisplayVsyncEvent: {ok}",
+        f"  event handed out: {hex64(1)}",
+        f"wait for a vsync: {ok}",
+        f"  reset the event: {ok}",
+        f"wait for the next: {ok}",
+        "  a vsync apart: yes",
+        f"SYNCPT_INCR: {ok}",
+    ]
+    # Just past vsync 3: slot 1 (freed at vsync 2) before slot 0 (vsync 3).
+    # Frame 4, swap interval 2: its turn starts at vsync 3 (the period it
+    # is queued in, and frame 3's end) and lasts two: freed at vsync 5.
+    # Frame 5: from frame 4's end, vsync 5, to vsync 7. Another dequeue
+    # waits from just past vsync 3 to vsync 5: more than one vsync, at
+    # most two.
+    out += ["frame 4"] + dequeue(1) + queue(1)
+    out += ["frame 5"] + dequeue(0) + queue(2)
+    out += [
+        "another buffer:",
+        f"  DEQUEUE_BUFFER: {ok}",
+        "  slot: -1",
+        "  status: -11",
+        f"wait for the buffer-free event: {ok}",
+        "woken two vsyncs on: yes",
+        f"close the vsync event: {ok}",
+    ]
     out += [
         f"DISCONNECT: {ok}",
         "  status: 0",
@@ -1260,7 +1301,7 @@ def hbdisplay():
         f"close vi:u: {ok}",
         f"close sm: {ok}",
     ]
-    out += [frame_line(n, f) for n, f in [(1, 1), (2, 2), (3, 3)]]
+    out += [frame_line(n, n) for n in range(1, 6)]
     return "".join(line + "\n" for line in out)
 
 
