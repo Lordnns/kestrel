@@ -39,8 +39,15 @@ Phase 5A acceptance (PLAN.md), the framebuffer and 2D examples:
   by libnx, filled each frame with one grey, 4 * cnt in each byte, where
   cnt counts frames from 1 to 60 and back to 0. The frame must be that
   one grey everywhere; which one depends on how many frames ran.
+- deko_examples (graphics/deko3d/deko_examples), its first example
+  ("01: Simple Setup", A pressed in the menu): the GPU clears an RGBA8
+  render target in four scissored rectangles, Example01_SimpleSetup.cpp's
+  (a 1280x720 background, a 400-pixel box in the middle, two tiles in
+  it), and presents it through the swapchain. Each pixel must be its
+  rectangle's clear colour, the floats as 8-bit unorm (times 255,
+  rounded to the nearest, halves up: kestrel's documented choice).
 
-Usage: check-examples.py <default_font.bin> <frames folder>
+Usage: check-examples.py <default_font.bin> <frames folder> [--skip <example>...]
 """
 
 import struct
@@ -312,6 +319,42 @@ def check_simplegfx(path, font):
     return None
 
 
+def deko_simple_setup():
+    """The rectangles Example01_SimpleSetup.cpp clears, last on top:
+    (x, y, width, height, colour) in pixels and 8-bit channels."""
+    width, height, box = 1280, 720, 400
+    box_x, box_y = width // 2 - box // 2, height // 2 - box // 2
+    tile_w, tile_h = box // 5, box // 4
+
+    def unorm8(v):
+        return int(min(max(v, 0.0), 1.0) * 255 + 0.5)
+
+    def colour(r, g, b):
+        return (unorm8(r), unorm8(g), unorm8(b))
+
+    green = colour(0.0, 0.5, 0.0)
+    return [
+        (0, 0, width, height, colour(0.0, 0.25, 0.0)),
+        (box_x, box_y, box, box, colour(229 / 255.0, 1.0, 232 / 255.0)),
+        (box_x + 2 * tile_w, box_y + tile_h, tile_w, tile_h, green),
+        (box_x + tile_w, box_y + 2 * tile_h, 3 * tile_w, tile_h, green),
+    ]
+
+
+def check_deko_examples(path, font):
+    width, height, rows = read_png(path)
+    if (width, height) != (1280, 720):
+        return f"a {width}x{height} frame, not its 1280x720"
+    rects = deko_simple_setup()
+    for y, row in enumerate(rows):
+        for x, p in enumerate(row):
+            want = [c for (rx, ry, rw, rh, c) in rects
+                    if rx <= x < rx + rw and ry <= y < ry + rh][-1]
+            if p != want:
+                return f"pixel ({x}, {y}) is {p}, not {want}"
+    return None
+
+
 def check_barrier(lines):
     if not lines or lines[0] != "Creating threads":
         return f"expected 'Creating threads' first, read {lines[:1]!r}"
@@ -342,7 +385,8 @@ def check_barrier(lines):
 
 
 def main():
-    if len(sys.argv) != 3:
+    skip = sys.argv[4::2]
+    if len(sys.argv) < 3 or sys.argv[3::2] != ["--skip"] * len(skip):
         sys.exit(__doc__)
     font = Path(sys.argv[1]).read_bytes()
     table = glyphs(font)
@@ -358,10 +402,13 @@ def main():
     frame_checks = {
         "vt52-demo": check_vt52_demo,
         "simplegfx": check_simplegfx,
+        "deko_examples": check_deko_examples,
     }
     failed = 0
-    results = [(n, c(screen_text(frames / f"{n}.png", table))) for n, c in checks.items()]
-    results += [(n, c(frames / f"{n}.png", font)) for n, c in frame_checks.items()]
+    results = [(n, c(screen_text(frames / f"{n}.png", table)))
+               for n, c in checks.items() if n not in skip]
+    results += [(n, c(frames / f"{n}.png", font))
+                for n, c in frame_checks.items() if n not in skip]
     for name, problem in results:
         print(f"{'FAIL' if problem else 'PASS'}  {name}" + (f": {problem}" if problem else ""))
         failed += problem is not None

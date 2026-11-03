@@ -15,7 +15,8 @@ EXAMPLES_COMMIT=669786898205b7beb25ff1731e72982e6d0397d3
 IMAGE=devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
 
 # name:folder for each example: phase 2's four, then phase 5A's
-# framebuffer and 2D examples.
+# framebuffer and 2D examples, then phase 5B's deko3d one (deko3d, uam and
+# glm are in the image too).
 EXAMPLES=(
     hello-world:graphics/printing/hello-world
     read-controls:hid/read-controls
@@ -23,6 +24,7 @@ EXAMPLES=(
     barrier:misc/barrier
     vt52-demo:graphics/printing/vt52-demo
     simplegfx:graphics/simplegfx
+    deko_examples:graphics/deko3d/deko_examples
 )
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -48,7 +50,7 @@ folders=""
 for e in "${EXAMPLES[@]}"; do folders="$folders ${e#*:}"; done
 docker run --rm -v "$mount:/src" -w /src "$IMAGE" bash -c "
     set -e
-    dkp-pacman -Q libnx devkitA64 switch-tools
+    dkp-pacman -Q libnx devkitA64 switch-tools deko3d uam
     for f in $folders; do make -C \$f -j\$(nproc) >/dev/null; echo built \$f; done
 "
 
