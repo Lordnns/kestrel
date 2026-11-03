@@ -10,6 +10,7 @@
 
 pub mod cores;
 pub mod display;
+pub mod gpu;
 pub mod homebrew;
 pub mod input;
 pub mod ipc;

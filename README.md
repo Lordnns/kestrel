@@ -104,8 +104,9 @@ A homebrew program opens a window (`--headless` runs it without one).
 In a window it runs in real time with each guest core on its own host
 thread (`--single-thread` keeps every core on one host thread).
 The window shows what the program draws into its framebuffer (the GPU
-does not run command lists yet, so programs that render with it, such as
-deko3d's, stop at their first one with a message), and takes your
+runs command lists only partly yet, so programs that render with it,
+such as deko3d's, stop with a message naming the first GPU method kestrel
+does not run), and takes your
 keyboard and gamepads and gives them to the program as a Switch
 controller. Text a program prints for debugging goes to the terminal.
 

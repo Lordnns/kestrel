@@ -10,12 +10,12 @@
 //!   reserved, and nvmap objects mapped at GPU addresses.
 //! - "/dev/nvhost-gpu" is a channel per descriptor: bound to an address
 //!   space, given a command queue (GPFIFO) and a syncpoint, an engine
-//!   class. Command lists submitted to it are recorded, and then the
-//!   program stops, named: running them is phase 5B.
+//!   class. Command lists submitted to it run at once (`gpu/`, phase 5B),
+//!   until a method kestrel does not run yet stops the program, named.
 
 use std::collections::BTreeMap;
 
-use super::nv::{error, put_u32, u32_at, u64_at, Device};
+use super::nv::{self, error, put_u32, u32_at, u64_at, Device};
 use super::IpcError;
 use crate::kernel::{Kind, ObjectId};
 use crate::Process;
@@ -190,8 +190,11 @@ pub struct Channel {
     /// QueryEvent's events 1 to 3 (BptIntEvent, BptPauseEvent,
     /// ErrorNotifierEvent), made on first use; nothing signals them yet.
     pub events: [Option<ObjectId>; 3],
-    /// Every GPFIFO entry submitted, in order, for phase 5B to run.
+    /// Every GPFIFO entry submitted, in order.
     pub submitted: Vec<u64>,
+    /// What the GPU keeps for the channel: subchannel bindings, engine
+    /// registers (`gpu/`).
+    pub engine: crate::gpu::ChannelState,
 }
 
 /// GPU state of nvdrv: address spaces and channels by descriptor.
@@ -706,8 +709,19 @@ impl Process {
                 error::SUCCESS
             }
             // SUBMIT_GPFIFO2 (Ioctl2) and SUBMIT_GPFIFO (Ioctl, entries
-            // inline): the entries are recorded, then the program stops,
-            // named: kestrel does not run GPU command lists yet (phase 5B).
+            // inline): the GPFIFO address (ignored), the entry count, flags
+            // and a fence; the fence out. The entries run at once, in order
+            // (`gpu/run.rs`). Flags ("NV services"): bit 0 fence_wait (the
+            // fence in must be reached: nothing runs beside the program to
+            // reach it later), 1 fence_get, 2 hw_format (the entries are the
+            // hardware's, as without it on the Switch), 4 suppress_wfi, 5
+            // skip_buffer_refcounting. Bit 8, which libnx's
+            // nvGpuChannelKickoff sets with the number of syncpoint
+            // increments in the fence's value, is not on Switchbrew;
+            // kestrel's choice: the command list's own increments count,
+            // so it needs nothing. Other bits stop, named. kestrel's choice:
+            // the fence out is always written, the channel's syncpoint at
+            // its value after the lists ran.
             _ if code == channel::SUBMIT_GPFIFO2
                 || (code & 0xc000_ffff == channel::SUBMIT_GPFIFO_NR) =>
             {
@@ -728,11 +742,31 @@ impl Process {
                     )));
                 }
                 let words: Vec<u64> = (0..count).map(|i| u64_at(entries, 8 * i)).collect();
+                let flags = u32_at(arg, 12);
+                if flags & !0x137 != 0 {
+                    return Err(IpcError::Unimplemented(format!(
+                        "nvdrv /dev/nvhost-gpu ioctl {code:#010x} with flags {flags:#x}"
+                    )));
+                }
+                if flags & 1 != 0 {
+                    let (id, value) = (u32_at(arg, 16), u32_at(arg, 20));
+                    match self.services.nv.syncpoint(id) {
+                        Some(sp) if nv::reached(sp.value, value) => {}
+                        _ => {
+                            return Err(IpcError::Unimplemented(format!(
+                                "a GPU submission waiting for syncpoint {id} to reach {value}: \
+                                 nothing else would increment it"
+                            )))
+                        }
+                    }
+                }
                 set(self, &|c| c.submitted.extend(&words));
-                return Err(IpcError::Unimplemented(format!(
-                    "nvdrv /dev/nvhost-gpu ioctl {code:#010x}: {count} GPFIFO entries submitted, \
-                     GPU command lists do not run yet (phase 5B)"
-                )));
+                self.gpu_submit(fd, &words)?;
+                let id = ch.syncpoint.expect("a queue has a syncpoint");
+                let value = self.services.nv.syncpoint(id).expect("it exists").value;
+                put_u32(arg, 16, id);
+                put_u32(arg, 20, value);
+                error::SUCCESS
             }
             _ => {
                 return Err(IpcError::Unimplemented(format!(
