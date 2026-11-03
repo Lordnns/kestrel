@@ -3,6 +3,12 @@
 #[cfg(feature = "window")]
 mod input_config;
 mod perf;
+#[cfg(all(
+    feature = "window",
+    target_arch = "x86_64",
+    any(windows, target_os = "linux")
+))]
+mod render;
 mod unattended;
 #[cfg(all(
     feature = "window",
@@ -73,6 +79,9 @@ RUN OPTIONS:
                                          controls
     --save-frame <file.png>              Save the last frame the program
                                          showed
+    --max-frames <n>                     Stop once the program has shown n
+                                         frames (with --press and
+                                         --save-frame, to check a frame)
     --video <auto|vulkan|software>       How the window paints: Vulkan
                                          through the GPU (Windows and Linux
                                          x86_64), or software (default:
@@ -94,6 +103,7 @@ struct Opts {
     headless: bool,
     presses: Vec<unattended::Press>,
     save_frame: Option<PathBuf>,
+    max_frames: Option<u64>,
     /// `--video`, kept as given: it is read only with a window.
     video: Option<String>,
     args: Vec<String>,
@@ -115,6 +125,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         headless: false,
         presses: Vec::new(),
         save_frame: None,
+        max_frames: None,
         video: None,
         args: Vec::new(),
     };
@@ -140,6 +151,13 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--press" => o
                 .presses
                 .push(it.next().ok_or("--press needs a value")?.parse()?),
+            "--max-frames" => {
+                let n = it.next().ok_or("--max-frames needs a number")?;
+                o.max_frames = Some(
+                    n.parse()
+                        .map_err(|_| format!("--max-frames {n}: not a number"))?,
+                )
+            }
             "--save-frame" => {
                 o.save_frame = Some(it.next().ok_or("--save-frame needs a file")?.into())
             }
@@ -589,10 +607,35 @@ fn emulate(
     if !o.presses.is_empty() {
         proc.input = Some(Box::new(unattended::Scripted(o.presses.clone())));
     }
+    // GPU draws run on the host's GPU with Vulkan, windowed or not; other
+    // platforms stop at the first draw, named (PLAN.md section 3).
+    #[cfg(all(
+        feature = "window",
+        target_arch = "x86_64",
+        any(windows, target_os = "linux")
+    ))]
+    {
+        proc.renderer = Some(Box::new(render::Lazy::default()));
+    }
     let last_frame = Arc::new(std::sync::Mutex::new(None));
     if o.save_frame.is_some() {
         proc.screen = Some(Box::new(unattended::Keep {
             last: last_frame.clone(),
+            inner: proc.screen.take(),
+        }));
+    }
+    // --max-frames: count the frames shown and stop at the last, as
+    // closing the window would.
+    let frames_shown = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    if let Some(limit) = o.max_frames {
+        let stop = proc
+            .interrupt
+            .get_or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone();
+        proc.screen = Some(Box::new(unattended::Count {
+            shown: frames_shown.clone(),
+            limit,
+            stop,
             inner: proc.screen.take(),
         }));
     }
@@ -686,7 +729,12 @@ fn emulate(
             Ok(ExitCode::from(4))
         }
         Stop::Interrupted => {
-            eprintln!("stopped: the window was closed");
+            match o.max_frames {
+                Some(n) if frames_shown.load(std::sync::atomic::Ordering::Relaxed) >= n => {
+                    eprintln!("stopped: {n} frames shown")
+                }
+                _ => eprintln!("stopped: the window was closed"),
+            }
             Ok(ExitCode::SUCCESS)
         }
         Stop::Unimplemented { what, pc } => {
