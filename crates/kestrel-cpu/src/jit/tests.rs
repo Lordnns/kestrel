@@ -296,6 +296,66 @@ fn simd_and_fp_loads_and_stores_are_translated() {
 }
 
 #[test]
+fn simd_moves_logic_and_immediates_are_translated() {
+    // The NEON vector cases of these mnemonics (MOV is an alias of ORR,
+    // INS and UMOV; FMOV here is the vector immediate or a half-precision
+    // FMOV).
+    const MNEMONICS: &[&str] = &[
+        "and", "bic", "orr", "orn", "eor", "bsl", "bit", "bif", "mov", "dup", "ins", "umov",
+        "smov", "movi", "mvni", "fmov", "fabs", "fneg",
+    ];
+    let mut untranslated = Vec::new();
+    let mut n = 0;
+    for c in neon_vectors::CASES {
+        let mn = c.asm.split(' ').next().unwrap();
+        let vector_fabs = (mn == "fabs" || mn == "fneg") && c.asm.contains('.');
+        if !MNEMONICS.contains(&mn) || vector_fabs {
+            continue;
+        }
+        let (_, m) = setup(&[c.insn]);
+        let (block, _) = super::frontend::translate(&m, CODE, 1).unwrap();
+        if block
+            .ops
+            .iter()
+            .any(|op| matches!(op, super::ir::Op::Interp { .. }))
+        {
+            untranslated.push(format!("{} ({:08x})", c.asm, c.insn));
+        }
+        n += 1;
+    }
+    // The scalar FMOV, FABS and FNEG of `interp/fp_tests.rs`.
+    for insn in [
+        0x1e26_0020, // fmov w0, s1
+        0x9e66_0020, // fmov x0, d1
+        0x9eae_0020, // fmov x0, v1.d[1]
+        0x1e27_0020, // fmov s0, w1
+        0x9e67_0020, // fmov d0, x1
+        0x9eaf_0020, // fmov v0.d[1], x1
+        0x1e60_4020, // fmov d0, d1
+        0x1e20_4020, // fmov s0, s1
+        0x1e60_c020, // fabs d0, d1
+        0x1e20_c020, // fabs s0, s1
+        0x1e21_4020, // fneg s0, s1
+        0x1e61_4020, // fneg d0, d1
+        0x1e2e_1000, // fmov s0, #1.0
+        0x1e78_1000, // fmov d0, #-0.125
+    ] {
+        let (_, m) = setup(&[insn]);
+        let (block, _) = super::frontend::translate(&m, CODE, 1).unwrap();
+        if block
+            .ops
+            .iter()
+            .any(|op| matches!(op, super::ir::Op::Interp { .. }))
+        {
+            untranslated.push(format!("{insn:08x}"));
+        }
+        n += 1;
+    }
+    assert!(untranslated.is_empty(), "of {n}: {untranslated:#?}");
+    assert!(n >= 50, "{n} cases");
+}
+
+#[test]
 fn simd_faults_leave_what_the_interpreter_leaves() {
     // The stack region ends at `end`, with nothing mapped after it.
     let end = STACK_BASE + 0x1_0000;

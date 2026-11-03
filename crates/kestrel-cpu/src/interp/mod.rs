@@ -17,7 +17,7 @@ mod dp_imm;
 mod dp_reg;
 mod fp;
 mod ldst;
-mod neon;
+pub(crate) mod neon;
 mod simd;
 pub(crate) mod system;
 

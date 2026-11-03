@@ -13,9 +13,12 @@
 //! to Q) (single, pair, literal; every addressing mode); LDAR, STLR and
 //! the single-register exclusives; hints, barriers, cache maintenance, DC
 //! ZVA, CLREX, MRS/MSR of the system registers kept in `CpuState`, and
-//! the counters. Floating point and NEON arithmetic, the structure loads
-//! and stores (LD1 to ST4), exclusive pairs, compare-and-swap and the
-//! other atomics go to the interpreter.
+//! the counters; of the SIMD and FP instructions, those that only move
+//! bits: DUP, INS, UMOV, SMOV, the vector logic (AND to BIF), the
+//! modified immediates (MOVI, MVNI, ORR, BIC, FMOV) and the scalar FMOV,
+//! FABS and FNEG. Arithmetic on lanes and floating point, the structure
+//! loads and stores (LD1 to ST4), exclusive pairs, compare-and-swap and
+//! the other atomics go to the interpreter.
 
 use super::ir::{BinOp, Block, Carry, Op, Reg, Term, Val, Width};
 use crate::interp::bits::{bit, decode_bit_masks, field, sext};
@@ -240,6 +243,7 @@ pub fn translate(mem: &Memory, pc: u64, max: u32) -> Result<(Block, Vec<u32>), M
             0b1010 | 0b1011 => branch(&mut b, insn, at),
             0b0100 | 0b0110 | 0b1100 | 0b1110 => ldst(&mut b, insn, at),
             0b0101 | 0b1101 => dp_reg(&mut b, insn),
+            0b0111 | 0b1111 => simd(&mut b, insn).map(|()| Next::On),
             _ => None,
         };
         let next = next.unwrap_or_else(|| {
@@ -1038,4 +1042,342 @@ fn dp_reg(b: &mut B, i: u32) -> Option<Next> {
         _ => return None,
     }
     Some(Next::On)
+}
+
+// ---- SIMD and FP registers ---------------------------------------------------
+//
+// Vn is two 64-bit values, `Reg::VLo` and `Reg::VHi`. What is translated
+// here moves or combines bits without arithmetic on lanes, so it is exact
+// on those halves: the copies of `interp/neon/perm.rs` (DUP, INS, UMOV,
+// SMOV), its vector logic and modified immediates, and of `interp/fp.rs`
+// FMOV (general, register, immediate), FABS and FNEG. Every register is
+// read before any is written, as there.
+
+/// The low or high half of Vn.
+fn vhalf(n: u32, hi: bool) -> Reg {
+    if hi {
+        Reg::VHi(n as u8)
+    } else {
+        Reg::VLo(n as u8)
+    }
+}
+
+/// The low `bits` (at most 64) of a value as a mask.
+fn ones64(bits: u32) -> u64 {
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        (1 << bits) - 1
+    }
+}
+
+impl B {
+    /// Write Vd's halves.
+    fn set_v(&mut self, d: u32, lo: Val, hi: Val) {
+        self.set(Reg::VLo(d as u8), lo);
+        self.set(Reg::VHi(d as u8), hi);
+    }
+
+    /// Write a scalar result: `v` in the low half, the rest cleared.
+    fn set_v_scalar(&mut self, d: u32, v: Val) {
+        let zero = self.k(0);
+        self.set_v(d, v, zero);
+    }
+
+    /// `v & mask`, or `v` when the mask is all ones.
+    fn mask(&mut self, v: Val, mask: u64) -> Val {
+        if mask == u64::MAX {
+            v
+        } else {
+            self.bin_k(BinOp::And, Width::W64, v, mask)
+        }
+    }
+
+    /// Element `idx` of `es` bits of Vn, zero-extended.
+    fn elem(&mut self, n: u32, es: u32, idx: u32) -> Val {
+        let at = es * idx;
+        let h = self.get(vhalf(n, at >= 64));
+        let v = if at % 64 == 0 {
+            h
+        } else {
+            self.bin_k(BinOp::Lsr, Width::W64, h, (at % 64) as u64)
+        };
+        self.mask(v, ones64(es))
+    }
+
+    /// Replace element `idx` of `es` bits of Vd with the low bits of `x`.
+    fn insert(&mut self, d: u32, es: u32, idx: u32, x: Val) {
+        let at = es * idx;
+        let reg = vhalf(d, at >= 64);
+        if es == 64 {
+            self.set(reg, x);
+            return;
+        }
+        let sh = (at % 64) as u64;
+        let old = self.get(reg);
+        let kept = self.bin_k(BinOp::And, Width::W64, old, !(ones64(es) << sh));
+        let x = self.mask(x, ones64(es));
+        let x = if sh == 0 {
+            x
+        } else {
+            self.bin_k(BinOp::Shl, Width::W64, x, sh)
+        };
+        let new = self.bin(BinOp::Or, Width::W64, kept, x);
+        self.set(reg, new);
+    }
+
+    /// An `es`-bit value (upper bits clear) repeated across 64 bits.
+    fn replicate(&mut self, v: Val, es: u32) -> Val {
+        if es == 64 {
+            v
+        } else {
+            let rep = u64::MAX / ones64(es);
+            self.bin_k(BinOp::Mul, Width::W64, v, rep)
+        }
+    }
+}
+
+/// The scalar floating-point and Advanced SIMD group (bits 28..25 x111),
+/// dispatched as `interp/simd.rs` does; `None` for what is not translated.
+fn simd(b: &mut B, i: u32) -> Option<()> {
+    if !bit(i, 30) && field(i, 28, 25) == 0b1111 {
+        return fp(b, i);
+    }
+    let scalar = bit(i, 28);
+    if (scalar && field(i, 31, 30) != 0b01) || (!scalar && bit(i, 31)) {
+        return None;
+    }
+    if !bit(i, 24) {
+        if bit(i, 21) && bit(i, 10) && field(i, 15, 11) == 0b00011 && !scalar {
+            return logic(b, i);
+        }
+        if !bit(i, 21) && field(i, 23, 21) == 0 && !bit(i, 15) && bit(i, 10) {
+            return copy(b, i, scalar);
+        }
+        return None;
+    }
+    if bit(i, 10) && !bit(i, 23) && field(i, 22, 19) == 0 && !scalar {
+        return modified_imm(b, i);
+    }
+    None
+}
+
+/// AND, BIC, ORR, ORN, EOR, BSL, BIT, BIF, as `perm::logic`.
+fn logic(b: &mut B, i: u32) -> Option<()> {
+    let q = bit(i, 30);
+    let (n, m, d) = (field(i, 9, 5), field(i, 20, 16), field(i, 4, 0));
+    let op = (bit(i, 29), field(i, 23, 22));
+    let w = Width::W64;
+    let half = |b: &mut B, hi: bool| {
+        let (x, y) = (b.get(vhalf(n, hi)), b.get(vhalf(m, hi)));
+        match op {
+            (false, 0b00) => b.bin(BinOp::And, w, x, y),
+            (false, 0b01) => {
+                let y = b.not(w, y);
+                b.bin(BinOp::And, w, x, y)
+            }
+            (false, 0b10) => b.bin(BinOp::Or, w, x, y),
+            (false, 0b11) => {
+                let y = b.not(w, y);
+                b.bin(BinOp::Or, w, x, y)
+            }
+            (true, 0b00) => b.bin(BinOp::Xor, w, x, y),
+            // BSL, BIT and BIF pick each bit from one of two registers by
+            // a third: (sel & a) | (!sel & c).
+            _ => {
+                let z = b.get(vhalf(d, hi));
+                let (sel, a, c) = match op.1 {
+                    0b01 => (z, x, y), // BSL: Vd selects Vn over Vm
+                    0b10 => (y, x, z), // BIT: Vm selects Vn over Vd
+                    _ => (y, z, x),    // BIF: Vm selects Vd over Vn
+                };
+                let a = b.bin(BinOp::And, w, sel, a);
+                let ns = b.not(w, sel);
+                let c = b.bin(BinOp::And, w, ns, c);
+                b.bin(BinOp::Or, w, a, c)
+            }
+        }
+    };
+    let lo = half(b, false);
+    let hi = if q { half(b, true) } else { b.k(0) };
+    b.set_v(d, lo, hi);
+    Some(())
+}
+
+/// DUP, INS, SMOV, UMOV and the scalar DUP (element), as `perm::copy`.
+fn copy(b: &mut B, i: u32, scalar: bool) -> Option<()> {
+    let (q, op, imm4, imm5) = (bit(i, 30), bit(i, 29), field(i, 14, 11), field(i, 20, 16));
+    let tz = imm5.trailing_zeros();
+    if tz > 3 {
+        return None;
+    }
+    let es = 8 << tz;
+    let index = imm5 >> (tz + 1);
+    let (n, d) = (field(i, 9, 5), field(i, 4, 0));
+    if scalar {
+        if op || imm4 != 0 {
+            return None;
+        }
+        let v = b.elem(n, es, index);
+        b.set_v_scalar(d, v);
+        return Some(());
+    }
+    match (op, imm4) {
+        (false, 0b0000 | 0b0001) => {
+            // DUP (element), DUP (general).
+            if es == 64 && !q {
+                return None;
+            }
+            let v = if imm4 == 0 {
+                b.elem(n, es, index)
+            } else {
+                let x = b.xr(n);
+                b.mask(x, ones64(es))
+            };
+            let r = b.replicate(v, es);
+            let hi = if q { r } else { b.k(0) };
+            b.set_v(d, r, hi);
+        }
+        (false, 0b0011) if q => {
+            // INS (general).
+            let x = b.xr(n);
+            b.insert(d, es, index, x);
+        }
+        (false, 0b0101) => {
+            // SMOV.
+            if es == 64 || (es == 32 && !q) {
+                return None;
+            }
+            let v = b.elem(n, es, index);
+            let v = b.extend(v, es as u8, true);
+            let v = if q { v } else { b.trunc(Width::W32, v) };
+            b.set_xr(d, v);
+        }
+        (false, 0b0111) => {
+            // UMOV.
+            if (es == 64) != q {
+                return None;
+            }
+            let v = b.elem(n, es, index);
+            b.set_xr(d, v);
+        }
+        (true, _) if q => {
+            // INS (element).
+            let v = b.elem(n, es, imm4 >> tz);
+            b.insert(d, es, index, v);
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+/// MOVI, MVNI, ORR and BIC (immediate), FMOV (vector, immediate): the
+/// constant as the interpreter decodes it.
+fn modified_imm(b: &mut B, i: u32) -> Option<()> {
+    use crate::interp::neon::ModImm;
+    let q = bit(i, 30);
+    let d = field(i, 4, 0);
+    let op = crate::interp::neon::decode_modified_imm(i)?;
+    let half = |b: &mut B, hi: bool| {
+        let pick = |v: u128| if hi { (v >> 64) as u64 } else { v as u64 };
+        match op {
+            ModImm::Set(v) => b.k(pick(v)),
+            ModImm::Or(v) => {
+                let x = b.get(vhalf(d, hi));
+                b.bin_k(BinOp::Or, Width::W64, x, pick(v))
+            }
+            ModImm::Bic(v) => {
+                let x = b.get(vhalf(d, hi));
+                b.bin_k(BinOp::And, Width::W64, x, !pick(v))
+            }
+        }
+    };
+    let lo = half(b, false);
+    let hi = if q { half(b, true) } else { b.k(0) };
+    b.set_v(d, lo, hi);
+    Some(())
+}
+
+/// The scalar floating-point instructions that only move bits, as
+/// `interp/fp.rs` runs them: FMOV (general, register and immediate),
+/// FABS and FNEG. The rest goes to the interpreter.
+fn fp(b: &mut B, i: u32) -> Option<()> {
+    if bit(i, 29) || bit(i, 24) || !bit(i, 21) {
+        return None;
+    }
+    let (n, d) = (field(i, 9, 5), field(i, 4, 0));
+    let ftype = field(i, 23, 22);
+    if field(i, 15, 10) == 0 {
+        // FMOV (general), as `fp::fmov_general`; the conversions go to
+        // the interpreter.
+        let (sf, rmode, opcode) = (bit(i, 31), field(i, 20, 19), field(i, 18, 16));
+        let width = match (sf, ftype, rmode) {
+            (false, 0b00, 0b00) => 32,
+            (true, 0b01, 0b00) => 64,
+            (_, 0b11, 0b00) => 16,
+            // Vn.D[1].
+            (true, 0b10, 0b01) => 0,
+            _ => return None,
+        };
+        match (width, opcode) {
+            (0, 0b110) => {
+                let v = b.get(Reg::VHi(n as u8));
+                b.set_xr(d, v);
+            }
+            (0, 0b111) => {
+                let x = b.xr(n);
+                b.set(Reg::VHi(d as u8), x);
+            }
+            (_, 0b110) => {
+                let v = b.get(Reg::VLo(n as u8));
+                let v = b.mask(v, ones64(width));
+                b.set_xr(d, v);
+            }
+            (_, 0b111) => {
+                let x = b.xr(n);
+                let x = b.mask(x, ones64(width));
+                b.set_v_scalar(d, x);
+            }
+            _ => return None,
+        }
+        return Some(());
+    }
+    // The format's width, as `fp::ftype` accepts it: S, D or H.
+    let width = match ftype {
+        0b00 => 32,
+        0b01 => 64,
+        0b11 => 16,
+        _ => return None,
+    };
+    if bit(i, 31) {
+        return None;
+    }
+    let sign = 1u64 << (width - 1);
+    if field(i, 14, 10) == 0b10000 {
+        let v = b.get(Reg::VLo(n as u8));
+        let v = b.mask(v, ones64(width));
+        let r = match field(i, 20, 15) {
+            0b000000 => v,                                         // FMOV
+            0b000001 => b.bin_k(BinOp::And, Width::W64, v, !sign), // FABS
+            0b000010 => b.bin_k(BinOp::Xor, Width::W64, v, sign),  // FNEG
+            _ => return None,
+        };
+        b.set_v_scalar(d, r);
+        return Some(());
+    }
+    if field(i, 13, 10) != 0b1000 && field(i, 12, 10) == 0b100 {
+        // FMOV (scalar, immediate).
+        if n != 0 {
+            return None;
+        }
+        let f = match ftype {
+            0b00 => crate::float::Fmt::S,
+            0b01 => crate::float::Fmt::D,
+            _ => crate::float::Fmt::H,
+        };
+        let v = b.k(crate::float::expand_imm(field(i, 20, 13), f));
+        b.set_v_scalar(d, v);
+        return Some(());
+    }
+    None
 }
