@@ -76,20 +76,31 @@ pub struct Blocks {
 }
 
 impl Blocks {
+    /// The bytes that hold rows `y0..y1` of slice `z`: the rows of blocks
+    /// they fall in, all the way across.
+    pub fn rows(&self, y0: usize, y1: usize, z: usize) -> std::ops::Range<usize> {
+        let [w, h, d] = self.log2;
+        let (by, bz) = (GOB_HEIGHT << h, 1usize << d);
+        let row_bytes = self.width.div_ceil(GOB_WIDTH << w) * (GOB_SIZE << (w + h + d));
+        let slab = (z / bz) * row_bytes * self.height.div_ceil(by);
+        slab + (y0 / by) * row_bytes..slab + (y1.max(y0 + 1) - 1) / by * row_bytes + row_bytes
+    }
+
     /// The offset of byte `x` of row `y` of slice `z`.
     pub fn offset(&self, x: usize, y: usize, z: usize) -> usize {
+        // Every size is a power of two: shifts and masks, no divisions
+        // (this runs for every 16 bytes a clear or a frame touches).
         let [w, h, d] = self.log2;
-        let (bx, by, bz) = (GOB_WIDTH << w, GOB_HEIGHT << h, 1usize << d);
-        let block_bytes = GOB_SIZE << (w + h + d);
-        let across = self.width.div_ceil(bx);
-        let down = self.height.div_ceil(by);
-        let block = x / bx + (y / by) * across + (z / bz) * across * down;
-        let (xb, yb, zb) = (x % bx, y % by, z % bz);
-        let gob = xb / GOB_WIDTH + ((yb / GOB_HEIGHT) << w) + (zb << (w + h));
-        let (gx, gy) = (xb % GOB_WIDTH, yb % GOB_HEIGHT);
-        let sector = (gx / 32) * 8 + (gy / 2) * 2 + (gx % 32) / 16;
-        let in_gob = sector * 32 + (gy % 2) * 16 + gx % 16;
-        block * block_bytes + gob * GOB_SIZE + in_gob
+        let (sx, sy) = (6 + w, 3 + h);
+        let across = (self.width + (1 << sx) - 1) >> sx;
+        let down = (self.height + (1 << sy) - 1) >> sy;
+        let block = (x >> sx) + (y >> sy) * across + (z >> d) * across * down;
+        let (xb, yb, zb) = (x & ((1 << sx) - 1), y & ((1 << sy) - 1), z & ((1 << d) - 1));
+        let gob = (xb >> 6) + ((yb >> 3) << w) + (zb << (w + h));
+        let (gx, gy) = (xb & 63, yb & 7);
+        let sector = (gx >> 5) * 8 + (gy >> 1) * 2 + ((gx >> 4) & 1);
+        let in_gob = sector * 32 + (gy & 1) * 16 + (gx & 15);
+        (block << (9 + w + h + d)) + gob * GOB_SIZE + in_gob
     }
 }
 
@@ -229,6 +240,9 @@ mod tests {
         // Inside the last block: the second GOB slice, row 1, byte 2.
         assert_eq!(b.offset(130, 17, 3) - b.offset(128, 16, 2), 4 * 512 + 18);
         assert_eq!(b.offset(128, 16, 2), 7 * block);
+        // Rows 3 to 17 of slice 3: both rows of blocks of the second slab.
+        assert_eq!(b.rows(3, 18, 3), 4 * block..8 * block);
+        assert_eq!(b.rows(16, 17, 0), 2 * block..4 * block);
     }
 
     #[test]
