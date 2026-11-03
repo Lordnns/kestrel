@@ -9,9 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Phase 2 acceptance: the standard homebrew examples, built from source
-  # in the public devkitPro container (scripts/build-examples.sh), then run
-  # by every native job.
+  # Phase 2 and phase 5A acceptance: the standard homebrew examples, built
+  # from source in the public devkitPro container
+  # (scripts/build-examples.sh), then run by every native job.
   examples:
     name: Homebrew examples build
     runs-on: ubuntu-24.04
