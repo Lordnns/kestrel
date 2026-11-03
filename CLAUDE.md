@@ -11,7 +11,7 @@ sessions learned. The plan and the status live elsewhere; read them first:
    and "## Next task". It is the single record of progress; keep it
    current in the same commits as the work, not in this file.
 
-## Where things stand (2026-10-31)
+## Where things stand (2026-11-03)
 
 - Phases 0, 1 and 2 are done. Phase 2 was accepted on `v0.1.17`: the four
   standard libnx examples (hello-world, read-controls, sdmc, barrier)
@@ -34,26 +34,24 @@ sessions learned. The plan and the status live elsewhere; read them first:
   tester, then the x86_64 recompiler) and the graphics track (5A, 5B,
   Vulkan). The owner has no ARM machine. The ROADMAP's "Next task" has
   the order and where the work stands.
-- The CPU track so far (2026-10-31, branch
-  `claude/modest-albattani-tr25g6`): the differential tester (`kestrel
-  diff`) and the first x86_64 recompiler (`--backend jit`, Windows and
-  Linux x86_64): self-test 27/27, zero divergences, about 5 times the
-  interpreter's speed. `auto` picks it on Windows and Linux x86_64
-  (owner, 2026-10-31); `--backend interp` for the interpreter.
-- The recompiler's next commits (branch `claude/modest-albattani-tr25g6`,
-  PR #5, on top of PR #4): chained jumps check the memory's change count
-  (another core may change a mapping mid-run), and system instructions,
-  LDAR/STLR and the single exclusives are translated (STXR a host
-  compare-and-swap, as the interpreter's after PR #4). Linux checks all
-  pass; a manual CI run on the branch is needed before merging (Windows
-  not yet run). Next: the ROADMAP's "Next task", CPU track B step 2
-  (REV, CLZ, RBIT ... with a plan written there).
-- Threaded cores (owner's decision of 2026-10-31; branch
-  `claude/dazzling-gates-ecemqi`, PR #4): each guest core on its own
-  host thread (`Process::run_threaded`), the OS layer behind one lock,
-  guest atomics on host compare-and-swap; a window runs that way by
-  default. It drives any backend, the recompiler included (ROADMAP
-  "Phase 3 notes", "Threaded cores").
+- The CPU track so far (PRs #3 and #5, merged): the differential tester
+  (`kestrel diff`) and the first x86_64 recompiler (`--backend jit`,
+  Windows and Linux x86_64): self-test 27/27, zero divergences, about 5
+  times the interpreter's speed. `auto` picks it on Windows and Linux
+  x86_64 (owner, 2026-10-31); `--backend interp` for the interpreter.
+  Chained jumps check the memory's change count, and system
+  instructions, LDAR/STLR and the single exclusives are translated (STXR
+  a host compare-and-swap); CI run 13 green on all 11 jobs.
+- Threaded cores (owner's decision of 2026-10-31; PR #4, merged): each
+  guest core on its own host thread (`Process::run_threaded`), the OS
+  layer behind one lock, guest atomics on host compare-and-swap; a
+  window runs that way by default. It drives any backend, the
+  recompiler included (ROADMAP "Phase 3 notes", "Threaded cores").
+- `v0.1.20` (2026-11-03, `main` after PR #5, every job green) is the
+  first release with the recompiler and the threaded cores.
+- Next: the ROADMAP's "Next task", CPU track B step 2 (REV, CLZ, RBIT
+  ... with a plan written there); the graphics track (5A) has not
+  started.
 
 ## How the owner works
 

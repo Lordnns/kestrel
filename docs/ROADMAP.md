@@ -93,7 +93,7 @@ moved to the CPU track, for the recompiler first.
 | Floating point and NEON translated | not started | they run through `Op::Interp` |
 | Speed: block chaining, inline memory accesses | done | "Phase 4 notes" |
 | Speed: computed-jump lookup in generated code, guest registers in host registers, lazy flags | not started | "Next task" |
-| One host thread per guest core | done (2026-10-31, with the threaded cores) | one `Jit` per core under `Process::run_threaded` (`Jit` is `Send`); its atomics, exclusives and barriers go to the interpreter's, which hold between host threads; hbthreads and hbsync threaded on it in `tests/threaded.rs`; "Phase 3 notes", "Threaded cores" |
+| One host thread per guest core | done (2026-10-31, with the threaded cores) | one `Jit` per core under `Process::run_threaded` (`Jit` is `Send`); its exclusives keep the interpreter's monitor and store with a host compare-and-swap, barriers are `mfence`, the other atomics go to the interpreter's, which hold between host threads; chained jumps check the memory's change count (CI run 13); hbthreads and hbsync threaded on it in `tests/threaded.rs`; "Phase 3 notes", "Threaded cores" |
 | Performance measurement for runs | done (2026-10-31) | `kestrel run --stats`: instructions per second, and frame times (average, 1% low, worst) |
 | Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 and Windows x86_64 (CI run 9, 2026-10-31); floating point and NEON still go through the interpreter | "Phase 4 notes" |
 | The recompiler as the default | done (owner, 2026-10-31, after CI run 9) | `auto` picks it on Windows and Linux x86_64 |
@@ -1271,6 +1271,14 @@ Verified (Linux x86_64 host, this session):
   instructions (223,459 of 32,583,559): exclusives (LDXR/STXR in the
   thread programs' spin loops), CLZ/REV/RBIT, system registers, floating
   point and NEON.
+- Then the chained jumps' change-count check, and system instructions,
+  LDAR/STLR and the single exclusives translated (PR #5; "Next task",
+  CPU track B steps 2 and 5): CI run 13 (manual, on the branch,
+  2026-10-31, commit `2f2ef11`,
+  https://github.com/Lordnns/kestrel/actions/runs/41174633337), all 11
+  jobs green, Windows x86_64 included. Released as `v0.1.20`
+  (2026-11-03, release run 21, every job green): the first release with
+  the recompiler as the default and the threaded cores.
 
 ## Next task
 
