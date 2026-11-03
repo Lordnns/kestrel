@@ -231,5 +231,12 @@ are harmless elsewhere.
   without logging in. The docker CLI is under
   `C:/Program Files/Docker/Docker/resources/bin` when PATH is stale, and
   Docker Desktop must be running.
-- A single self-test run varies by about 5 MIPS; run it three times
-  before calling something a speed regression.
+- Speed runs are noisy: on 2026-11-03 the recompiler's self-test on an
+  unchanged `main` gave 581 to 683 MIPS, hello-world 530 to 590. Before
+  calling something a regression, build `main` in a `git worktree` and
+  alternate the two binaries, three or four runs each (hello-world:
+  `kestrel run <nro> --headless --stats --max-steps 500000000`, the
+  path before the options).
+- LLVM's Windows installer has no llvm-mc: `gen-x64-vectors.py` falls
+  back to clang's integrated assembler (the same MC layer), and
+  `llvm-objdump` disassembles AArch64 words.
