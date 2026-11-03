@@ -64,8 +64,10 @@ sessions learned. The plan and the status live elsewhere; read them first:
   devices run, and the window presents with Vulkan (`ash`, owner
   2026-11-03, confirmed on the owner's Windows PC). 5B has started: GPU
   command lists run (the command processor, the MME and its macros,
-  the upload and copy engines, clears), and deko_examples' first example
-  shows its frame (checked by the examples); next draws and shaders
+  the upload and copy engines, clears), and draws run on the host's GPU:
+  Maxwell shaders translated to SPIR-V and drawn with Vulkan. deko_basic
+  and deko_examples 1 to 4 (a triangle, a cube, a textured cube) draw and
+  are checked by the examples; next deko_console and the other examples
   (ROADMAP "Next task" item 2).
 
 ## How the owner works

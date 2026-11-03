@@ -104,9 +104,9 @@ A homebrew program opens a window (`--headless` runs it without one).
 In a window it runs in real time with each guest core on its own host
 thread (`--single-thread` keeps every core on one host thread).
 The window shows what the program draws into its framebuffer, or what
-the GPU renders for it (only clears yet: programs that draw with it,
-such as most of deko3d's, stop with a message naming the first GPU method
-kestrel does not run), and takes your
+the GPU renders for it: kestrel translates the program's GPU shaders and
+draws with the host's GPU through Vulkan (Windows and Linux x86_64; what
+it does not run yet stops with a message naming it), and takes your
 keyboard and gamepads and gives them to the program as a Switch
 controller. Text a program prints for debugging goes to the terminal.
 
@@ -146,10 +146,10 @@ distribution).
 
 ### The standard homebrew examples
 
-`scripts/build-examples.sh` builds seven of the public homebrew examples
+`scripts/build-examples.sh` builds eight of the public homebrew examples
 (hello world, reading the controller, listing the SD card, threads, the
 console's colours and cursor codes, an RGBA framebuffer, deko3d's
-examples, of which the first is checked) from
+triangle and its examples, of which four are checked) from
 source with the official homebrew toolchain in Docker, and
 `scripts/run-examples.sh` runs them in kestrel and checks what each one
 shows. CI does both on every platform. To try one yourself after
