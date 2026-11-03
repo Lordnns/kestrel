@@ -1331,23 +1331,71 @@ fills 921,600 pixels a frame in guest code), vt52-demo about 6 s.
   (4) with `0x10000000 | slot`, EventWaitAsync answering Timeout (5)
   until the event is signalled), `services/nv.c` (NvError numbers),
   `display/*.c`.
-- Switchbrew ("NV services", "Display services") could not be read from
-  the cloud session of 2026-11-03: its network policy refuses
-  switchbrew.org. The nvhost devices' semantics (which fields are
-  outputs, the timeouts, GetConfig, the GPU characteristics) need it,
-  so that work waits for a session that can read it (the owner's PC,
-  or a cloud environment with switchbrew.org allowed).
+- Switchbrew, "NV services" (wiki source, read 2026-11-03; the
+  session's network first refused switchbrew.org, then allowed it):
+  the nvdrv commands (QueryEvent, 4), the /dev/nvhost-ctrl ioctl table
+  and argument layouts, the event ID formats, NvError. "Display
+  services" now redirects to "VI services".
+
+#### /dev/nvhost-ctrl (2026-11-03)
+
+What it is for: a syncpoint is a counter the GPU (and the display)
+increments when a piece of work finishes; a fence is "syncpoint N
+reaches value V". Programs wait on fences before reusing a buffer the
+GPU or the display still reads. libnx's nvFenceWait registers an event
+slot (SYNCPT_ALLOC_EVENT), gets its event (nvdrv QueryEvent with
+`0x10000000 | slot`), arms it (SYNCPT_WAIT_EVENT_EX, which answers
+Timeout when the fence is not reached yet), waits on the event, and on
+its own timeout clears the wait (SYNCPT_CLEAR_EVENT_WAIT).
+
+Implemented (`hle/service/nv.rs`): SYNCPT_READ (0x14), SYNCPT_INCR
+(0x15), SYNCPT_WAIT (0x16), SYNCPT_WAITEX (0x19), SYNCPT_READ_MAX
+(0x1a), SYNCPT_CLEAR_EVENT_WAIT (0x1c), SYNCPT_WAIT_EVENT_EX (0x1e),
+SYNCPT_ALLOC_EVENT (0x1f), SYNCPT_FREE_EVENT (0x20),
+SYNCPT_FREE_EVENT_BATCH (0x21), and nvdrv QueryEvent on nvhost-ctrl.
+No GPU runs yet, so only the program's own SYNCPT_INCR moves a
+syncpoint; `Process::syncpoint_incr` is where the GPU will. Still
+stopping, named: MODULE_MUTEX (0x17), MODULE_REGRDWR (0x18),
+GET_CONFIG (0x1b, "not available in production mode", with no error
+documented), SYNCPT_WAIT_EVENT (0x1d, libnx uses it only before 2.0.0;
+it allocates its own slot), SYNCPT_GET_SHIFT (0x22, which of its two
+answers is undocumented), the [S2] ioctls (0x27, 0x28, 0x2a, 0x2b), and
+QueryEvent on any other device.
+
+Tests: `nvhost_ctrl_syncpoints_and_events` in `service/mod.rs` (IPC);
+`guest/src/nro/hbnvctrl.c` sends the requests as libnx does, with the
+fence wait's both paths (signalled by an increment; timed out and
+cleared), modelled in `gen-expected.py`: self-test 28/28 on both
+backends, the same output at `-O3 -march=armv8.2-a` on both. Mutation
+check: signalling only when the value passes the threshold by one
+makes hbnvctrl deadlock (its event never fires) and fails the unit
+test. Switchbrew contradicts itself on SYNCPT_WAIT_EVENT_EX's Timeout
+value (its section says `slot | id << 4`, QueryEvent's says the new
+format); kestrel follows the section; libnx ignores the value.
+
+This supersedes the "Phase 2 acceptance" gap "/dev/nvhost-ctrl opens
+and stops on any ioctl".
 
 #### Choices (kestrel's)
 
-None in the emulator yet: the two examples needed no change to it.
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Syncpoints | IDs 0 to 191 (the Tegra X1's host1x count, as Linux's host1x driver lists for Tegra210; "NV services" does not say); others BadParameter; all start at 0 |
+| SYNCPT_INCR | both 0x40040015 ("NV services") and 0xc0040015 (libnx's `_NV_IOWR`); the value and the max move together |
+| Reached | a wrapping 32-bit compare: the value minus the threshold, as signed, is not negative |
+| SYNCPT_WAIT / WAITEX not reached | timeout 0: Timeout; any other timeout stops, named ("a request that blocks"): kestrel's services cannot make a request wait yet |
+| WAITEX's value | written only when the threshold is reached |
+| SYNCPT_WAIT_EVENT_EX | its timeout is not used (libnx waits on the event with its own); arming clears the event; reached: the value out, the event untouched |
+| Event IDs (QueryEvent, CLEAR_EVENT_WAIT) | the slot is the low 16 bits; the syncpoint and valid fields are not checked (libnx sends `0x10000000 \| slot` to both) |
+| Event slots | allocating one twice: AlreadyAllocated (13, libnx's name); freeing or using one not allocated: BadParameter; a batch skips slots not allocated; handles to a freed slot's event stay valid |
+| CLEAR_EVENT_WAIT | drops the slot's wait and clears its event |
 
 #### Gaps left in 5A
 
-- The nvhost devices: `/dev/nvhost-ctrl` (syncpoints, events), and the
-  GPU's `/dev/nvhost-ctrl-gpu`, `/dev/nvhost-as-gpu` and `/dev/nvhost-gpu`
-  (channels): no example of 5A uses them (with no GPU the buffer queue
-  gives no fences, so libnx never waits on one); deko3d (5B) does.
+- The GPU's nvhost devices: `/dev/nvhost-ctrl-gpu`, `/dev/nvhost-as-gpu`
+  and `/dev/nvhost-gpu` (channels): no example of 5A uses them; deko3d
+  (5B) does. With no GPU the buffer queue gives no fences, so libnx's
+  framebuffer never waits on nvhost-ctrl either.
 - The display gaps listed in "Phase 2 acceptance": GetDisplayVsyncEvent,
   the swap interval, the QUERY transaction, CreateStrayLayer, layer
   position and size; none of the examples calls them.
@@ -1551,13 +1599,12 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
      (PLAN.md section 5).
    - Next, in this order, each with the service steps below (sources,
      IPC unit tests, an `hb<service>.c` program with a model, checks):
-     1. `/dev/nvhost-ctrl`: SyncptRead (0x14), SyncptIncr (0x15),
-        SyncptWait (0x16), EventSignal (0x1c), EventWait (0x1d),
-        EventWaitAsync (0x1e), EventRegister (0x1f), EventUnregister
-        (0x20), nvdrv QueryEvent (4); GetConfig (0x1b) if Switchbrew
-        documents its answer. Needs Switchbrew's "NV services" for
-        which fields are outputs and the timeout rules: the cloud
-        session of 2026-11-03 could not reach switchbrew.org.
+     1. Done (2026-11-03): `/dev/nvhost-ctrl`'s syncpoints and events
+        and nvdrv QueryEvent, as libnx's fences use them; `hbnvctrl`
+        (self-test 28/28). Left stopping, named: GET_CONFIG,
+        SYNCPT_WAIT_EVENT, GET_SHIFT, the module ioctls and the [S2]
+        ones ("Phase 5 notes"). A wait that would block stops, until
+        kestrel's services can make a request wait.
      2. The buffer queue's fences (NvMultiFence on syncpoints) and the
         display gaps ("Phase 2 acceptance": GetDisplayVsyncEvent, the
         swap interval, QUERY).

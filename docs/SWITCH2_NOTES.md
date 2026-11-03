@@ -85,8 +85,9 @@ the owner legally has) but never includes its code or data.
 - Behaviour: on Switch 2, /dev/nvhost-ctrl also takes ALLOC_SYNCPT
   (0xc0080027), FREE_SYNCPT (0x40040028), GET_CHARACTERISTICS
   (0xc010002a) and CHECK_MODULE_SUPPORT (0xc008002b).
-- Used by: not implemented; `hle/service/nv.rs` opens /dev/nvhost-ctrl
-  and stops on every ioctl to it until the GPU work of phase 5.
+- Used by: not implemented; `hle/service/nv.rs` stops on them, named.
+  It answers the Switch 1 syncpoint and event ioctls since 2026-11-03
+  (ROADMAP "Phase 5 notes").
 
 ## Observations
 

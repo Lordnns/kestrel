@@ -391,7 +391,10 @@ method; the methods live next to the state they change:
   linear, pixel formats) for `Process::screen`, a
   `kestrel_hle::display::Screen`: the window paints it, the self-test
   records a CRC-32 of it. Buffers are freed at a 60 Hz vsync of guest
-  time, which the scheduler wakes for.
+  time, which the scheduler wakes for. nvdrv's /dev/nvhost-ctrl keeps
+  the syncpoints and the events programs wait on for fences; with no
+  GPU yet, only the program's own increments move them
+  (`Process::syncpoint_incr`, where the GPU will).
 - Unattended runs: `kestrel-cli/src/unattended.rs` gives a program a
   scripted controller (`--press`) and saves its last frame as a PNG
   (`--save-frame`); `scripts/run-examples.sh` uses both to run the
