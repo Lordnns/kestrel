@@ -324,6 +324,8 @@ fn result(op: &Op) -> Option<Val> {
         | Op::Bin { dst, .. }
         | Op::Adc { dst, .. }
         | Op::Not { dst, .. }
+        | Op::ByteSwap { dst, .. }
+        | Op::Clz { dst, .. }
         | Op::Extend { dst, .. }
         | Op::Cond { dst, .. }
         | Op::IsZero { dst, .. }
@@ -342,6 +344,8 @@ fn operands(op: &Op) -> Vec<Val> {
         Op::Bin { a, b, .. } | Op::Adc { a, b, .. } => vec![a, b],
         Op::LogicFlags { a, .. }
         | Op::Not { a, .. }
+        | Op::ByteSwap { a, .. }
+        | Op::Clz { a, .. }
         | Op::Extend { a, .. }
         | Op::IsZero { a, .. } => vec![a],
         Op::Select { c, a, b, .. } => vec![c, a, b],
@@ -555,6 +559,24 @@ impl Gen<'_> {
             Op::Not { w: width, dst, a } => {
                 self.get(RAX, a);
                 self.a.unary(Unary::Not, w(width), RAX);
+                self.put(dst, RAX);
+            }
+            Op::ByteSwap { w: width, dst, a } => {
+                self.get(RAX, a);
+                self.a.bswap(w(width), RAX);
+                self.put(dst, RAX);
+            }
+            Op::Clz { w: width, dst, a } => {
+                // x86_64 without LZCNT (BMI) has only BSR, the index of
+                // the highest set bit, undefined for 0 (ZF set). For
+                // bits - 1 >= i >= 0, CLZ = (bits - 1) - i = i ^ (bits - 1);
+                // for 0, 2 * bits - 1 gives bits through the same xor.
+                let bits = width.bits() as u64;
+                self.get(RCX, a);
+                self.a.mov_ri(RDX, 2 * bits - 1);
+                self.a.bsr(w(width), RAX, RCX);
+                self.a.cmov(Cc::E, W32, RAX, RDX);
+                self.a.alu_ri(Alu::Xor, W32, RAX, bits as i32 - 1);
                 self.put(dst, RAX);
             }
             Op::Extend {

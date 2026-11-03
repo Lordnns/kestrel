@@ -8,8 +8,7 @@
 //! interpreter, so every program runs whatever the coverage.
 //!
 //! Translated so far: all of data processing (immediate); data
-//! processing (register) except CRC32 and the one-source group (RBIT,
-//! REV, CLZ, CLS); branches, SVC and BRK; general-purpose loads and stores
+//! processing (register) except CRC32; branches, SVC and BRK; general-purpose loads and stores
 //! (single, pair, literal; every addressing mode); LDAR, STLR and the
 //! single-register exclusives; hints, barriers, cache maintenance, CLREX,
 //! and MRS/MSR of the system registers kept in `CpuState`. Floating
@@ -101,6 +100,28 @@ impl B {
         let dst = self.val();
         self.ops.push(Op::Not { w, dst, a });
         dst
+    }
+
+    fn byte_swap(&mut self, w: Width, a: Val) -> Val {
+        let dst = self.val();
+        self.ops.push(Op::ByteSwap { w, dst, a });
+        dst
+    }
+
+    fn clz(&mut self, w: Width, a: Val) -> Val {
+        let dst = self.val();
+        self.ops.push(Op::Clz { w, dst, a });
+        dst
+    }
+
+    /// Swap the groups of `shift` bits that `mask` selects with their
+    /// neighbours above: `((a >> shift) & mask) | ((a & mask) << shift)`.
+    fn swap_bits(&mut self, w: Width, a: Val, mask: u64, shift: u64) -> Val {
+        let hi = self.bin_k(BinOp::Lsr, w, a, shift);
+        let hi = self.bin_k(BinOp::And, w, hi, mask);
+        let lo = self.bin_k(BinOp::And, w, a, mask);
+        let lo = self.bin_k(BinOp::Shl, w, lo, shift);
+        self.bin(BinOp::Or, w, hi, lo)
     }
 
     fn extend(&mut self, a: Val, bits: u8, signed: bool) -> Val {
@@ -843,7 +864,42 @@ fn dp_reg(b: &mut B, i: u32) -> Option<Next> {
             let r = b.select(w, c, a, y);
             b.set_xr(rd, r);
         }
-        0b0110 if !bit(i, 30) => {
+        0b0110 if bit(i, 30) => {
+            // One-source: RBIT, REV16, REV, REV32, REV64, CLZ, CLS.
+            if rm != 0 || bit(i, 29) {
+                return None;
+            }
+            let a = b.xr(rn);
+            let r = match (sf, field(i, 15, 10)) {
+                (_, 0) => {
+                    // RBIT: swap bits, pairs and nibbles, then bytes.
+                    let a = b.swap_bits(w, a, 0x5555_5555_5555_5555, 1);
+                    let a = b.swap_bits(w, a, 0x3333_3333_3333_3333, 2);
+                    let a = b.swap_bits(w, a, 0x0f0f_0f0f_0f0f_0f0f, 4);
+                    b.byte_swap(w, a)
+                }
+                (_, 1) => b.swap_bits(w, a, 0x00ff_00ff_00ff_00ff, 8),
+                (false, 2) | (true, 3) => b.byte_swap(w, a),
+                (true, 2) => {
+                    // REV32: each word's bytes reversed, the words kept
+                    // in place.
+                    let s = b.byte_swap(w, a);
+                    b.bin_k(BinOp::Ror, w, s, 32)
+                }
+                (_, 4) => b.clz(w, a),
+                (_, 5) => {
+                    // CLS: the leading bits equal to the sign bit, not
+                    // counting it.
+                    let s = b.bin_k(BinOp::Asr, w, a, 1);
+                    let x = b.bin(BinOp::Xor, w, a, s);
+                    let z = b.clz(w, x);
+                    b.bin_k(BinOp::Sub, w, z, 1)
+                }
+                _ => return None,
+            };
+            b.set_xr(rd, r);
+        }
+        0b0110 => {
             // Two-source: UDIV, SDIV, LSLV, LSRV, ASRV, RORV.
             let op = match field(i, 15, 10) {
                 0b000010 => BinOp::UDiv,

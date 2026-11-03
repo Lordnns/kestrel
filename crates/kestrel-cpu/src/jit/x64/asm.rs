@@ -363,6 +363,12 @@ impl Asm {
         self.code.extend_from_slice(&[0x0f, 0xc8 + (r.0 & 7)]);
     }
 
+    /// `bsr dst, src`: dst = the index of src's highest set bit; ZF set
+    /// (and dst undefined) when src is 0.
+    pub fn bsr(&mut self, w: W, dst: R, src: R) {
+        self.op_rr(w, &[0x0f, 0xbd], dst, src);
+    }
+
     /// `lea dst, [m]`.
     pub fn lea(&mut self, dst: R, m: M) {
         self.op_rm(W64, &[0x8d], dst.0, m);

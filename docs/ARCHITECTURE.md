@@ -146,7 +146,8 @@ guest words ─► frontend.rs ─► ir::Block ─► x64/mod.rs ─► code.rs
   whose host compare-and-swaps hold between host threads.
 - **Encoder** (`x64/asm.rs`): kestrel's own (no dependency), from the
   Intel SDM; `scripts/gen-x64-vectors.py` checks every form it emits
-  against llvm-mc (5,551 cases, `x64/asm/vectors.rs`).
+  against llvm-mc (5,752 cases, `x64/asm/vectors.rs`; clang's integrated
+  assembler where llvm-mc is missing).
 - **Executable memory** (`code.rs`): `mmap`/`mprotect` on Linux,
   `VirtualAlloc`/`VirtualProtect`/`FlushInstructionCache` on Windows;
   pages are read-write while a block is copied in and read-execute

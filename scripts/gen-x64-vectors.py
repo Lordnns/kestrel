@@ -12,10 +12,13 @@ in its own section and the bytes are read back with llvm-objdump.
     python3 scripts/gen-x64-vectors.py --check    # fail if out of date
 
 Needs llvm-mc and llvm-objdump (override with $LLVM_MC and $OBJDUMP).
+Without llvm-mc (LLVM's Windows installer leaves it out), clang's
+integrated assembler is used: the same LLVM MC layer.
 """
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +72,7 @@ def gen():
                 case(f"a.mov_rr({w(width)}, {RUST[d]}, {RUST[s]})", f"mov {reg(d, width)}, {reg(s, width)}")
                 case(f"a.test_rr({w(width)}, {RUST[d]}, {RUST[s]})", f"test {reg(d, width)}, {reg(s, width)}")
                 case(f"a.imul_rr({w(width)}, {RUST[d]}, {RUST[s]})", f"imul {reg(d, width)}, {reg(s, width)}")
+                case(f"a.bsr({w(width)}, {RUST[d]}, {RUST[s]})", f"bsr {reg(d, width)}, {reg(s, width)}")
         for b in BASES:
             for disp in DISPS:
                 for r in (0, 5, 9):
@@ -168,8 +172,12 @@ def assemble():
         o = os.path.join(tmp, "x.o")
         with open(s, "w") as fh:
             fh.write("\n".join(src) + "\n")
-        subprocess.run([os.environ.get("LLVM_MC", "llvm-mc"), "-triple=x86_64-unknown-linux-gnu",
-                        "-filetype=obj", "-o", o, s], check=True)
+        mc = os.environ.get("LLVM_MC")
+        if mc or shutil.which("llvm-mc") or not shutil.which("clang"):
+            cmd = [mc or "llvm-mc", "-triple=x86_64-unknown-linux-gnu", "-filetype=obj", "-o", o, s]
+        else:
+            cmd = ["clang", "--target=x86_64-unknown-linux-gnu", "-c", "-x", "assembler", "-o", o, s]
+        subprocess.run(cmd, check=True)
         dump = subprocess.run([os.environ.get("OBJDUMP", "llvm-objdump"), "-s", o], check=True,
                               capture_output=True, text=True).stdout
     found = {}
