@@ -206,6 +206,10 @@ pub const CASES: &[Case] = &[
         Some(scripted_pad)
     ),
     homebrew!("hbdisplay", "homebrew NRO: vi, nvdrv, frames at vsync"),
+    homebrew!(
+        "hbnvctrl",
+        "homebrew NRO: nvhost-ctrl syncpoints and events"
+    ),
 ];
 
 /// Instruction budget per case; generous, so only real hangs trip it.

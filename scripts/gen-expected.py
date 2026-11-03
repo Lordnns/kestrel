@@ -1264,6 +1264,108 @@ def hbdisplay():
     return "".join(line + "\n" for line in out)
 
 
+def hbnvctrl():
+    """guest/src/nro/hbnvctrl.c: /dev/nvhost-ctrl's syncpoints and events,
+    sent as libnx's nvInitialize, nvFenceInit and nvFenceWait send them.
+    Switchbrew ("NV services"): NvError 0 success, 4 BadParameter, 5
+    Timeout; SYNCPT_READ and READ_MAX answer a value; SYNCPT_WAIT answers
+    at once for a threshold reached; SYNCPT_WAIT_EVENT_EX answers the
+    syncpoint's value when reached, and otherwise Timeout with
+    slot | id << 4, its event signalled once the syncpoint gets there;
+    event slots are 0x00 to 0x3f; QueryEvent's ID for nvhost-ctrl is
+    slot | syncpoint << 16 | valid << 28. Switchbrew ("Error codes"): a
+    wait that times out is 0xea01. libnx (nv.c): NvError 13 is
+    AlreadyAllocated. Kestrel's documented choices (docs/ROADMAP.md,
+    "Phase 5 notes"): syncpoints start at 0, IDs 0 to 191; SYNCPT_INCR
+    moves the value and the max; a slot allocated twice is
+    AlreadyAllocated; freeing a slot not allocated is BadParameter; a
+    batch skips slots not allocated; nvdrv descriptors count from 1."""
+    ok = hex64(0)
+    bad, timeout = hex64(4), hex64(5)
+    timed_out = hex64(0xEA01)
+    syncpt, slot = 7, 0
+    value = 0
+    out = [
+        "homebrew nvhost-ctrl test",
+        f"sm: register: {ok}",
+        f"SetHeapSize: {ok}",
+        f"CreateTransferMemory: {ok}",
+        f"nvdrv: {ok}",
+        f"Initialize: {ok}",
+        f"  error: {ok}",
+        f"SetAruid: {ok}",
+        f"  error: {ok}",
+        f"Open /dev/nvhost-ctrl: {ok}",
+        f"  fd: {hex64(1)}",
+        f"  error: {ok}",
+    ]
+
+    def read(label, v):
+        out.extend([f"{label}{ok}", f"  value: {v}"])
+
+    def incr():
+        nonlocal value
+        value += 1
+        out.append(f"SYNCPT_INCR: {ok}")
+
+    def wait_async(threshold):
+        if value >= threshold:
+            out.extend([f"SYNCPT_WAIT_EVENT_EX: {ok}", f"  value: {hex64(value)}"])
+        else:
+            out.extend(
+                [f"SYNCPT_WAIT_EVENT_EX: {timeout}", f"  value: {hex64(slot | syncpt << 4)}"]
+            )
+
+    read("SYNCPT_READ: ", value)
+    incr()
+    incr()
+    read("SYNCPT_READ: ", value)
+    read("SYNCPT_READ_MAX: ", value)
+    read("SYNCPT_READ of another: ", 0)
+    out.append(f"SYNCPT_READ of 192: {bad}")
+    out += [
+        f"SYNCPT_WAIT: {ok}",
+        f"SYNCPT_WAIT: {ok}",
+        f"SYNCPT_WAIT: {timeout}",
+        f"EventRegister: {ok}",
+        f"EventRegister again: {hex64(13)}",
+        f"QueryEvent: {ok}",
+        f"  error: {ok}",
+        f"  event handed out: {hex64(1)}",
+    ]
+    wait_async(4)
+    out.append(f"wait for the event, 0 ns: {timed_out}")
+    incr()
+    out.append(f"wait for the event, 0 ns: {timed_out}")
+    incr()
+    out += [f"wait for the event: {ok}", f"reset it: {ok}"]
+    wait_async(4)
+    wait_async(6)
+    out += [f"wait for the event, 1 ms: {timed_out}", f"EventSignal: {ok}"]
+    incr()
+    incr()
+    out.append(f"wait for the event, 0 ns: {timed_out}")
+    read("SYNCPT_READ: ", value)
+    out += [
+        f"close the event: {ok}",
+        f"EventUnregister: {ok}",
+        f"EventUnregister again: {bad}",
+        f"QueryEvent of a free slot: {ok}",
+        f"  error: {bad}",
+        f"EventRegister 5: {ok}",
+        f"EventRegister 63: {ok}",
+        f"EventRegister 64: {bad}",
+        f"FREE_EVENT_BATCH: {ok}",
+        f"EventUnregister 5: {bad}",
+        f"Close /dev/nvhost-ctrl: {ok}",
+        f"  error: {ok}",
+        f"close nvdrv: {ok}",
+        f"close the transfer memory: {ok}",
+        f"close sm: {ok}",
+    ]
+    return "".join(line + "\n" for line in out)
+
+
 PROGRAMS = {
     "hello": hello,
     "asm_checks": asm_checks,
@@ -1287,6 +1389,7 @@ PROGRAMS = {
     "hbpower": hbpower,
     "hbinput": hbinput,
     "hbdisplay": hbdisplay,
+    "hbnvctrl": hbnvctrl,
 }
 
 
