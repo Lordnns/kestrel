@@ -1652,7 +1652,7 @@ def hbnvgpu():
     # The copies, on a model of the mapped memory (offsets from the
     # mapping): inline-to-memory writes its data bytes in order (little-
     # endian words) as lines; DMA copy reads lines and writes them.
-    mem = bytearray(0x5000)
+    mem = bytearray(0x8000)
     data = b"".join(w.to_bytes(4, "little")
                     for w in [0x04030201, 0x08070605, 0x0C0B0A09])
     for line in range(2):
@@ -1689,6 +1689,48 @@ def hbnvgpu():
         f"  buffer copy word 0: {hex64(word(0x2300))}",
         f"  buffer copy word 4: {hex64(word(0x2310))}",
         f"  buffer copy word 5: {hex64(word(0x2314))}",
+    ]
+    # The clears, on the same memory model. Clear values are float32
+    # bits; a unorm channel is the value clamped to 0..1, times 2^bits - 1,
+    # rounded to the nearest, halves up (kestrel's documented choice); a
+    # 16-bit float channel is the IEEE half nearest, ties to even (Python's
+    # struct "e"). A8B8G8R8 names its channels from the high bits down,
+    # so R is the low byte (deko3d's format table: 0xD5 is RGBA8).
+    def f32(bits):
+        return struct.unpack("<f", struct.pack("<I", bits))[0]
+
+    def unorm8(v):
+        return math.floor(min(max(v, 0.0), 1.0) * 255 + 0.5)
+
+    target0 = dict(width=32 * 4, height=16, log2=(0, 1, 0))
+
+    def clear0(rgba, enables, x0, x1, y0, y1):
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                at = 0x6000 + block_linear(4 * x, y, 0, **target0)
+                for c in range(4):
+                    if enables >> c & 1:
+                        mem[at + c] = unorm8(f32(rgba[c]))
+
+    clear0([0x3F800000, 0x3F000000, 0x3E800000, 0], 0xF, 0, 32, 0, 16)
+    clear0([0x3E4CCCCD, 0x3F4CCCCD, 0x3F666666, 0x3E99999A], 0x3, 4, 12, 9, 11)
+    halves = b"".join(struct.pack("<e", f32(b)) for b in
+                      [0x3F800000, 0xC0000000, 0x3EAA7EFA, 0x477FE000])
+    for y in range(2):
+        for x in range(4):
+            mem[0x7000 + 32 * y + 8 * x:0x7008 + 32 * y + 8 * x] = halves
+    pixels = [word(0x6000 + 4 * i) for i in range(32 * 16)]
+    out += [
+        f"KickoffPb with clears: {ok}",
+        f"  fence value: {hex64(2)}",
+        f"  target 0 pixels of the first clear: {hex64(pixels.count(0x004080FF))}",
+        f"  target 0 pixels of the second: {hex64(pixels.count(0x0040CC33))}",
+        f"  target 0 at 0x230: {hex64(word(0x6230))}",
+        f"  target 0 at 0x34c: {hex64(word(0x634C))}",
+        f"  target 0 at 0x360: {hex64(word(0x6360))}",
+        f"  target 1 pixel (0, 0) RG: {hex64(word(0x7000))}",
+        f"  target 1 pixel (0, 0) BA: {hex64(word(0x7004))}",
+        f"  target 1 pixel (3, 1) BA: {hex64(word(0x7000 + 32 + 24 + 4))}",
     ]
     out += [
         f"SET_ERROR_NOTIFIER off: {ok}",
