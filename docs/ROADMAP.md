@@ -1837,6 +1837,91 @@ test.
 | Interrupts, flushes, membars, L2 bypass, pipelining | nothing to do: the work is done before the submission returns |
 | deko3d's tiled cache barrier and flush | nothing to do |
 
+#### 5B, step 4: clears and render targets, presented (2026-11-03)
+
+What it is for: the first thing a program's GPU work shows is a clear:
+the render target filled with a colour, in rectangles, before anything
+is drawn. With it, a deko3d program that clears and presents shows its
+frame in kestrel's window through the same swapchain a drawing program
+uses: deko_examples' first example ("01: Simple Setup", A in its menu)
+draws its picture with four scissored clears, and kestrel shows it.
+
+Sources: NVIDIA's `clb197.h` (MIT) for the methods, their fields and the
+colour formats' names; deko3d (zlib) for what the names mean and how a
+program drives them: its format table (`image_formats.h`,
+`format_traits.inc`) gives A8B8G8R8 (0xD5) as RGBA8, the first-named
+channel in the high bits; `gpu_3d_base.cpp` binds a target with its
+width in pixels (block linear) or its pitch in bytes (pitch linear), its
+array pitch in units of 4 bytes, and SET_CT_SELECT listing the targets
+in order; its clear macro (`clear_buffers.mme`) clears each layer by
+RT_ARRAY_INDEX, the area chosen with scissor 0; libnx's native window
+(`native_window.c`, ISC) shows why deko_examples sent pixel format 0.
+
+Implemented (`hle/src/gpu/clear.rs`):
+- CLEAR_SURFACE for colour targets: MRT_SELECT picks one of the targets
+  SET_CT_SELECT lists, RT_ARRAY_INDEX the layer (array layers by the
+  array pitch, or a 3D target's slices); the R, G, B and A enables
+  (channels not enabled are kept); the area is the target within the
+  surface clip, and with SET_CLEAR_SURFACE_CONTROL the clear rectangle
+  and scissor 0. A disabled target (format 0) is not touched.
+- Colour formats: RGBA32F, RGBA16F, A8R8G8B8 and A8B8G8R8 (unorm and
+  sRGB), their X8 forms, A2B10G10R10, R5G6B5, G8R8, R8. The clear values
+  are floats: unorm channels rounded to the nearest, sRGB encoded
+  (IEC 61966-2-1), halves rounded to the nearest even.
+- A clear reads the rows of blocks it touches once, fills them and
+  writes them back; whole rows with every channel are written without
+  reading. deko_examples' four clears a frame cost about 5 ms of host
+  time on the cloud machine, display included (191 fps of headroom).
+- The MME shadow RAM (SET_MME_SHADOW_RAM_CONTROL): writes are recorded
+  in the shadow when tracked, not in pass-through, and replay sends the
+  shadow's value; macros read the shadow (kestrel's reading, below).
+  deko3d changes state for a clear in pass-through and replays it after.
+- DECOMPRESS_SURFACE and DECOMPRESS_ZETA_SURFACE do nothing: kestrel
+  writes every surface uncompressed.
+- The display reads a buffer's pixel format from the NvGraphicBuffer
+  itself, not the header around it: libnx's native window resets the
+  header's format to 0 when it disconnects, so deko_examples' second
+  swapchain (made when an example starts) sent 0 there.
+- Stop, named: depth and stencil clears, other colour formats, a clear
+  limited by viewport 0, window offsets, a layer past the target's.
+
+Where the deko3d examples stop now: deko_basic and deko_console at
+`OGL_SET_CULL`, their first draw's state (step 5); deko_examples'
+first example runs and shows its frame.
+
+Acceptance: `build-examples.sh` builds deko_examples too (deko3d 0.5.0,
+uam 1.1.0 and glm in the pinned image), and `run-examples.sh` runs it
+with A pressed in its menu, ending on an instruction budget a little
+after (its first example draws until Plus, which would bring the menu
+back; the clock is counted, so the frames repeat). `check-examples.py`
+checks every pixel against the rectangles Example01_SimpleSetup.cpp
+clears, their colours as 8-bit unorm. Not in the threaded runs, whose
+clock is real time.
+
+Tests: `gpu::clear::tests` (each format's packing, halves' rounding),
+`display::tests` (the rows of blocks a clear touches), the IPC test (a
+scissored clear of a block-linear RGBA8 target, a green-only clear under
+pass-through and the replay after, a pitch R5G6B5 target through
+SET_CT_SELECT with red and blue only, the stops), `vi`'s tests (a
+buffer whose header says format 0); `hbnvgpu` clears two targets
+(block-linear RGBA8 with a scissored clear of red and green, pitch
+RGBA16F) and prints what landed, modelled in `gen-expected.py` with its
+own packing (Python's struct for halves) and its block-linear function:
+self-test 29/29 on both backends, the same output at `-O3
+-march=armv8.2-a`. Mutation check: unorm values truncated instead of
+rounded fail hbnvgpu, the format test and the deko_examples check.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Float to unorm | clamped to 0..1, times 2^bits - 1, rounded to the nearest, halves up; NaN 0 |
+| MRT_SELECT | an index into SET_CT_SELECT's list (deko3d lists targets in order, so either reading gives the same target) |
+| The clear area | the target within the surface clip, then the clear rectangle and scissor 0 as SET_CLEAR_SURFACE_CONTROL asks |
+| Colour write masks (SET_CT_WRITE) | not applied to clears; CLEAR_SURFACE's enables are |
+| X bits of X8 formats | kept |
+| A whole-row clear | writes the alignment padding past the target's edges too |
+| MME shadow RAM | tracked in METHOD_TRACK and _WITH_FILTER (no source gives the filter), not in PASSTHROUGH; REPLAY runs the method with the shadow's value; macros read the shadow; a method's own side effects (the constant buffer offset, the firmware's scratch) set both |
+| A buffer's pixel format | the NvGraphicBuffer's own, not the header's |
+
 #### Gaps left in 5A
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
@@ -2075,9 +2160,11 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         linear (in three dimensions). deko_basic and deko_console stop at
         `CLEAR_SURFACE`, deko_examples at "pixel format 0" in the display
         ("Phase 5 notes").
-     4. Clears and render targets, presented: a deko3d frame reaching
-        the window through the queue (and deko_examples' swapchain
-        format).
+     4. Done (2026-11-03): clears and render targets, presented.
+        deko_examples' first example shows its frame (checked by
+        `run-examples.sh`); deko_basic and deko_console stop at
+        `OGL_SET_CULL`, their first draw ("Phase 5 notes"). Depth and
+        stencil clears are left for step 5, which needs them.
      5. Draws: vertex fetch, Maxwell shader decoding to SPIR-V, textures.
 
 Other candidates, when the owner asks for them: a licence-notices file in

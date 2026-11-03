@@ -103,10 +103,10 @@ differently are refused. Games can be run from any folder.
 A homebrew program opens a window (`--headless` runs it without one).
 In a window it runs in real time with each guest core on its own host
 thread (`--single-thread` keeps every core on one host thread).
-The window shows what the program draws into its framebuffer (the GPU
-runs command lists only partly yet, so programs that render with it,
-such as deko3d's, stop with a message naming the first GPU method kestrel
-does not run), and takes your
+The window shows what the program draws into its framebuffer, or what
+the GPU renders for it (only clears yet: programs that draw with it,
+such as most of deko3d's, stop with a message naming the first GPU method
+kestrel does not run), and takes your
 keyboard and gamepads and gives them to the program as a Switch
 controller. Text a program prints for debugging goes to the terminal.
 
@@ -146,9 +146,10 @@ distribution).
 
 ### The standard homebrew examples
 
-`scripts/build-examples.sh` builds six of the public homebrew examples
+`scripts/build-examples.sh` builds seven of the public homebrew examples
 (hello world, reading the controller, listing the SD card, threads, the
-console's colours and cursor codes, an RGBA framebuffer) from
+console's colours and cursor codes, an RGBA framebuffer, deko3d's
+examples, of which the first is checked) from
 source with the official homebrew toolchain in Docker, and
 `scripts/run-examples.sh` runs them in kestrel and checks what each one
 shows. CI does both on every platform. To try one yourself after
