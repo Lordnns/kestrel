@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "guest" / "src"
 OUT = ROOT / "guest" / "expected"
 M64 = (1 << 64) - 1
+M32 = (1 << 32) - 1
 
 
 def hex64(v):
@@ -1407,6 +1408,76 @@ def hbnvctrl():
     return "".join(line + "\n" for line in out)
 
 
+def mme_run(code, params):
+    """The Maxwell macro method expander (MME), from envytools'
+    envydis/macro.c (MIT) description, where it and Mesa's mme_fermi_sim.c
+    differ: one 32-bit instruction each; OP bits 2:0 (0 ALU, 1 add
+    immediate, 2 merge, 3 and 4 bitfield extract-shift, 5 read, 7 branch),
+    the assign mode 6:4 (0 parm, 1 mov, 2 maddr, 3 send then parm, 4
+    send, 5 maddr then parm, 6 maddr and parm-send, 7 maddr-send), EXIT 7,
+    DST 10:8, SRC0 13:11, SRC1 16:14, a signed 18-bit immediate 31:14, or
+    the ALU op 21:17, or bitfield src 21:17, size 26:22, dst 31:27. A
+    method address operand has the method in bits 11:0 (words), the
+    increment in 17:12. Branches and exits have one delay slot. Returns the
+    method writes sent: (byte offset, value). Only what hbnvgpu's macro
+    uses is modelled; anything else raises."""
+    regs = [0] * 8
+    regs[1] = params[0]
+    params = list(params[1:])
+    method, inc = None, 0
+    sent = []
+    pc, exiting = 0, False
+
+    def f(w, lo, n):
+        return (w >> lo) & ((1 << n) - 1)
+
+    def setreg(r, v):
+        if r:
+            regs[r] = v & M32
+
+    def send(v):
+        nonlocal method
+        sent.append((method, v & M32))
+        method = (method + inc) & 0x3FFC
+
+    def maddr(v):
+        nonlocal method, inc
+        method, inc = (v & 0xFFF) * 4, (v >> 12 & 0x3F) * 4
+
+    while True:
+        w = code[pc]
+        op, assign, dst = f(w, 0, 3), f(w, 4, 3), f(w, 8, 3)
+        x, y = regs[f(w, 11, 3)], regs[f(w, 14, 3)]
+        imm = (w if w < 1 << 31 else w - (1 << 32)) >> 14
+        if op == 0 and f(w, 17, 5) == 0:
+            r = (x + y) & M32
+        elif op == 1:
+            r = (x + imm) & M32
+        elif op == 4:
+            size, src = f(w, 22, 5), f(w, 17, 5)
+            r = ((y >> src) & ((1 << size) - 1)) << x & M32
+        else:
+            raise ValueError(f"macro instruction {w:#x} is outside the model")
+        if assign == 0:
+            setreg(dst, params.pop(0))
+        elif assign == 1:
+            setreg(dst, r)
+        elif assign == 2:
+            setreg(dst, r)
+            maddr(r)
+        elif assign == 4:
+            setreg(dst, r)
+            send(r)
+        else:
+            raise ValueError(f"assign mode {assign} is outside the model")
+        if exiting:
+            break
+        exiting = f(w, 7, 1) == 1
+        pc += 1
+    assert not params, "the macro leaves parameters unread"
+    return sent
+
+
 def hbnvgpu():
     """guest/src/nro/hbnvgpu.c: the GPU's nvdrv devices, sent as libnx's
     nvGpuInit, nvAddressSpace*, nvMapCreate and nvGpuChannelCreate send
@@ -1523,6 +1594,36 @@ def hbnvgpu():
         f"  fence value: {hex64(2)}",
         f"  host semaphore: {hex64(0xABCD)}",
         f"  report semaphore: {hex64(0x55)}",
+    ]
+    # The macro, encoded from the same description (mme_run's), run on
+    # its parameters: its sends to SET_REPORT_SEMAPHORE_A-D (0x1b00 to
+    # 0x1b0c) release a one-word report ("clb197.h": OPERATION 0 RELEASE,
+    # STRUCTURE_SIZE bit 28 ONE_WORD) of C at the address in A and B.
+    def addi(a, d, s, v):
+        return 1 | a << 4 | d << 8 | s << 11 | (v & 0x3FFFF) << 14
+
+    def alu(a, d, s):
+        return a << 4 | d << 8 | s << 11
+
+    def shl(a, s, b, size):
+        return 4 | a << 4 | s << 11 | b << 14 | size << 22
+
+    code = [addi(2, 0, 0, 0x1000 | 0x1B00 >> 2), alu(4, 0, 1), alu(0, 2, 0),
+            alu(4, 0, 2), alu(0, 3, 0), alu(4, 0, 3), addi(1, 4, 0, 1),
+            addi(1, 5, 0, 28), shl(4, 5, 4, 1) | 1 << 7, alu(1, 0, 0)]
+    gpu = 0x4_0000_0000 + 0x20000
+    sent = dict(mme_run(code, [gpu >> 32, (gpu & M32) + 0x808, 0x77]))
+    assert sent[0x1B0C] & 3 == 0 and sent[0x1B0C] >> 28 & 1
+    report = {((sent[0x1B00] & 0xFF) << 32 | sent[0x1B04]) - gpu: sent[0x1B08]}
+    # The constant buffer: words from offset 4, advancing by 4.
+    out += [
+        f"KickoffPb with a macro: {ok}",
+        f"  fence value: {hex64(2)}",
+        f"  macro's report: {hex64(report[0x808])}",
+        f"  constant buffer word 1: {hex64(0xAAAA)}",
+        f"  constant buffer word 2: {hex64(0xBBBB)}",
+    ]
+    out += [
         f"SET_ERROR_NOTIFIER off: {ok}",
         f"close the error event: {ok}",
         f"Close /dev/nvhost-gpu: {ok}",

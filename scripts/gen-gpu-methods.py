@@ -55,20 +55,31 @@ CLASSES = [
     ("DMA_COPY", 0xB0B5, "classes/dma-copy/clb0b5.h", "NVB0B5"),
 ]
 
-# 3D methods NVIDIA's header does not name that envytools' rnndb
-# (graph/gf100_3d.xml) gives as plain value registers (booleans or numbers,
-# no side effect described), which deko3d writes: kept as state, under
-# rnndb's name. Each one is added when a program needs it, after checking
-# rnndb's entry.
-ENVY_STATE_3D = {
-    0x15B4: "CSAA_ENABLE",
+# 3D methods NVIDIA's header does not name, which programs write and a
+# public source gives as plain value registers (booleans or numbers, no
+# side effect described): kept as state, under the source's name. Each one
+# is added when a program needs it, after checking the source's entry:
+# envytools' rnndb (graph/gf100_3d.xml, MIT), or deko3d's
+# source/maxwell/engine_3d.def (zlib; its configuration registers only,
+# not the ones that act, such as TiledCacheBarrier and TiledCacheFlush).
+EXTRA_STATE_3D = {
+    0x15B4: "ENVYTOOLS_CSAA_ENABLE",
+    0x0F60: "DEKO3D_TILED_CACHE_ENABLE",
+    0x0F64: "DEKO3D_TILED_CACHE_TILE_SIZE",
+    0x0F68: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG0",
+    0x0F6C: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG1",
+    0x0F70: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG3",
+    0x1108: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG2",
 }
 
 # SET_ methods that act when written (from their descriptions' fields:
 # the D word of a semaphore or report is its operation).
+# SET_FALCON00-31 hand a request to the GPU's microcontroller (falcon)
+# firmware; deko3d's pgraph.mme (zlib) uses SET_FALCON04 as a call that
+# writes a privileged register and reports completion.
 TRIGGERS = {
     "SET_REPORT_SEMAPHORE_D",
-}
+} | {f"SET_FALCON{i:02}" for i in range(32)}
 
 LICENCE = """// NVIDIA's open-gpu-doc class headers, from which these tables are made:
 //
@@ -178,8 +189,16 @@ def parse(path, prefix):
     """Methods as dicts: name, base, outer stride (0 for scalars), inner
     stride (0 unless two-dimensional)."""
     methods = []
+    # Fields are "#define NVxxxx_METHOD_FIELD hi:lo"; their values,
+    # "#define NVxxxx_METHOD_FIELD_VALUE 0x...", extend a field's name.
+    field = re.compile(r"^#define (NV[0-9A-F]+)_(\w+)\s+\d+:\d+\s*$")
+    fields = set()
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
+            m = field.match(line)
+            if m and m.group(1) == prefix:
+                fields.add(m.group(2))
+                continue
             m = ARRAY2.match(line)
             if m and m.group(1) == prefix:
                 methods.append(
@@ -197,23 +216,13 @@ def parse(path, prefix):
             m = SCALAR.match(line)
             if m and m.group(1) == prefix:
                 name, value = m.group(2), int(m.group(3), 16)
-                # Methods are word-aligned offsets below 0x4000; field
-                # values (NAME_FIELD_VALUE 0x...) follow their method and
-                # are told apart by their name extending a method's.
-                methods.append(dict(name=name, base=value, stride=0, inner=0, scalar=True))
-    # Scalars that are field values: their name extends the previous
-    # method's name (fields and values are listed after their method).
-    out = []
-    last = None
-    for m in methods:
-        if m.get("scalar"):
-            if last is not None and m["name"].startswith(last + "_"):
-                continue
-            if m["base"] % 4 != 0 or m["base"] >= 0x4000:
-                continue
-        out.append(m)
-        last = m["name"]
-    return out
+                # A field's value, not a method: its name extends a field's.
+                if any(name.startswith(f + "_") for f in fields):
+                    continue
+                if value % 4 != 0 or value >= 0x4000:
+                    continue
+                methods.append(dict(name=name, base=value, stride=0, inner=0))
+    return methods
 
 
 def counts(methods):
@@ -260,7 +269,7 @@ def confirm(methods, lengths):
 
 
 def kind(name):
-    if name.startswith("ENVYTOOLS_"):
+    if name.startswith(("ENVYTOOLS_", "DEKO3D_")):
         return "State"
     if name.startswith("SET_") and name not in TRIGGERS:
         return "State"
@@ -287,9 +296,9 @@ def generate():
         methods = counts(parse(os.path.join(SRC, path), prefix))
         methods.sort(key=lambda m: m["base"])
         if label == "THREED":
-            for base, name in ENVY_STATE_3D.items():
+            for base, name in EXTRA_STATE_3D.items():
                 assert not any(m["base"] == base for m in methods), name
-                methods.append(dict(name="ENVYTOOLS_" + name, base=base, stride=0,
+                methods.append(dict(name=name, base=base, stride=0,
                                     inner=0, count=1, inner_count=1))
             methods.sort(key=lambda m: m["base"])
             unconfirmed = confirm(methods, lengths)

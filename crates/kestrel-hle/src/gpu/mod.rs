@@ -19,6 +19,7 @@
 //! that act are executed or stop the program, named.
 
 pub mod methods;
+pub mod mme;
 mod run;
 
 use std::collections::BTreeMap;
@@ -243,6 +244,9 @@ pub struct Engine {
     pub mme_code_pointer: u32,
     pub mme_start: Vec<u32>,
     pub mme_start_pointer: u32,
+    /// Constant buffers bound to shader stages (BIND_GROUP_CONSTANT_BUFFER):
+    /// (stage, slot) to (GPU address, size).
+    pub constant_buffers: BTreeMap<(u32, u32), (u64, u32)>,
 }
 
 impl Engine {
@@ -254,6 +258,7 @@ impl Engine {
             mme_code_pointer: 0,
             mme_start: Vec::new(),
             mme_start_pointer: 0,
+            constant_buffers: BTreeMap::new(),
         }
     }
 
@@ -277,6 +282,9 @@ pub struct ChannelState {
     pub host: Vec<u32>,
     /// Method writes executed, for tests and for phase 5B's debugging.
     pub methods_run: u64,
+    /// Privileged GPU registers the firmware calls wrote, by address
+    /// (SET_FALCON04, `gpu/run.rs`).
+    pub hw_regs: BTreeMap<u32, u32>,
 }
 
 #[cfg(test)]

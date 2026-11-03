@@ -1,6 +1,6 @@
 //! Running a channel's command lists (see `gpu/mod.rs`).
 
-use super::{class, decode, engine_name, method, Call, Engine, Entry, Kind};
+use super::{class, decode, engine_name, method, mme, Call, Engine, Entry, Kind};
 use super::{MME_CODE_WORDS, MME_START_WORDS};
 use crate::service::{nv, IpcError};
 use crate::Process;
@@ -29,6 +29,45 @@ mod host {
 /// The first engine method; below it, host methods.
 const ENGINE_METHODS: u32 = 0x100;
 
+/// LOAD_CONSTANT_BUFFER_OFFSET (`clb197.h`).
+const CB_OFFSET: u32 = 0x238c;
+
+/// SET_MME_SHADOW_SCRATCH(0) (`clb197.h`): the macros' scratch registers.
+const SCRATCH: u32 = 0x3400;
+
+/// CALL_MME_MACRO(0) (`clb197.h`): macro n is called at 0x3800 + n * 8,
+/// its parameters follow at 0x3804 + n * 8.
+const MACRO_CALLS: u32 = 0x3800;
+
+/// What a running macro reads and sends: the 3D engine's registers and
+/// methods. A stop in a method the macro sends is kept to return as it is.
+struct MacroHost<'a> {
+    p: &'a mut Process,
+    fd: u32,
+    subchannel: u32,
+    error: Option<IpcError>,
+}
+
+impl mme::Host for MacroHost<'_> {
+    fn read(&mut self, method: u32) -> u32 {
+        let state = self.p.channel_state(self.fd);
+        state.engines[&class::THREED].reg(method)
+    }
+
+    fn send(&mut self, method: u32, value: u32) -> Result<(), String> {
+        let call = Call {
+            subchannel: self.subchannel,
+            method,
+            value,
+        };
+        self.p.channel_state(self.fd).methods_run += 1;
+        self.p.engine_method(self.fd, call).map_err(|e| {
+            self.error = Some(e);
+            "stopped".to_string()
+        })
+    }
+}
+
 fn stop(what: String) -> IpcError {
     IpcError::Unimplemented(what)
 }
@@ -52,8 +91,27 @@ impl Process {
             }
             let words = self.gpu_read_words(fd, entry.address, entry.words)?;
             let calls = decode(&words).map_err(stop)?;
-            for call in calls {
-                self.gpu_method(fd, call)?;
+            let mut i = 0;
+            while i < calls.len() {
+                let call = calls[i];
+                i += 1;
+                let Some(n) = self.macro_call(fd, call) else {
+                    self.gpu_method(fd, call)?;
+                    continue;
+                };
+                // CALL_MME_MACRO(n)'s data is the first parameter; the
+                // CALL_MME_DATA(n) writes that follow on the subchannel are
+                // the rest (envytools: the unit takes parameters from them).
+                let mut params = vec![call.value];
+                let data = MACRO_CALLS + n * 8 + 4;
+                while i < calls.len()
+                    && calls[i].subchannel == call.subchannel
+                    && calls[i].method == data
+                {
+                    params.push(calls[i].value);
+                    i += 1;
+                }
+                self.run_macro(fd, call.subchannel, n, &params)?;
             }
         }
         Ok(())
@@ -125,12 +183,61 @@ impl Process {
             .engine
     }
 
+    /// The macro `call` calls: CALL_MME_MACRO(n) on a subchannel bound to
+    /// the 3D engine.
+    fn macro_call(&mut self, fd: u32, call: Call) -> Option<u32> {
+        let class = self.channel_state(fd).subchannels[call.subchannel as usize]?;
+        let at = call.method.checked_sub(MACRO_CALLS)?;
+        (class == class::THREED && at % 8 == 0).then_some(at / 8)
+    }
+
+    /// Run 3D macro `n` with `params`: its method writes go to the 3D
+    /// engine on `subchannel`, as the pushbuffer's would.
+    fn run_macro(
+        &mut self,
+        fd: u32,
+        subchannel: u32,
+        n: u32,
+        params: &[u32],
+    ) -> Result<(), IpcError> {
+        let state = self.channel_state(fd);
+        state.methods_run += params.len() as u64;
+        let e = state
+            .engines
+            .get(&class::THREED)
+            .expect("bound engines exist");
+        // kestrel's choice: a macro whose start address was never loaded
+        // stops (no source says what the start RAM holds before).
+        let Some(&start) = e.mme_start.get(n as usize) else {
+            return Err(stop(format!(
+                "GPU 3D macro {n} called, whose start address was never loaded"
+            )));
+        };
+        let code = e.mme_code.clone();
+        let mut host = MacroHost {
+            p: self,
+            fd,
+            subchannel,
+            error: None,
+        };
+        let ran = mme::run(&code, start, params, &mut host);
+        if let Some(e) = host.error {
+            return Err(e);
+        }
+        ran.map_err(|e| stop(format!("GPU 3D macro {n}: {e}")))
+    }
+
     /// One method write.
     fn gpu_method(&mut self, fd: u32, call: Call) -> Result<(), IpcError> {
         self.channel_state(fd).methods_run += 1;
         if call.method < ENGINE_METHODS {
             return self.host_method(fd, call);
         }
+        self.engine_method(fd, call)
+    }
+
+    /// A method write to the engine bound to its subchannel.
+    fn engine_method(&mut self, fd: u32, call: Call) -> Result<(), IpcError> {
         let Some(class) = self.channel_state(fd).subchannels[call.subchannel as usize] else {
             return Err(stop(format!(
                 "GPU method {:#x} = {:#x} on subchannel {}, which has no object bound",
@@ -164,7 +271,12 @@ impl Process {
         match (class, m.name) {
             // Nothing to do: kestrel runs every method in order, at once,
             // so there is never work to wait for.
-            (_, "NO_OPERATION") | (class::THREED, "WAIT_FOR_IDLE") => Ok(()),
+            (_, "NO_OPERATION") | (class::THREED, "WAIT_FOR_IDLE" | "PIPE_NOP") => Ok(()),
+            // Cache invalidations and flushes (shader, texture, sampler,
+            // constant buffer, ROP caches, pending writes, ZCULL): kestrel
+            // has no GPU caches, its memory is always current (kestrel's
+            // choice: nothing to do).
+            (_, name) if is_cache_op(name) => Ok(()),
             // The macro memories: a pointer, then words stored from it.
             (class::THREED, "LOAD_MME_INSTRUCTION_RAM_POINTER") => {
                 e.mme_code_pointer = call.value;
@@ -188,6 +300,70 @@ impl Process {
                 MME_START_WORDS,
             )
             .map_err(|_| unimplemented()),
+            // CHECK_SPH_VERSION and CHECK_AAM_VERSION: the shader program
+            // header and attribute address map versions the program uses,
+            // CURRENT (15:0) and OLDEST_SUPPORTED (31:16). No source says
+            // which GM20B accepts; deko3d, which runs on consoles, declares
+            // SPH 3 and AAM 2. kestrel's choice: a range that includes
+            // those passes, others stop, named.
+            (class::THREED, "CHECK_SPH_VERSION" | "CHECK_AAM_VERSION") => {
+                let supported = if m.name == "CHECK_SPH_VERSION" { 3 } else { 2 };
+                let (current, oldest) = (call.value & 0xffff, call.value >> 16);
+                if (oldest..=current).contains(&supported) {
+                    Ok(())
+                } else {
+                    Err(unimplemented())
+                }
+            }
+            // SET_FALCON04: a call to the GPU's firmware that writes a
+            // privileged (PGRAPH) register, as deko3d's WriteHardwareReg
+            // macro (`source/maxwell/pgraph.mme`, zlib) uses it: the
+            // register's address is the method's data, the value and a mask
+            // of the bits to change are SET_MME_SHADOW_SCRATCH(1) and (2),
+            // and the firmware sets SET_MME_SHADOW_SCRATCH(0) to 1 when it
+            // is done (the macro waits for that). kestrel keeps the
+            // registers' values in `ChannelState::hw_regs`; nothing reads
+            // them yet. Other firmware calls stop, named.
+            (class::THREED, "SET_FALCON04") => {
+                let (value, mask) = (e.reg(SCRATCH + 4), e.reg(SCRATCH + 8));
+                e.regs[(SCRATCH / 4) as usize] = 1;
+                let regs = &mut self.channel_state(fd).hw_regs;
+                let old = regs.get(&call.value).copied().unwrap_or(0);
+                regs.insert(call.value, (old & !mask) | (value & mask));
+                Ok(())
+            }
+            // Constant buffer uploads: LOAD_CONSTANT_BUFFER_OFFSET (15:0)
+            // points into the buffer SET_CONSTANT_BUFFER_SELECTOR_A-C
+            // select (SIZE 16:0, ADDRESS_UPPER 7:0, ADDRESS_LOWER), and
+            // each LOAD_CONSTANT_BUFFER(i) word is written there, the
+            // offset advancing by 4 (Mesa's NVK, MIT, sends a whole buffer
+            // as words to LOAD_CONSTANT_BUFFER(0) after one offset). kestrel's
+            // choice: a word past the buffer's size stops, named.
+            (class::THREED, "LOAD_CONSTANT_BUFFER_OFFSET") => Ok(()),
+            (class::THREED, "LOAD_CONSTANT_BUFFER") => {
+                let size = e.reg(0x2380) & 0x1_ffff;
+                let base = ((e.reg(0x2384) & 0xff) as u64) << 32 | e.reg(0x2388) as u64;
+                let offset = e.reg(CB_OFFSET) & 0xffff;
+                if offset + 4 > size {
+                    return Err(unimplemented());
+                }
+                e.regs[(CB_OFFSET / 4) as usize] = offset + 4;
+                self.gpu_write_u32(fd, base + offset as u64, call.value)
+            }
+            // BIND_GROUP_CONSTANT_BUFFER(group): SHADER_SLOT (8:4) of the
+            // shader stage `group` gets the selected constant buffer
+            // (SET_CONSTANT_BUFFER_SELECTOR_A-C), or none if not VALID (0).
+            (class::THREED, "BIND_GROUP_CONSTANT_BUFFER") => {
+                let slot = call.value >> 4 & 0x1f;
+                if call.value & 1 == 1 {
+                    let size = e.reg(0x2380) & 0x1_ffff;
+                    let base = ((e.reg(0x2384) & 0xff) as u64) << 32 | e.reg(0x2388) as u64;
+                    e.constant_buffers.insert((index, slot), (base, size));
+                } else {
+                    e.constant_buffers.remove(&(index, slot));
+                }
+                Ok(())
+            }
             // INCREMENT_SYNC_POINT: the syncpoint in INDEX (bits 11:0).
             // Its CLEAN_L2 and CONDITION fields wait for work that is
             // already done.
@@ -331,6 +507,15 @@ impl Process {
             _ => Err(unimplemented()),
         }
     }
+}
+
+/// Whether a method only invalidates or flushes a cache.
+fn is_cache_op(name: &str) -> bool {
+    (name.starts_with("INVALIDATE_")
+        || name.starts_with("FLUSH_")
+        || name.starts_with("TWOD_INVALIDATE_"))
+        && (name.contains("CACHE") || name == "FLUSH_PENDING_WRITES")
+        || name == "INVALIDATE_ZCULL"
 }
 
 /// Store `value` at `*pointer` in `memory` and advance the pointer; Err
