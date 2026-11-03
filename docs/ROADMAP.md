@@ -1532,14 +1532,68 @@ kestrel reads that.
 | SET_PRIORITY | 0x32, 0x64, 0x96, else BadParameter |
 | Submissions | recorded, then stop, named |
 
+#### Vulkan presentation (2026-11-03)
+
+What it is for: the window shows frames through the host GPU's Vulkan
+driver, as Dolphin's Vulkan video backend does, instead of copying
+pixels on the CPU (softbuffer). The picture is the same; the GPU does
+the scaling, waits for the display's vsync, and 5B's renderer will draw
+into the same path. `--video auto` (the default) uses Vulkan on Windows
+and Linux x86_64 when a driver is there and says so in a "note: video:"
+line, and falls back to softbuffer with a note saying why;
+`--video software` keeps softbuffer; `--video vulkan` elsewhere stops
+with "not yet supported on this platform" (PLAN.md section 3).
+
+Dependency (the owner's decision, 2026-11-03): `ash` 0.38 (MIT or
+Apache 2.0) and its `libloading` (ISC), only for Windows and Linux
+x86_64 builds with the `window` feature; it loads `vulkan-1.dll` or
+`libvulkan.so.1` when the window opens, so building needs no Vulkan
+SDK.
+
+How (`kestrel-cli/src/vulkan.rs`): an instance with the window's
+surface extension (Win32, Xlib, XCB or Wayland, from winit's raw
+handles), the first GPU with a graphics queue that can present to it,
+a FIFO swapchain of transfer-destination images. Each frame: the
+0x00RRGGBB pixels into a host-visible buffer, then an image of the
+frame's size; the swapchain image cleared to the background; the frame
+blitted with nearest filtering into the rectangle `window::fit` gives
+(the software scaler's placement, now shared); presented. A resize or an
+out-of-date swapchain makes it again. The frame is copied out of the
+shared slot first, so the program's thread never waits for the display.
+
+Tests: `vulkan_draws_frames_as_the_software_path_does` renders seven
+frame and window shapes off-screen through the same commands and reads
+them back: the bars exactly, the frame pixel under each window pixel's
+centre, either neighbour only where that centre is exactly on an edge
+(the Vulkan specification lets a nearest blit compute the source
+coordinate in floating point; lavapipe takes the left or upper pixel
+there, the software scaler the right or lower one). Without a Vulkan
+driver it prints a note and does not run, unless KESTREL_REQUIRE_VULKAN
+is set: CI's Linux x86_64 job installs lavapipe and sets it. Mutation
+check: a linear filter fails the first shape. By hand on Linux
+(Xvfb, lavapipe): vt52-demo in a window, "note: video: Vulkan on
+llvmpipe", the same picture as its checked PNG; `--video software`, and
+`auto` with no driver (VK_ICD_FILENAMES pointing nowhere) falling back
+with its note. Windows is type-checked here (x86_64 and ARM64), not
+run: the owner's PC will be its first real run.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| `--video` default | auto: Vulkan where supported and working, softbuffer otherwise, with a note either way when Vulkan was tried |
+| Swapchain format | the first of B8G8R8A8_UNORM, R8G8B8A8_UNORM, B8G8R8A8_SRGB, R8G8B8A8_SRGB the window offers (sRGB formats get a linearised background so the bytes match) |
+| Present mode | FIFO (vsync; every driver has it) |
+| Scaling | nearest, as the software path; the frame image matches the swapchain format |
+| GPU | the first with a graphics queue that can present to the window |
+| Vulkan stops mid-run | a note, then softbuffer for the rest of the run |
+
 #### Gaps left in 5A
 
 - Running GPU command lists (5B): the channel records them and stops.
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
   QUERY's other constants.
-- Presentation with Vulkan: the window still draws with softbuffer; a
-  Vulkan crate is a new dependency, for the owner to decide.
+- Vulkan presentation on Windows has not run yet (type-checked only);
+  macOS and ARM hosts keep softbuffer until after the Windows milestone.
 
 ## Next task
 
@@ -1749,7 +1803,14 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         them (submissions recorded, then a named stop); am LockExit and
         UnlockExit. The three deko3d examples reach their first command
         submission ("Phase 5 notes").
-     4. Vulkan presentation, once the owner has chosen the dependency.
+     4. Done (2026-11-03): Vulkan presentation with `ash` on Windows and
+        Linux x86_64 (`--video auto|vulkan|software`), softbuffer as the
+        fallback; tested off-screen against the software scaler with
+        lavapipe ("Phase 5 notes").
+     Next: phase 5B, running the command lists the channel records
+     (Maxwell's GPFIFO, the 3D, compute and copy engines), starting with
+     what deko_basic submits first; first, the owner's PC runs the
+     window on Windows with a real GPU.
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,

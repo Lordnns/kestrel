@@ -379,8 +379,10 @@ method; the methods live next to the state they change:
 - Controller input: `kestrel_hle::input::Source` gives hid one
   controller's state; hid writes it into its shared memory every 5 ms of
   guest time (`hid_tick`, called from the run loop). The front end's
-  window (`kestrel-cli/src/window.rs`, winit, softbuffer, gilrs, behind
-  the default `window` feature) runs the event loop on the main thread
+  window (`kestrel-cli/src/window.rs`, winit, gilrs, and Vulkan through
+  ash (`vulkan.rs`, Windows and Linux x86_64) or softbuffer to paint,
+  behind the default `window` feature) runs the event loop on the main
+  thread
   and the program on a worker thread, and maps keys and gamepads as
   `user/config/input.cfg` says (`input_config.rs`). The self-test uses a
   scripted Source instead.
@@ -515,4 +517,6 @@ Two levels, both needed (`PLAN.md` phase 5):
 
 Both levels render through one Vulkan renderer (MoltenVK on macOS) with a
 cross-platform window and presentation layer, fed by the display services
-and buffer queue.
+and buffer queue. Presentation is done for Windows and Linux x86_64
+(`kestrel-cli/src/vulkan.rs`): each frame the display decodes is copied
+into an image and blitted into the window's swapchain image.

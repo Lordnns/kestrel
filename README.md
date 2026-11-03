@@ -103,10 +103,17 @@ differently are refused. Games can be run from any folder.
 A homebrew program opens a window (`--headless` runs it without one).
 In a window it runs in real time with each guest core on its own host
 thread (`--single-thread` keeps every core on one host thread).
-The window shows what the program draws into its framebuffer (there is
-no GPU yet, so programs that render with it show nothing), and takes
-your keyboard and gamepads and gives them to the program as a Switch
+The window shows what the program draws into its framebuffer (the GPU
+does not run command lists yet, so programs that render with it, such as
+deko3d's, stop at their first one with a message), and takes your
+keyboard and gamepads and gives them to the program as a Switch
 controller. Text a program prints for debugging goes to the terminal.
+
+On Windows and Linux x86_64 the window paints through your GPU with
+Vulkan, as Dolphin's Vulkan backend does (`--video auto`, the default;
+a "note: video:" line says which GPU). Without a Vulkan driver, or with
+`--video software`, it paints on the CPU instead; the picture is the
+same. Elsewhere it paints on the CPU for now.
 
 kestrel emulates one controller, a Pro Controller by default. Which keys
 and gamepad buttons press what is set in `user/config/input.cfg` next to

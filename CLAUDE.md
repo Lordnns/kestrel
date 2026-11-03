@@ -61,9 +61,10 @@ sessions learned. The plan and the status live elsewhere; read them first:
   vt52-demo and simplegfx display and are checked with the examples;
   /dev/nvhost-ctrl's syncpoints and events, the buffer queue's swap
   interval and fences, QUERY, the vsync event and the GPU's nvhost
-  devices run, and the deko3d examples reach their first command
-  submission (branch `claude/graphics-5a`); next Vulkan presentation
-  with `ash` (ROADMAP "Next task" item 2).
+  devices run, the deko3d examples reach their first command
+  submission, and the window presents with Vulkan (`ash`, owner
+  2026-11-03) on Windows and Linux x86_64 (branch
+  `claude/graphics-5a`); next 5B (ROADMAP "Next task" item 2).
 
 ## How the owner works
 
