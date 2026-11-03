@@ -1675,6 +1675,94 @@ nothing fails hbnvgpu (its own syncpoint wait stops) and the IPC test.
 | Macro memories | grown as loaded, up to 0x10000 code and 0x1000 start-address words (no source gives GM20B's sizes) |
 | Four-word semaphore and report releases, reports, reductions | stop, named (the four-word timestamp's format is not in the headers) |
 
+#### 5B, step 2: the MME and the rest of deko3d's setup (2026-11-03)
+
+What it is for: deko3d, like NVIDIA's drivers, uploads small programs
+("macros") to the 3D engine and calls them to expand one command into
+many (a draw's state, a firmware call). The macro method expander (MME)
+runs them. With it, the deko3d examples' device and queue setup runs to
+the end.
+
+Sources: the MME's instruction set (Fermi to Maxwell) is not in NVIDIA's
+documentation. envytools' `envydis/macro.c` (MIT; a description of the
+unit and the encoding) and Mesa's `src/nouveau/mme/mme_fermi.c` and
+`mme_fermi_sim.c` (MIT, commit edd24d0) describe it; deko3d's macro
+sources (`source/maxwell/*.mme`, zlib) show it in use. Where envytools
+and Mesa differ, kestrel follows envytools' explicit descriptions, and
+deko3d's sources agree with it where they show it:
+
+| Difference | envytools (kestrel) | Mesa's simulator |
+|------------|---------------------|------------------|
+| Assign mode 5 | the result as method address, then a parameter into the register (deko3d's `MmeFirmwareArgs'1 to addr; fetch r2`) | the result into the register |
+| The method increment | bits 17:12 of the address operand | bits 15:12 |
+| An exit on a branch | exits only if the branch is not taken | ignored |
+
+Implemented:
+- `hle/src/gpu/mme.rs`: the decoder and interpreter. ALU ops (add,
+  add with carry, subtract, subtract with borrow, xor, or, and, and-not,
+  nand), add immediate, merge, the two bitfield extract-and-shift forms,
+  read (a method register; envytools defines it with the mov mode only),
+  branches on zero or not with delay slots or annulled, exit with its
+  delay slot, the eight assign modes, r0 always 0, r1 the first
+  parameter. Too few or too many parameters (the hardware traps), an
+  op or ALU op no source defines, a branch in a delay slot, a send
+  before a method address and 10 million instructions (the watchdog)
+  stop, named.
+- `CALL_MME_MACRO(n)` runs macro n from its start address with the
+  `CALL_MME_DATA(n)` words that follow; its sends go to the 3D engine
+  as pushbuffer writes do.
+- The other actions deko3d's setup needs: `SET_FALCON04` (a firmware
+  call writing a privileged register, as deko3d's `WriteHardwareReg`
+  macro uses it: the value and mask in macro scratch 1 and 2, completion
+  as scratch 0 = 1; the registers are kept, nothing reads them yet);
+  `CHECK_SPH_VERSION` and `CHECK_AAM_VERSION`; constant buffer uploads
+  (`LOAD_CONSTANT_BUFFER_OFFSET` and `LOAD_CONSTANT_BUFFER(i)`, the
+  offset advancing by 4 a word, as Mesa's NVK relies on) and
+  `BIND_GROUP_CONSTANT_BUFFER` (kept per stage and slot for the shaders
+  to come); `PIPE_NOP`; every cache invalidation and flush.
+- `gen-gpu-methods.py`: `SET_FALCON00-31` act (they call the
+  firmware); a bug dropped 16 methods whose names extend the previous
+  method's (`SET_STENCIL_FUNC_REF`, `SET_ZCULL_BOUNDS`...): a constant is
+  now a field value only if its name extends a field's, 1,068 methods.
+  Methods no header names that programs write are added as state from a
+  reviewed list, with their source: envytools' `CSAA_ENABLE`, deko3d's
+  tiled cache configuration (0xf60 to 0xf70, 0x1108; not its tiled cache
+  barrier and flush, which act).
+
+Where the deko3d examples stop now:
+- deko_basic at `CLEAR_SURFACE` (0x19d0): its first frame's clear.
+- deko_console at `LINE_LENGTH_IN` (0x180): its first inline-to-memory
+  upload (the 3D engine's I2M methods).
+- deko_examples (A pressed) in the display: "unsupported: pixel format
+  0" when its swapchain's buffers are set (to look at with step 4).
+
+Tests: `gpu::mme::tests` (sends, delay slots and annulled branches, an
+exit on a branch, the ALU with carry, bitfields, reads, each named
+stop); `gpu_command_lists_run_when_submitted` (a macro uploaded and
+called through increment-once data writes memory through the report
+semaphore; constant buffer upload and binding; the firmware call; the
+version checks; cache operations; the stops); `hbnvgpu` uploads and
+calls the same macro and fills a constant buffer, modelled in
+`gen-expected.py` by an MME simulator of its own written from
+envytools' description (`mme_run`): self-test 29/29 on both backends,
+the same output at `-O3 -march=armv8.2-a`. Mutation check: a send that
+does not advance the method address fails hbnvgpu ("macro's report"),
+the MME tests and the IPC test.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| MME differences between sources | envytools' descriptions (table above) |
+| Carry and borrow | exact: the 33rd bit of the sum, the borrow of the difference |
+| Bitfield positions past bit 31 | 0, as Mesa's simulator |
+| A send before any method address | stops (Mesa's simulator drops it; no source says) |
+| Macro parameters | the CALL_MME_DATA(n) writes right after CALL_MME_MACRO(n) on the same subchannel, in the same pushbuffer segment |
+| A macro whose start address was never loaded | stops |
+| Watchdog | 10 million instructions |
+| CHECK_SPH_VERSION, CHECK_AAM_VERSION | pass when the range includes SPH 3 and AAM 2 (what deko3d, which runs on consoles, declares), else stop |
+| SET_FALCON04 | deko3d's WriteHardwareReg protocol; the other firmware calls stop |
+| Constant buffer words past the selected size | stop |
+| Cache invalidations and flushes | nothing to do: no GPU caches |
+
 #### Gaps left in 5A
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
@@ -1902,13 +1990,18 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         commands, host methods, engine registers from NVIDIA's headers,
         semaphores and syncpoints); the deko3d examples stop at their
         first macro call, `CALL_MME_MACRO(5)`.
-     2. The MME (macro method expander): Maxwell's macro ISA, from
-        Mesa's description of the Fermi-generation MME (MIT, the plan's
-        Mesa reference), with tests from an independent model.
-     3. The copy and upload engines (inline-to-memory, DMA copy),
-        block-linear layouts reused from the display.
+     2. Done (2026-11-03): the MME (envytools' and Mesa's descriptions,
+        envytools where they differ), firmware call 4, the version checks,
+        constant buffer uploads and bindings, cache operations. deko_basic
+        stops at `CLEAR_SURFACE`, deko_console at `LINE_LENGTH_IN`
+        (inline-to-memory), deko_examples at "pixel format 0" in the
+        display ("Phase 5 notes").
+     3. The copy and upload engines (inline-to-memory, in the 3D class
+        and its own, DMA copy), block-linear layouts reused from the
+        display.
      4. Clears and render targets, presented: a deko3d frame reaching
-        the window through the queue.
+        the window through the queue (and deko_examples' swapchain
+        format).
      5. Draws: vertex fetch, Maxwell shader decoding to SPIR-V, textures.
 
 Other candidates, when the owner asks for them: a licence-notices file in

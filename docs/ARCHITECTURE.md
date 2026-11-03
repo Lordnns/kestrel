@@ -530,3 +530,6 @@ subchannel (2D, 3D, compute, inline-to-memory, DMA copy), which keeps
 them as registers and runs the ones that act. The engines' methods
 come from NVIDIA's headers through `scripts/gen-gpu-methods.py`
 (`gpu/methods.rs`); an action kestrel does not run yet stops, named.
+A 3D macro call runs the uploaded macro in `gpu/mme.rs`, an interpreter
+of the macro method expander, whose method writes go to the 3D engine
+as the pushbuffer's do.
