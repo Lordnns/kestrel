@@ -10,7 +10,8 @@
 // syncpoint twice: what the GPU wrote and the fence it answers are printed.
 // A second list uploads a macro (MME) and calls it, and fills a constant
 // buffer. A third copies: inline-to-memory and DMA copy, pitch and block
-// linear. The expected output is modelled in scripts/gen-expected.py.
+// linear. A fourth clears render targets. The expected output is modelled
+// in scripts/gen-expected.py.
 #include "hb.h"
 
 #define CUR_PROCESS 0xffff8001u
@@ -213,6 +214,17 @@ static u32 ioctl(u32 fd, u32 code, void *arg, u32 size) {
 }
 
 static u32 io(u32 fd, u32 code, void *arg, u32 size) { return ioctl(fd, code, arg, size); }
+
+// A list's GPU addresses are written as 0 and an offset into the mapping
+// (0x2000 to 0x8000); this puts the mapping's address in.
+static void addresses(u32 *list, u32 n, u32 hi, u32 lo) {
+    for (u32 i = 0; i + 1 < n; i++)
+        if (list[i] == 0 && list[i + 1] >= 0x2000 && list[i + 1] < 0x8000) {
+            list[i] = hi;
+            list[i + 1] += lo;
+            i++;
+        }
+}
 
 static u32 open_dev(const char *path, u32 len) {
     req r = {.na = 1};
@@ -523,14 +535,7 @@ void hb_main(const config_entry *config, u64 x1) {
     };
     n = 0;
     for (u32 i = 0; i < sizeof copies / 4; i++) list[n++] = copies[i];
-    // The addresses: each method's upper word, then its lower word, is
-    // written above as 0 and an offset from the mapping.
-    for (u32 i = 0; i + 1 < n; i++)
-        if (list[i] == 0 && list[i + 1] >= 0x2000 && list[i + 1] < 0x5000) {
-            list[i] = hi;
-            list[i + 1] += lo;
-            i++;
-        }
+    addresses(list, n, hi, lo);
     entry = (u32)list_va | ((list_va >> 32 & 0xff) | (u64)n << 10) << 32;
     kick.fence_id = kick.fence_value = 0;
     hex("KickoffPb with copies: ", ioctl2(ch, 0xc018481b, &kick, sizeof kick, &entry, sizeof entry));
@@ -551,6 +556,50 @@ void hb_main(const config_entry *config, u64 x1) {
     hex("  buffer copy word 0: ", w[0x2300 / 4]);
     hex("  buffer copy word 4: ", w[0x2310 / 4]);
     hex("  buffer copy word 5: ", w[0x2314 / 4]);
+
+    // Clears (`clb197.h`): colour target 0, 32x16 pixels of A8B8G8R8
+    // (0xd5) at +0x6000, block linear in blocks 2 GOBs high; target 1, 4x2
+    // pixels of RF16_GF16_BF16_AF16 (0xca) at +0x7000, pitch linear, 32
+    // bytes a row; SET_CT_SELECT lists both; the surface clip 32x16. Target
+    // 0 is cleared to 1.0, 0.5, 0.25, 0.0, then red and green to 0.2, 0.8
+    // within scissor 0 (x 4 to 12, y 9 to 11); target 1 (MRT_SELECT 1) to
+    // 1.0, -2.0, 0.333, 65504.0. The clear values are floats' bits.
+    static const u32 clears[] = {
+        INC(0x800, 9), 0, 0x6000, 32, 16, 0xd5, 1 << 4, 1, 0, 0,
+        INC(0x840, 9), 0, 0x7000, 32, 2, 0xca, 1 << 12, 1, 0, 0,
+        INC(0x121c, 1), 2 | 1 << 7,
+        INC(0xff4, 2), 32 << 16, 16 << 16,
+        INC(0x10f8, 1), 0,
+        INC(0xd80, 4), 0x3f800000, 0x3f000000, 0x3e800000, 0,
+        IMM(0x19d0, 0x3c),
+        INC(0x10f8, 1), 1 << 8,
+        INC(0xe00, 3), 1, 4 | 12 << 16, 9 | 11 << 16,
+        INC(0xd80, 4), 0x3e4ccccd, 0x3f4ccccd, 0x3f666666, 0x3e99999a,
+        IMM(0x19d0, 1 << 2 | 1 << 3),
+        INC(0x10f8, 1), 0,
+        INC(0xd80, 4), 0x3f800000, 0xc0000000, 0x3eaa7efa, 0x477fe000,
+        IMM(0x19d0, 0x3c | 1 << 6),
+    };
+    n = 0;
+    for (u32 i = 0; i < sizeof clears / 4; i++) list[n++] = clears[i];
+    addresses(list, n, hi, lo);
+    entry = (u32)list_va | ((list_va >> 32 & 0xff) | (u64)n << 10) << 32;
+    kick.fence_id = kick.fence_value = 0;
+    hex("KickoffPb with clears: ", ioctl2(ch, 0xc018481b, &kick, sizeof kick, &entry, sizeof entry));
+    hex("  fence value: ", kick.fence_value);
+    u32 first = 0, second = 0;
+    for (u32 i = 0; i < 32 * 16; i++) {
+        first += w[0x6000 / 4 + i] == 0x004080ff;
+        second += w[0x6000 / 4 + i] == 0x0040cc33;
+    }
+    hex("  target 0 pixels of the first clear: ", first);
+    hex("  target 0 pixels of the second: ", second);
+    hex("  target 0 at 0x230: ", w[(0x6000 + 0x230) / 4]);
+    hex("  target 0 at 0x34c: ", w[(0x6000 + 0x34c) / 4]);
+    hex("  target 0 at 0x360: ", w[(0x6000 + 0x360) / 4]);
+    hex("  target 1 pixel (0, 0) RG: ", w[0x7000 / 4]);
+    hex("  target 1 pixel (0, 0) BA: ", w[0x7004 / 4]);
+    hex("  target 1 pixel (3, 1) BA: ", w[(0x7000 + 32 + 24 + 4) / 4]);
 
     // nvGpuChannelClose, nvAddressSpaceClose, nvGpuExit, nvMapExit.
     notifier[4] = 0;

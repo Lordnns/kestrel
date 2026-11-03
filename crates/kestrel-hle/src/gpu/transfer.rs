@@ -201,7 +201,7 @@ impl Process {
     }
 
     /// Read `len` bytes of each of `lines` lines of `src`.
-    fn read_lines(
+    pub(super) fn read_lines(
         &self,
         fd: u32,
         src: &Surface,
@@ -218,7 +218,7 @@ impl Process {
     }
 
     /// Write `data` as lines of `len` bytes to `dst`.
-    fn write_lines(
+    pub(super) fn write_lines(
         &mut self,
         fd: u32,
         dst: &Surface,

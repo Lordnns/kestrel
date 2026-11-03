@@ -35,6 +35,9 @@ const CB_OFFSET: u32 = 0x238c;
 /// SET_MME_SHADOW_SCRATCH(0) (`clb197.h`): the macros' scratch registers.
 const SCRATCH: u32 = 0x3400;
 
+/// SET_MME_SHADOW_RAM_CONTROL (`clb197.h`).
+const SHADOW_RAM_CONTROL: u32 = 0x124;
+
 /// CALL_MME_MACRO(0) (`clb197.h`): macro n is called at 0x3800 + n * 8,
 /// its parameters follow at 0x3804 + n * 8.
 const MACRO_CALLS: u32 = 0x3800;
@@ -51,7 +54,7 @@ struct MacroHost<'a> {
 impl mme::Host for MacroHost<'_> {
     fn read(&mut self, method: u32) -> u32 {
         let state = self.p.channel_state(self.fd);
-        state.engines[&class::THREED].reg(method)
+        state.engines[&class::THREED].shadow[(method / 4) as usize]
     }
 
     fn send(&mut self, method: u32, value: u32) -> Result<(), String> {
@@ -236,7 +239,33 @@ impl Process {
         };
         let state = self.channel_state(fd);
         let e = state.engines.get_mut(&class).expect("bound engines exist");
-        e.regs[(call.method / 4) as usize] = call.value;
+        // The 3D engine's MME shadow RAM, as SET_MME_SHADOW_RAM_CONTROL's
+        // MODE (1:0) names its uses (NVIDIA gives only the names; Mesa's
+        // NVK, MIT, writes state in PASSTHROUGH to "replay the previous
+        // state from shadow RAM" after; deko3d does the same around its
+        // clears). kestrel's reading: METHOD_TRACK (0) and _WITH_FILTER (1,
+        // whose filter no source gives) record each write in the shadow;
+        // METHOD_PASSTHROUGH (2) does not; METHOD_REPLAY (3) runs the method
+        // with its shadow value instead of the data. The control method
+        // itself is always recorded. Macros read the shadow.
+        let i = (call.method / 4) as usize;
+        let call = if class != class::THREED || call.method == SHADOW_RAM_CONTROL {
+            e.shadow[i] = call.value;
+            call
+        } else {
+            match e.reg(SHADOW_RAM_CONTROL) & 3 {
+                0 | 1 => {
+                    e.shadow[i] = call.value;
+                    call
+                }
+                2 => call,
+                _ => Call {
+                    value: e.shadow[i],
+                    ..call
+                },
+            }
+        };
+        e.regs[i] = call.value;
         if m.kind == Kind::State {
             return Ok(());
         }
@@ -260,6 +289,12 @@ impl Process {
             // has no GPU caches, its memory is always current (kestrel's
             // choice: nothing to do).
             (_, name) if is_cache_op(name) => Ok(()),
+            // DECOMPRESS_SURFACE and DECOMPRESS_ZETA_SURFACE: write a
+            // target's compressed data out plainly (deko3d's Queue::
+            // decompressSurface, before an image is presented). kestrel
+            // writes every surface uncompressed (kestrel's choice: nothing
+            // to do).
+            (class::THREED, "DECOMPRESS_SURFACE" | "DECOMPRESS_ZETA_SURFACE") => Ok(()),
             // deko3d's tiled cache barrier and flush (methods NVIDIA's
             // header does not name, `gen-gpu-methods.py`): the GPU's tiled
             // cache holds rendering on chip before it reaches memory;
@@ -315,7 +350,7 @@ impl Process {
             // them yet. Other firmware calls stop, named.
             (class::THREED, "SET_FALCON04") => {
                 let (value, mask) = (e.reg(SCRATCH + 4), e.reg(SCRATCH + 8));
-                e.regs[(SCRATCH / 4) as usize] = 1;
+                e.set(SCRATCH, 1);
                 let regs = &mut self.channel_state(fd).hw_regs;
                 let old = regs.get(&call.value).copied().unwrap_or(0);
                 regs.insert(call.value, (old & !mask) | (value & mask));
@@ -336,7 +371,7 @@ impl Process {
                 if offset + 4 > size {
                     return Err(unimplemented());
                 }
-                e.regs[(CB_OFFSET / 4) as usize] = offset + 4;
+                e.set(CB_OFFSET, offset + 4);
                 self.gpu_write_u32(fd, base + offset as u64, call.value)
             }
             // BIND_GROUP_CONSTANT_BUFFER(group): SHADER_SLOT (8:4) of the
@@ -375,6 +410,8 @@ impl Process {
             (class::DMA_COPY, "LAUNCH_DMA") => self.copy_launch(fd, call.value),
             // DMA copy's NOP: nothing to do.
             (class::DMA_COPY, "NOP") => Ok(()),
+            // A clear of a colour target (`gpu/clear.rs`).
+            (class::THREED, "CLEAR_SURFACE") => self.clear_surface(fd, call.value),
             (class::THREED, "SET_REPORT_SEMAPHORE_D") => {
                 let abc = [e.reg(0x1b00), e.reg(0x1b04), e.reg(0x1b08)];
                 self.report_semaphore(fd, abc, call.value)

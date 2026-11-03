@@ -115,6 +115,16 @@ KickoffPb with copies: 0x0000000000000000
   buffer copy word 0: 0x0000000004030201
   buffer copy word 4: 0x000000000a090807
   buffer copy word 5: 0x0000000000000c0b
+KickoffPb with clears: 0x0000000000000000
+  fence value: 0x0000000000000002
+  target 0 pixels of the first clear: 0x00000000000001f0
+  target 0 pixels of the second: 0x0000000000000010
+  target 0 at 0x230: 0x000000000040cc33
+  target 0 at 0x34c: 0x000000000040cc33
+  target 0 at 0x360: 0x00000000004080ff
+  target 1 pixel (0, 0) RG: 0x00000000c0003c00
+  target 1 pixel (0, 0) BA: 0x000000007bff3554
+  target 1 pixel (3, 1) BA: 0x000000007bff3554
 SET_ERROR_NOTIFIER off: 0x0000000000000000
 close the error event: 0x0000000000000000
 Close /dev/nvhost-gpu: 0x0000000000000000

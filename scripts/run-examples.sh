@@ -30,18 +30,20 @@ fi
 py=$(command -v python3 || command -v python)
 
 # run <frames folder> <name> <options>: run one example on an empty card
-# and save its last frame. Presses are held 1 s each: Plus ends each
-# example; read-controls first gets A, and Plus while A is still held, so
-# its last frame shows A.
+# and save its last frame; kestrel's exit status. Presses are held 1 s
+# each: Plus ends each example; read-controls first gets A, and Plus while
+# A is still held, so its last frame shows A.
 run() {
     out=$1
     name=$2
     shift 2
     sd=$(mktemp -d)
     echo "running $name $*"
+    status=0
     "$kestrel" run "$work/bin/$name.nro" --headless --sd "$sd" "$@" \
-        --save-frame "$out/$name.png"
+        --save-frame "$out/$name.png" || status=$?
     rm -rf "$sd"
+    return $status
 }
 all() { # all <frames folder> <options>
     run "$1" hello-world "${@:2}" --press Plus@2
@@ -51,11 +53,17 @@ all() { # all <frames folder> <options>
     run "$1" vt52-demo "${@:2}" --press Plus@2
     run "$1" simplegfx "${@:2}" --press Plus@2
 }
-check() {
-    "$py" "$root/scripts/check-examples.py" "$font" "$1"
+check() { # check <frames folder> [--skip <example>...]
+    "$py" "$root/scripts/check-examples.py" "$font" "$@"
 }
 
 all "$frames"
+# deko_examples: A in its menu starts its first example, which draws until
+# Plus; Plus would bring the menu back, so the run ends on an instruction
+# budget instead, a little after the press (the clock is counted here, so
+# the frames are the same each run; kestrel stops with status 4). Not in
+# the threaded runs below, whose clock is real time.
+run "$frames" deko_examples --press A@1 --max-steps 156000000 || [ $? -eq 4 ]
 check "$frames"
 
 # Again with each guest core on its own host thread, in real time
@@ -65,8 +73,8 @@ check "$frames"
 threaded=$work/frames-threaded
 mkdir -p "$threaded"
 all "$threaded" --threaded
-check "$threaded"
+check "$threaded" --skip deko_examples
 for _ in $(seq 2 "${THREADED_RUNS:-5}"); do
     run "$threaded" barrier --threaded --press Plus@2
-    check "$threaded"
+    check "$threaded" --skip deko_examples
 done
