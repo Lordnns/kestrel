@@ -2394,20 +2394,158 @@ mod tests {
             )
         );
         // KickoffPb (SUBMIT_GPFIFO2 through Ioctl2): the entries are
-        // recorded, then the program stops, named.
+        // recorded and run; these name no mapped memory (a GPU page fault,
+        // which stops). The GPU's own tests are in
+        // `gpu_command_lists_run_when_submitted`.
         let mut submit = 0u64.to_le_bytes().to_vec();
         submit.extend(words(&[2, 4, 0, 0]));
         let entries = [0x1122_3344_5566_7788u64, 0x99];
         let entry_bytes: Vec<u8> = entries.iter().flat_map(|e| e.to_le_bytes()).collect();
         let e = nv_ioctl2(&mut p, nv, ch, 0xc018_481b, &submit, &entry_bytes).unwrap_err();
-        assert!(e.contains("2 GPFIFO entries submitted"), "{e}");
-        assert!(e.contains("phase 5B"), "{e}");
+        assert!(e.contains("a GPU page fault"), "{e}");
         assert_eq!(p.services.nv.gpu.channels[&ch].submitted, entries);
         // Closing the channel frees its address space's binding.
         let close = hipc(false, &[], 2, &ch.to_le_bytes(), &[], &[], &[], &[]);
         assert_eq!(send(&mut p, nv, &close), Ok(0));
         assert!(!p.services.nv.gpu.channels.contains_key(&ch));
         assert_eq!(p.services.nv.gpu.address_spaces[&space].channel, None);
+    }
+
+    #[test]
+    fn gpu_command_lists_run_when_submitted() {
+        let mut p = setup();
+        let nv = nvdrv_ready(&mut p);
+        let io = |p: &mut Process, fd: u32, code: u32, arg: &[u8]| {
+            nv_ioctl(p, nv, fd, code, arg).unwrap()
+        };
+        // An address space, 64 KiB of memory mapped in it, and a channel
+        // with its queue and the 3D engine, as nvGpuChannelCreate leaves it.
+        let (map_fd, _) = nv_open(&mut p, nv, b"/dev/nvmap");
+        let (space, _) = nv_open(&mut p, nv, b"/dev/nvhost-as-gpu");
+        let mut init = words(&[1, 0, 0x2_0000, 0]);
+        init.extend([0; 24]);
+        assert_eq!(io(&mut p, space, 0x4028_4109, &init).0, 0);
+        let mem = 0x50_0000;
+        p.mem.map(mem, 0x1_0000, Perm::RW, "gpu").unwrap();
+        p.services.nv.maps.push(Some(nv::MapObject {
+            size: 0x1_0000,
+            addr: Some(mem),
+            align: 0x1000,
+            kind: 0,
+            refs: 1,
+        }));
+        let mut map = words(&[0, 0, 1, 0x1000]);
+        map.extend([0; 24]);
+        let (err, out) = io(&mut p, space, 0xc028_4106, &map);
+        assert_eq!(err, 0);
+        let va = u64::from_le_bytes(out[32..40].try_into().unwrap());
+        let (ch, _) = nv_open(&mut p, nv, b"/dev/nvhost-gpu");
+        assert_eq!(io(&mut p, ch, 0x4004_4801, &words(&[map_fd])).0, 0);
+        assert_eq!(io(&mut p, space, 0x4004_4101, &words(&[ch])).0, 0);
+        let mut gpfifo = words(&[0x800, 1, 0]);
+        gpfifo.extend([0; 20]);
+        let (err, out) = io(&mut p, ch, 0xc020_481a, &gpfifo);
+        assert_eq!(err, 0);
+        let syncpt = u32s(&out[12..16])[0];
+        let mut obj = words(&[0xb197, 0]);
+        obj.extend([0; 8]);
+        assert_eq!(io(&mut p, ch, 0xc010_4809, &obj).0, 0);
+
+        // Command headers (`clb06f.h`): incrementing (SEC_OP 1),
+        // non-incrementing (3) and immediate (4); method offsets in bytes.
+        let inc = |sub: u32, m: u32, n: u32| 1 << 29 | n << 16 | sub << 13 | m >> 2;
+        let non = |sub: u32, m: u32, n: u32| 3 << 29 | n << 16 | sub << 13 | m >> 2;
+        let imm = |sub: u32, m: u32, v: u32| 4 << 29 | v << 16 | sub << 13 | m >> 2;
+        let (hi, lo) = ((va >> 32) as u32, va as u32);
+        // Write a list at `at` in the memory, submit it with KickoffPb;
+        // the NvError and the fence out, or the stop.
+        let submit = |p: &mut Process, at: u64, list: &[u32]| {
+            p.mem.write_bytes(mem + at, &words(list)).unwrap();
+            let gpu = va + at;
+            let entry =
+                (gpu as u32 as u64) | ((gpu >> 32) & 0xff | (list.len() as u64) << 10) << 32;
+            let mut arg = 0u64.to_le_bytes().to_vec();
+            arg.extend(words(&[1, 1 << 2 | 1 << 8, 0, 2]));
+            nv_ioctl2(p, nv, ch, 0xc018_481b, &arg, &entry.to_le_bytes())
+                .map(|(err, out)| (err, u32s(&out[16..24])))
+        };
+        let list = [
+            // SET_OBJECT: the 3D engine on subchannel 0.
+            inc(0, 0x00, 1),
+            0xb197,
+            // Host SEMAPHOREA-D: release 0xabcd, four bytes, at +0x800.
+            inc(0, 0x10, 4),
+            hi,
+            lo + 0x800,
+            0xabcd,
+            2 | 1 << 24,
+            // 3D INCREMENT_SYNC_POINT twice: the channel's syncpoint.
+            non(0, 0x2c8, 2),
+            syncpt,
+            syncpt | 1 << 20,
+            // 3D SET_REPORT_SEMAPHORE_A-D: release 0x55, one word, at +0x804.
+            inc(0, 0x1b00, 4),
+            hi,
+            lo + 0x804,
+            0x55,
+            1 << 28,
+            // Host SYNCPOINTA/B: wait for 2 (reached), then acquire the
+            // semaphore at +0x800 for >= 0xabcd (released).
+            inc(0, 0x70, 2),
+            2,
+            syncpt << 8,
+            inc(0, 0x10, 4),
+            hi,
+            lo + 0x800,
+            0xabcd,
+            4,
+            // 3D NO_OPERATION (immediate), a state method, the macro
+            // memories.
+            imm(0, 0x100, 0),
+            inc(0, 0x800, 1),
+            0x1234,
+            inc(0, 0x114, 1),
+            0,
+            non(0, 0x118, 2),
+            0x1111,
+            0x2222,
+            inc(0, 0x11c, 2),
+            3,
+            0x40,
+        ];
+        assert_eq!(submit(&mut p, 0, &list), Ok((0, vec![syncpt, 2])));
+        let read = |p: &Process, at: u64| u32s(&p.mem.read_vec(mem + at, 4).unwrap())[0];
+        assert_eq!((read(&p, 0x800), read(&p, 0x804)), (0xabcd, 0x55));
+        assert_eq!(p.services.nv.syncpoint(syncpt).unwrap().value, 2);
+        let state = &p.services.nv.gpu.channels[&ch].engine;
+        assert_eq!(state.subchannels[0], Some(0xb197));
+        let e = &state.engines[&0xb197];
+        assert_eq!(
+            (e.reg(0x800), e.mme_code.clone()),
+            (0x1234, vec![0x1111, 0x2222])
+        );
+        assert_eq!((e.mme_start.len(), e.mme_start[3]), (4, 0x40));
+        assert_eq!(state.methods_run, 24);
+
+        // What does not run yet stops, named: a macro call; a method on a
+        // subchannel with no object; one NVIDIA's header does not name; a
+        // semaphore acquire nothing would release; a GPU page fault.
+        let e = submit(&mut p, 0x100, &[inc(0, 0x3808, 1), 7]).unwrap_err();
+        assert!(
+            e.contains("GPU 3D method CALL_MME_MACRO(1) (0x3808) = 0x7"),
+            "{e}"
+        );
+        let e = submit(&mut p, 0x100, &[inc(3, 0x2c8, 1), 1]).unwrap_err();
+        assert!(e.contains("subchannel 3, which has no object bound"), "{e}");
+        let e = submit(&mut p, 0x100, &[inc(0, 0x400, 1), 1]).unwrap_err();
+        assert!(
+            e.contains("3D method 0x400 = 0x1, which NVIDIA's header does not name"),
+            "{e}"
+        );
+        let e = submit(&mut p, 0x100, &[inc(0, 0x10, 4), hi, lo + 0x800, 0xabce, 1]).unwrap_err();
+        assert!(e.contains("semaphore acquire"), "{e}");
+        let e = submit(&mut p, 0x100, &[inc(0, 0x10, 4), 0x40, 0, 1, 2 | 1 << 24]).unwrap_err();
+        assert!(e.contains("a GPU page fault"), "{e}");
     }
 
     /// A parcel as libnx's parcelTransact sends it: the header, then
