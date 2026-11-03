@@ -2260,9 +2260,9 @@ mod tests {
         assert_eq!(transact(&mut p, 11, &words(&[2])), Ok(words(&[0])));
         assert_eq!(dequeue(&mut p).unwrap()[2] as i32, -11);
         // What kestrel does not know stops.
-        let e = transact(&mut p, 9, &words(&[0])).unwrap_err();
+        let e = transact(&mut p, 12, &words(&[0])).unwrap_err();
         assert!(
-            e.contains("unimplemented: IGraphicBufferProducer transaction 9"),
+            e.contains("unimplemented: IGraphicBufferProducer transaction 12"),
             "{e}"
         );
         let mut bad = parcel(&[]);
@@ -2289,6 +2289,190 @@ mod tests {
         assert_eq!(send(&mut p, relay, &msg), Ok(0));
         let r = p.mem.read_vec(output, 0x24).unwrap();
         assert_eq!(u32s(&r), [0x14, 0x10, 0, 0x24, 1280, 720, 0, 0, 0]);
+    }
+
+    /// vi:u's display service and relay with the "Default" display and
+    /// the layer open, as libnx's __nx_win_init leaves them: (display
+    /// service, relay).
+    fn vi_layer_open(p: &mut Process) -> (u64, u64) {
+        let vi = open(p, b"vi:u");
+        let get = |p: &mut Process, h: u64, n: u32, args: &[u8]| {
+            assert_eq!(send(p, h, &cmif(4, false, n, args)), Ok(0));
+            reply(p, true).1[0] as u64
+        };
+        let ads = get(p, vi, 0, &[0; 4]);
+        let relay = get(p, ads, 100, &[]);
+        let mut display = [0u8; 0x40];
+        display[..7].copy_from_slice(b"Default");
+        assert_eq!(send(p, ads, &cmif(4, false, 1010, &display)), Ok(0));
+        p.services.vi.layer_made = true;
+        let mut args = display.to_vec();
+        args.extend(vi::LAYER_ID.to_le_bytes());
+        args.extend(PROCESS_ID.to_le_bytes());
+        let window = STRINGS + 0x100;
+        let open_layer = hipc(true, &[], 2020, &args, &[], &[], &[(window, 0x100)], &[]);
+        assert_eq!(send(p, ads, &open_layer), Ok(0));
+        (ads, relay)
+    }
+
+    /// A buffer queue transaction as TransactParcelAuto with pointers: the
+    /// reply's payload, or the stop.
+    fn bq_transact(p: &mut Process, relay: u64, code: u32, args: &[u8]) -> Result<Vec<u8>, String> {
+        let (input, output) = (STRINGS + 0x200, STRINGS + 0x600);
+        let req = parcel(args);
+        p.mem.write_bytes(input, &req).unwrap();
+        let (x, c) = ([(input, req.len() as u64)], [(output, 0x200)]);
+        let a = words(&[1, code, 0]);
+        let msg = hipc(false, &[], 3, &a, &x, &[(0, 0)], &[(0, 0)], &c);
+        send(p, relay, &msg)?;
+        assert_eq!(answer(p, false, 0).0, 0);
+        let r = p.mem.read_vec(output, 0x200).unwrap();
+        let (size, off) = (u32s(&r[..4])[0] as usize, u32s(&r[4..8])[0] as usize);
+        Ok(r[off..off + size].to_vec())
+    }
+
+    /// QUEUE_BUFFER's arguments: the slot and libnx's BqBufferInput with a
+    /// swap interval and fences.
+    fn queue_input(slot: u32, swap_interval: u32, fences: &[(u32, u32)]) -> Vec<u8> {
+        let mut input = [0u8; 0x54];
+        input[0x2c..0x30].copy_from_slice(&swap_interval.to_le_bytes());
+        input[0x30..0x34].copy_from_slice(&(fences.len() as u32).to_le_bytes());
+        for (i, &(id, value)) in fences.iter().enumerate() {
+            input[0x34 + 8 * i..0x38 + 8 * i].copy_from_slice(&id.to_le_bytes());
+            input[0x38 + 8 * i..0x3c + 8 * i].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut args = words(&[slot]);
+        args.extend(flattened(&input));
+        args
+    }
+
+    #[test]
+    fn vi_swap_intervals_fences_queries_and_the_vsync_event() {
+        let mut p = setup();
+        let (ads, relay) = vi_layer_open(&mut p);
+        let tx = |p: &mut Process, code: u32, args: &[u8]| {
+            bq_transact(p, relay, code, args).map(|r| u32s(&r))
+        };
+        let query = |p: &mut Process, what: u32| tx(p, 9, &words(&[what]));
+        assert_eq!(tx(&mut p, 10, &words(&[0, 2, 0])).unwrap()[4], 0);
+        // QUERY before buffers: the default size and format (RGBA 8888).
+        assert_eq!(query(&mut p, 0), Ok(vec![1280, 0]));
+        assert_eq!(query(&mut p, 7), Ok(vec![720, 0]));
+        assert_eq!(query(&mut p, 2), Ok(vec![1, 0]));
+        // Two 32x8 RGB 565 buffers.
+        let fb = 0x50_0000;
+        p.mem.map(fb, 0x1000, Perm::RW, "fb").unwrap();
+        p.services.nv.maps.push(Some(nv::MapObject {
+            size: 0x800,
+            addr: Some(fb),
+            align: 0x1000,
+            kind: 0,
+            refs: 1,
+        }));
+        for slot in 0..2u32 {
+            let mut args = words(&[slot, 1]);
+            args.extend(flattened(&graphic_buffer(1, slot * 0x400)));
+            assert_eq!(tx(&mut p, 14, &args), Ok(vec![]));
+        }
+        // QUERY: the buffers' size and format, no transform, no backlog;
+        // the rest stops, named.
+        for (what, value) in [(0, 32), (1, 8), (2, 4), (6, 32), (7, 8), (8, 0), (9, 0)] {
+            assert_eq!(query(&mut p, what), Ok(vec![value, 0]), "query {what}");
+        }
+        let e = query(&mut p, 3).unwrap_err();
+        assert!(
+            e.contains("unimplemented: IGraphicBufferProducer QUERY 3"),
+            "{e}"
+        );
+
+        let dequeue = |p: &mut Process| tx(p, 3, &words(&[1, 32, 8, 4, 0xb00])).unwrap()[0];
+        let release =
+            |p: &Process, slot: usize| match p.services.vi.slots[slot].as_ref().unwrap().state {
+                vi::SlotState::Queued { release } => release,
+                s => panic!("{s:?}"),
+            };
+        let period = vi::VSYNC_PERIOD;
+        // Swap interval 2, two frames in one vsync period: the first is on
+        // screen from the first vsync for two, the second after it.
+        p.cpu.clock.skip(1000);
+        assert_eq!(dequeue(&mut p), 0);
+        assert_eq!(tx(&mut p, 7, &queue_input(0, 2, &[])).unwrap()[3], 1);
+        assert_eq!(dequeue(&mut p), 1);
+        assert_eq!(tx(&mut p, 7, &queue_input(1, 2, &[])).unwrap()[3], 2);
+        assert_eq!((release(&p, 0), release(&p, 1)), (2 * period, 4 * period));
+        assert_eq!(query(&mut p, 9), Ok(vec![1, 0]), "running behind");
+        // Swap interval 0: freed at the next vsync, not waiting its turn.
+        p.cpu.clock.skip(2 * period);
+        p.vsync_tick();
+        assert_eq!(dequeue(&mut p), 0);
+        assert_eq!(tx(&mut p, 7, &queue_input(0, 0, &[])).unwrap()[3], 2);
+        assert_eq!(release(&p, 0), 3 * period);
+        // Swap interval 1 after them: from the end of slot 1's turn.
+        p.cpu.clock.skip(period);
+        p.vsync_tick();
+        assert_eq!(dequeue(&mut p), 0);
+        tx(&mut p, 7, &queue_input(0, 1, &[])).unwrap();
+        assert_eq!(release(&p, 0), 5 * period);
+
+        // Fences: reached ones are fine; one not reached stops, as does a
+        // syncpoint that does not exist or more than four fences.
+        p.cpu.clock.skip(2 * period);
+        p.vsync_tick();
+        assert_eq!(dequeue(&mut p), 0, "freed in one tick, slot 0 first");
+        let e = tx(&mut p, 7, &queue_input(0, 1, &[(3, 0), (5, 1)])).unwrap_err();
+        assert!(
+            e.contains("waiting for syncpoint 5 to reach 1 (it is at 0)"),
+            "{e}"
+        );
+        let e = tx(&mut p, 7, &queue_input(0, 1, &[(192, 0)])).unwrap_err();
+        assert!(e.contains("syncpoint 192, which does not exist"), "{e}");
+        let mut five = queue_input(0, 1, &[]);
+        five[4 + 8 + 0x30] = 5;
+        let e = tx(&mut p, 7, &five).unwrap_err();
+        assert!(e.contains("an NvMultiFence of 5 fences"), "{e}");
+        assert!(p.syncpoint_incr(5).is_some());
+        assert_eq!(
+            tx(&mut p, 7, &queue_input(0, 1, &[(3, 0), (5, 1)])).unwrap()[4],
+            0
+        );
+
+        // GetDisplayVsyncEvent: the open display's event, signalled at
+        // each vsync; a thread waiting on it wakes at the next one.
+        assert_eq!(tx(&mut p, 11, &words(&[2])), Ok(vec![0]));
+        let e = send(&mut p, ads, &cmif(4, false, 5202, &2u64.to_le_bytes())).unwrap_err();
+        assert!(e.contains("vi display 2, which is not open"), "{e}");
+        let vsync_event = |p: &mut Process| {
+            assert_eq!(
+                send(p, ads, &cmif(4, false, 5202, &1u64.to_le_bytes())),
+                Ok(0)
+            );
+            let (rc, copied, _, _, _) = answer(p, false, 0);
+            assert_eq!((rc, copied.len()), (0, 1));
+            copied[0]
+        };
+        let event = vsync_event(&mut p);
+        let again = vsync_event(&mut p);
+        assert_ne!(event, again);
+        assert_eq!(
+            p.handles.get(event).unwrap().1,
+            p.handles.get(again).unwrap().1
+        );
+        let signaled = |p: &Process| match p.handles.object(p.handles.get(event).unwrap().1) {
+            Object::Event { signaled } => *signaled,
+            o => panic!("{o:?}"),
+        };
+        p.vsync_tick();
+        assert!(!signaled(&p), "no vsync since it was made");
+        let start = p.now();
+        p.cpu.clock.skip(period);
+        p.vsync_tick();
+        assert!(signaled(&p));
+        assert_eq!(p.reset_signal(event as u64), Ok(()));
+        let list = STRINGS + 0xf00;
+        p.mem.write_bytes(list, &event.to_le_bytes()).unwrap();
+        svc(&mut p, nr::WAIT_SYNCHRONIZATION, &[0, list, 1, u64::MAX]);
+        assert_eq!((p.cpu.x[0], p.cpu.x[1]), (0, 0));
+        assert_eq!(p.now(), (start / period + 2) * period);
     }
 
     #[test]
