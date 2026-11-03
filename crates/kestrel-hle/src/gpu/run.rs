@@ -120,32 +120,15 @@ impl Process {
     /// The guest address behind `len` bytes at GPU address `va` in the
     /// address space channel `fd` is bound to: inside one mapping of an
     /// nvmap object with memory.
-    pub(crate) fn gpu_address(&self, fd: u32, va: u64, len: u64) -> Result<u64, IpcError> {
-        let nv = &self.services.nv;
-        let space = nv
-            .gpu
-            .channels
-            .get(&fd)
-            .and_then(|c| c.address_space)
-            .and_then(|a| nv.gpu.address_spaces.get(&a))
-            .ok_or_else(|| IpcError::Stop("a GPU channel with no address space".into()))?;
-        let m = space
-            .mappings
-            .iter()
-            .find(|m| va >= m.start && va + len <= m.start + m.size)
-            .ok_or_else(|| {
-                IpcError::Stop(format!(
-                    "the GPU reading or writing {len:#x} bytes at {va:#x}, which no mapping \
-                     holds (a GPU page fault)"
-                ))
-            })?;
-        let addr = nv.map(m.handle).and_then(|o| o.addr).ok_or_else(|| {
-            IpcError::Stop(format!(
-                "GPU address {va:#x} in nvmap object {}, which has no memory",
-                m.handle
-            ))
-        })?;
-        Ok(addr + m.buffer_offset + (va - m.start))
+    fn gpu_address(&self, fd: u32, va: u64, len: u64) -> Result<u64, IpcError> {
+        let (addr, left) = self.gpu_span(fd, va)?;
+        if len > left {
+            return Err(IpcError::Stop(format!(
+                "the GPU reading or writing {len:#x} bytes at {va:#x}, which no mapping holds \
+                 (a GPU page fault)"
+            )));
+        }
+        Ok(addr)
     }
 
     fn gpu_read_words(&self, fd: u32, va: u64, words: u32) -> Result<Vec<u32>, IpcError> {
@@ -172,7 +155,7 @@ impl Process {
             .map_err(|e| IpcError::Stop(format!("the GPU writing guest memory: {e}")))
     }
 
-    fn channel_state(&mut self, fd: u32) -> &mut super::ChannelState {
+    pub(super) fn channel_state(&mut self, fd: u32) -> &mut super::ChannelState {
         &mut self
             .services
             .nv
@@ -277,6 +260,12 @@ impl Process {
             // has no GPU caches, its memory is always current (kestrel's
             // choice: nothing to do).
             (_, name) if is_cache_op(name) => Ok(()),
+            // deko3d's tiled cache barrier and flush (methods NVIDIA's
+            // header does not name, `gen-gpu-methods.py`): the GPU's tiled
+            // cache holds rendering on chip before it reaches memory;
+            // kestrel renders to memory directly (kestrel's choice: nothing
+            // to do).
+            (class::THREED, "DEKO3D_TILED_CACHE_BARRIER" | "DEKO3D_TILED_CACHE_FLUSH") => Ok(()),
             // The macro memories: a pointer, then words stored from it.
             (class::THREED, "LOAD_MME_INSTRUCTION_RAM_POINTER") => {
                 e.mme_code_pointer = call.value;
@@ -375,6 +364,17 @@ impl Process {
                     ))
                 })
             }
+            // The inline-to-memory methods, in the 3D, compute and
+            // inline-to-memory classes, and DMA copy (`gpu/transfer.rs`).
+            (class::THREED | class::COMPUTE | class::INLINE_TO_MEMORY, "LAUNCH_DMA") => self
+                .inline_launch(fd, class, call.value)
+                .map_err(|r| r.unwrap_or_else(unimplemented)),
+            (class::THREED | class::COMPUTE | class::INLINE_TO_MEMORY, "LOAD_INLINE_DATA") => self
+                .inline_data(fd, class, call.value)
+                .map_err(|r| r.unwrap_or_else(unimplemented)),
+            (class::DMA_COPY, "LAUNCH_DMA") => self.copy_launch(fd, call.value),
+            // DMA copy's NOP: nothing to do.
+            (class::DMA_COPY, "NOP") => Ok(()),
             (class::THREED, "SET_REPORT_SEMAPHORE_D") => {
                 let abc = [e.reg(0x1b00), e.reg(0x1b04), e.reg(0x1b08)];
                 self.report_semaphore(fd, abc, call.value)

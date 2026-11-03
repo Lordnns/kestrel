@@ -9,7 +9,8 @@ its byte offset, name and, for arrays, its strides and counts.
 
 A method is "state" when its name starts with SET_ (NVIDIA's naming: SET_
 methods set a register), except those listed in TRIGGERS below, which act
-when written; every other method acts (LAUNCH_DMA, DRAW_*, CLEAR_SURFACE,
+when written, and the transfer parameters in PARAMETERS, which are state;
+every other method acts (LAUNCH_DMA, DRAW_*, CLEAR_SURFACE,
 WAIT_FOR_IDLE...). The command processor records state and must execute an
 action or stop naming it.
 
@@ -72,6 +73,15 @@ EXTRA_STATE_3D = {
     0x1108: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG2",
 }
 
+# 3D methods NVIDIA's header does not name that act, from the same reviewed
+# sources: deko3d's tiled cache barrier and flush (engine_3d.def's
+# TiledCacheBarrier and TiledCacheFlush; deko3d writes the flush between
+# render passes and at a queue's flush).
+EXTRA_ACTION_3D = {
+    0x0F7C: "DEKO3D_TILED_CACHE_BARRIER",
+    0x0F80: "DEKO3D_TILED_CACHE_FLUSH",
+}
+
 # SET_ methods that act when written (from their descriptions' fields:
 # the D word of a semaphore or report is its operation).
 # SET_FALCON00-31 hand a request to the GPU's microcontroller (falcon)
@@ -80,6 +90,20 @@ EXTRA_STATE_3D = {
 TRIGGERS = {
     "SET_REPORT_SEMAPHORE_D",
 } | {f"SET_FALCON{i:02}" for i in range(32)}
+
+# Methods without SET_ in their names that only hold a value: the
+# parameters LAUNCH_DMA reads, in the inline-to-memory methods (3D, compute
+# and inline-to-memory classes) and the DMA copy class. Their header entries
+# are one VALUE or UPPER field each, with no operation; envytools' rnndb
+# (graph/gk104_p2mf.xml) gives the inline-to-memory ones as plain registers
+# (LINE_LENGTH_IN, LINE_COUNT, DST_ADDRESS_HIGH/LOW, DST_PITCH), and
+# deko3d (source/maxwell/gpu_transfer.cpp, zlib) writes them in one batch
+# before LAUNCH_DMA in both engines.
+PARAMETERS = {
+    "LINE_LENGTH_IN", "LINE_COUNT", "OFFSET_OUT_UPPER", "OFFSET_OUT",
+    "OFFSET_OUT_LOWER", "OFFSET_IN_UPPER", "OFFSET_IN_LOWER", "PITCH_IN",
+    "PITCH_OUT",
+}
 
 LICENCE = """// NVIDIA's open-gpu-doc class headers, from which these tables are made:
 //
@@ -269,7 +293,9 @@ def confirm(methods, lengths):
 
 
 def kind(name):
-    if name.startswith(("ENVYTOOLS_", "DEKO3D_")):
+    if name in EXTRA_ACTION_3D.values():
+        return "Action"
+    if name.startswith(("ENVYTOOLS_", "DEKO3D_")) or name in PARAMETERS:
         return "State"
     if name.startswith("SET_") and name not in TRIGGERS:
         return "State"
@@ -296,7 +322,7 @@ def generate():
         methods = counts(parse(os.path.join(SRC, path), prefix))
         methods.sort(key=lambda m: m["base"])
         if label == "THREED":
-            for base, name in EXTRA_STATE_3D.items():
+            for base, name in {**EXTRA_STATE_3D, **EXTRA_ACTION_3D}.items():
                 assert not any(m["base"] == base for m in methods), name
                 methods.append(dict(name=name, base=base, stride=0,
                                     inner=0, count=1, inner_count=1))

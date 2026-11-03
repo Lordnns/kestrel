@@ -63,10 +63,10 @@ sessions learned. The plan and the status live elsewhere; read them first:
   interval and fences, QUERY, the vsync event and the GPU's nvhost
   devices run, and the window presents with Vulkan (`ash`, owner
   2026-11-03, confirmed on the owner's Windows PC). 5B has started: GPU
-  command lists run (the command processor and the MME, its macros),
-  and the deko3d examples run their setup to their first rendering
-  work; next the upload and copy engines, then clears (ROADMAP "Next
-  task" item 2).
+  command lists run (the command processor, the MME and its macros,
+  the upload and copy engines), and deko_basic and deko_console run to
+  their first clear; next clears and render targets presented (ROADMAP
+  "Next task" item 2).
 
 ## How the owner works
 

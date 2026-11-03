@@ -2609,6 +2609,113 @@ mod tests {
         let e = submit(&mut p, 0x200, &[inc(0, 0x16a8, 1), 0x4_0004]).unwrap_err();
         assert!(e.contains("CHECK_SPH_VERSION (0x16a8) = 0x40004"), "{e}");
 
+        // Inline-to-memory through the 3D engine (`cla140.h`'s methods at
+        // the same offsets): two lines of 6 bytes, 0x10 apart, at +0x2000,
+        // releasing a one-word semaphore (COMPLETION_TYPE 2, STRUCT_SIZE
+        // ONE_WORD) at +0x2100 when its 12 bytes have come; then 8 bytes to
+        // a block-linear surface at +0x3000, 128 bytes by 16 rows, blocks 2
+        // GOBs high, from byte 16 of row 9: the second GOB (512), its
+        // sector 1 (32), the sector's second row (16), at 0x230.
+        let list = [
+            inc(0, 0x180, 5),
+            6,
+            2,
+            hi,
+            lo + 0x2000,
+            0x10,
+            inc(0, 0x1dc, 3),
+            hi,
+            lo + 0x2100,
+            0x99,
+            imm(0, 0x1b0, 1 | 2 << 4 | 1 << 12),
+            non(0, 0x1b4, 3),
+            0x0403_0201,
+            0x0807_0605,
+            0x0c0b_0a09,
+            inc(0, 0x194, 7),
+            1 << 4,
+            128,
+            16,
+            1,
+            0,
+            16,
+            9,
+            inc(0, 0x180, 4),
+            8,
+            1,
+            hi,
+            lo + 0x3000,
+            imm(0, 0x1b0, 0),
+            non(0, 0x1b4, 2),
+            0x1111_1111,
+            0x2222_2222,
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!(
+            [0x2000, 0x2004, 0x2010, 0x2014, 0x2100].map(|a| read(&p, a)),
+            [0x0403_0201, 0x0605, 0x0a09_0807, 0x0c0b, 0x99]
+        );
+        assert_eq!(
+            (read(&p, 0x3230), read(&p, 0x3234)),
+            (0x1111_1111, 0x2222_2222)
+        );
+
+        // DMA copy on subchannel 4 (`clb0b5.h`): the 8 bytes back from the
+        // block-linear surface (source origin 16, 9; GOB_HEIGHT FERMI_8) to
+        // +0x2200 (pitch), multi-line, releasing a one-word semaphore at
+        // +0x2104; then 6 bytes from +0x2010 to +0x2300 with MULTI_LINE off,
+        // so LINE_COUNT (5) is not used.
+        let list = [
+            inc(4, 0x00, 1),
+            0xb0b5,
+            inc(4, 0x728, 6),
+            1 << 12 | 1 << 4,
+            128,
+            16,
+            1,
+            0,
+            16 | 9 << 16,
+            inc(4, 0x400, 4),
+            hi,
+            lo + 0x3000,
+            hi,
+            lo + 0x2200,
+            inc(4, 0x410, 4),
+            0,
+            0x100,
+            8,
+            1,
+            inc(4, 0x240, 3),
+            hi,
+            lo + 0x2104,
+            0x5a,
+            inc(4, 0x300, 1),
+            2 | 1 << 3 | 1 << 8 | 1 << 9,
+            inc(4, 0x400, 4),
+            hi,
+            lo + 0x2010,
+            hi,
+            lo + 0x2300,
+            inc(4, 0x418, 2),
+            6,
+            5,
+            inc(4, 0x300, 1),
+            2 | 1 << 7 | 1 << 8,
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!(
+            [0x2200, 0x2204, 0x2104, 0x2300, 0x2304, 0x2310].map(|a| read(&p, a)),
+            [0x1111_1111, 0x2222_2222, 0x5a, 0x0a09_0807, 0x0c0b, 0]
+        );
+        // Inline data with no transfer; a copy with component remapping.
+        let e = submit(&mut p, 0x300, &[inc(0, 0x1b4, 1), 1]).unwrap_err();
+        assert!(
+            e.contains("GPU 3D method LOAD_INLINE_DATA (0x1b4) = 0x1"),
+            "{e}"
+        );
+        let e = submit(&mut p, 0x300, &[inc(4, 0x300, 1), 2 | 1 << 10]).unwrap_err();
+        assert!(e.contains("LAUNCH_DMA = 0x402: component remapping"), "{e}");
+
         // What does not run yet stops, named: a macro whose start was
         // never loaded; a method on a subchannel with no object; one
         // NVIDIA's header does not name; a semaphore acquire nothing would

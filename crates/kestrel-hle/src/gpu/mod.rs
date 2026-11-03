@@ -21,6 +21,7 @@
 pub mod methods;
 pub mod mme;
 mod run;
+pub mod transfer;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -247,6 +248,9 @@ pub struct Engine {
     /// Constant buffers bound to shader stages (BIND_GROUP_CONSTANT_BUFFER):
     /// (stage, slot) to (GPU address, size).
     pub constant_buffers: BTreeMap<(u32, u32), (u64, u32)>,
+    /// An inline-to-memory transfer waiting for its data (3D, compute and
+    /// inline-to-memory classes).
+    pub inline: Option<transfer::Inline>,
 }
 
 impl Engine {
@@ -259,6 +263,7 @@ impl Engine {
             mme_start: Vec::new(),
             mme_start_pointer: 0,
             constant_buffers: BTreeMap::new(),
+            inline: None,
         }
     }
 

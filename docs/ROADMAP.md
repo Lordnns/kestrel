@@ -1763,6 +1763,80 @@ the MME tests and the IPC test.
 | Constant buffer words past the selected size | stop |
 | Cache invalidations and flushes | nothing to do: no GPU caches |
 
+#### 5B, step 3: the upload and copy engines (2026-11-03)
+
+What it is for: a program hands the GPU data in two ways besides
+shaders' own writes. Inline-to-memory writes data carried in the command
+list itself to memory (deko3d's `dkCmdBufPushData`, how deko_console
+uploads its constants); DMA copy copies memory to memory, between the
+plain (pitch) layout the CPU writes and the GPU's tiled block-linear one
+(deko3d's buffer and image copies, texture uploads). Both are needed
+before anything is drawn from data the program prepared.
+
+Sources: NVIDIA's class headers (MIT): `cla140.h` for inline-to-memory,
+whose methods the 3D and compute classes carry at the same offsets
+(`clb197.h`, `clb1c0.h`), and `clb0b5.h` for DMA copy; envytools' rnndb
+(`graph/gk104_p2mf.xml`, MIT) for the units the headers leave out (the
+destination's width is the line length in bytes, its X origin in
+bytes); envytools' "Blocklinear surfaces" (`g80-surface.rst`) for the
+layout in three dimensions; deko3d (`source/maxwell/gpu_transfer.cpp`,
+zlib) for how a program drives them: the DMA copy's width and X origin
+in bytes without component remapping, its LAYER the slice of a 3D
+surface, the origin used for block-linear sides only (a pitch side's
+offset already includes it).
+
+Implemented (`hle/src/gpu/transfer.rs`):
+- Inline-to-memory, in the 3D, compute and inline-to-memory classes:
+  LAUNCH_DMA starts a transfer of LINE_COUNT lines of LINE_LENGTH_IN
+  bytes to a pitch or block-linear destination; the LOAD_INLINE_DATA
+  words that follow carry its bytes; when the last has come it is
+  written and, with COMPLETION_TYPE RELEASE_SEMAPHORE and a one-word
+  structure, the semaphore (SET_I2M_SEMAPHORE_A-C) released.
+- DMA copy's LAUNCH_DMA: LINE_COUNT lines (one without
+  MULTI_LINE_ENABLE) of LINE_LENGTH_IN bytes from OFFSET_IN to
+  OFFSET_OUT, each side pitch or block linear (block size, width,
+  height, depth, layer, origin), then a one-word semaphore release.
+- `display::Blocks`: the block-linear layout with blocks wide, high and
+  deep, as envytools gives it; the display's 2D function is now one
+  case of it. A transfer reads and writes a block-linear line in the
+  16-byte runs a GOB keeps contiguous, across mappings.
+- `gen-gpu-methods.py`: the transfer parameters (LINE_LENGTH_IN,
+  LINE_COUNT, OFFSET_*, PITCH_*), which have no SET_ in their names,
+  are state; deko3d's tiled cache barrier and flush (0xf7c, 0xf80,
+  which NVIDIA's header does not name) are added as actions, run as
+  nothing (kestrel renders to memory directly).
+- Stop, named: component remapping, physical addresses, four-word
+  semaphores and semaphore reductions, QUARTER_GOB widths, blocks past
+  32 GOBs, a 4-row GOB height, inline data with no transfer, a transfer
+  launched before the previous one had its data.
+
+Where the deko3d examples stop now: deko_basic and deko_console at
+`CLEAR_SURFACE` (step 4); deko_examples still at "pixel format 0" in
+the display.
+
+Tests: `gpu::transfer::tests` (a pitch line, a block-linear line's
+runs), `display::tests` (blocks in three dimensions, in envytools'
+order), `gpu_command_lists_run_when_submitted` (inline-to-memory to a
+pitch surface with its semaphore and to a block-linear one, DMA copy
+back to pitch with its semaphore and a one-line copy, and the stops);
+`hbnvgpu` does the same copies and finds where its words landed in the
+block-linear surface, modelled in `gen-expected.py` by a block-linear
+function of its own written from envytools' pseudocode and Mesa's
+Tegra GOB table: self-test 29/29 on both backends, the same output at
+`-O3 -march=armv8.2-a`. Mutation check: a block-linear run of 32 bytes
+instead of 16 fails hbnvgpu ("block-linear word at") and the transfer
+test.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Block size | as the program gives it, not shrunk to the surface (some binding points shrink it, envytools says; deko3d computes each mip level's itself) |
+| Inline data's bytes | in memory order (little-endian words); the last word's bytes past the transfer are dropped |
+| Inline-to-memory's writes | when the last data word has come |
+| DMA copy without MULTI_LINE_ENABLE | one line; LINE_COUNT is not read |
+| Overlapping DMA copies | all of the source read before any of it is written |
+| Interrupts, flushes, membars, L2 bypass, pipelining | nothing to do: the work is done before the submission returns |
+| deko3d's tiled cache barrier and flush | nothing to do |
+
 #### Gaps left in 5A
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
@@ -1996,9 +2070,11 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         stops at `CLEAR_SURFACE`, deko_console at `LINE_LENGTH_IN`
         (inline-to-memory), deko_examples at "pixel format 0" in the
         display ("Phase 5 notes").
-     3. The copy and upload engines (inline-to-memory, in the 3D class
-        and its own, DMA copy), block-linear layouts reused from the
-        display.
+     3. Done (2026-11-03): the upload and copy engines (inline-to-memory
+        in the 3D, compute and its own class; DMA copy), pitch and block
+        linear (in three dimensions). deko_basic and deko_console stop at
+        `CLEAR_SURFACE`, deko_examples at "pixel format 0" in the display
+        ("Phase 5 notes").
      4. Clears and render targets, presented: a deko3d frame reaching
         the window through the queue (and deko_examples' swapchain
         format).

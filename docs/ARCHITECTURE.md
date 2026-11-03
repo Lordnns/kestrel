@@ -532,4 +532,7 @@ come from NVIDIA's headers through `scripts/gen-gpu-methods.py`
 (`gpu/methods.rs`); an action kestrel does not run yet stops, named.
 A 3D macro call runs the uploaded macro in `gpu/mme.rs`, an interpreter
 of the macro method expander, whose method writes go to the 3D engine
-as the pushbuffer's do.
+as the pushbuffer's do. The upload (inline-to-memory) and DMA copy
+engines are `gpu/transfer.rs`; both read and write pitch and
+block-linear surfaces, the layout `display::Blocks` gives for the
+display and the GPU alike.
