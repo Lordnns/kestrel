@@ -390,8 +390,11 @@ method; the methods live next to the state they change:
   the program's memory and turned into pixels (`hle/display.rs`: block
   linear, pixel formats) for `Process::screen`, a
   `kestrel_hle::display::Screen`: the window paints it, the self-test
-  records a CRC-32 of it. Buffers are freed at a 60 Hz vsync of guest
-  time, which the scheduler wakes for. nvdrv's /dev/nvhost-ctrl keeps
+  records a CRC-32 of it. Frames take turns on the screen, each for its
+  swap interval in vsyncs (60 Hz of guest time), and a buffer is freed
+  when its frame's turn ends; the scheduler wakes for that, and for the
+  next vsync while a thread waits on the vsync event. nvdrv's
+  /dev/nvhost-ctrl keeps
   the syncpoints and the events programs wait on for fences; with no
   GPU yet, only the program's own increments move them
   (`Process::syncpoint_incr`, where the GPU will).

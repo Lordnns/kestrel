@@ -58,10 +58,11 @@ sessions learned. The plan and the status live elsewhere; read them first:
   the measured programs; next, SSE2 for the integer lanes (ROADMAP
   "Next task", step 3).
 - The graphics track (5A), in a separate cloud session since 2026-11-03:
-  vt52-demo and simplegfx display and are checked with the examples, and
-  /dev/nvhost-ctrl's syncpoints and events run (branch
-  `claude/graphics-5a`); next the fences and display gaps, then the
-  GPU's nvhost devices (ROADMAP "Next task" item 2).
+  vt52-demo and simplegfx display and are checked with the examples;
+  /dev/nvhost-ctrl's syncpoints and events, the buffer queue's swap
+  interval and fences, QUERY and the vsync event run (branch
+  `claude/graphics-5a`); next the GPU's nvhost devices (ROADMAP "Next
+  task" item 2).
 
 ## How the owner works
 

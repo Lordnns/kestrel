@@ -1390,15 +1390,73 @@ and stops on any ioctl".
 | Event slots | allocating one twice: AlreadyAllocated (13, libnx's name); freeing or using one not allocated: BadParameter; a batch skips slots not allocated; handles to a freed slot's event stay valid |
 | CLEAR_EVENT_WAIT | drops the slot's wait and clears its event |
 
+#### The buffer queue's swap interval and fences, QUERY, the vsync event (2026-11-03)
+
+What they are for: the swap interval is how many vsyncs each frame stays
+on the screen (1: 60 fps, 2: 30 fps), so a game runs at its intended
+rate; a queued frame's fence says which GPU work must finish before it
+is shown; QUERY asks the queue for its size and state; the vsync event
+lets a program pace itself on the display.
+
+Sources: libnx 4.12.0's `BqBufferInput` (`display/buffer_producer.h`:
+the swap interval at 0x2c, the NvMultiFence at 0x30), `native_window.c`
+(libnx sends swap interval 1 unless the program sets another) and
+`services/vi.c` (GetDisplayVsyncEvent, 5202); Switchbrew, "VI services"
+(GetDisplayVsyncEvent takes the display ID and returns a handle; no
+more); Android's `system/window.h` and `vndk/window.h` (Apache 2.0) for
+the QUERY constants and the swap interval's meaning, the minimum number
+of vsyncs per frame, as EGL's eglSwapInterval.
+
+Implemented (`hle/service/vi.rs`):
+- QUEUE_BUFFER reads its QueueBufferInput. Frames take turns on the
+  screen: a frame's turn starts at the start of the vsync period it is
+  queued in, or at the end of the previous frame's turn, whichever is
+  later, and lasts its swap interval in vsyncs; its buffer is freed when
+  the turn ends. Before, every queued buffer was freed at the next vsync,
+  so a double-buffered program could show two frames a vsync: simplegfx
+  showed 181 frames in about 2 s of guest time, now 122 (60 a second).
+- Fences: each must be on a syncpoint that exists and already reached;
+  one not reached stops, named, since no GPU increments syncpoints yet.
+- QUERY (9): WIDTH, HEIGHT, DEFAULT_WIDTH, DEFAULT_HEIGHT (the queue's
+  size), FORMAT (the buffers'), TRANSFORM_HINT (0),
+  CONSUMER_RUNNING_BEHIND (more than one buffer queued and not freed);
+  the others (MIN_UNDEQUEUED_BUFFERS and the rest) stop, named.
+- GetDisplayVsyncEvent (5202): an event signalled at every vsync after
+  it is made; the scheduler wakes at the next vsync while a thread waits
+  on it (`Process::next_wake`).
+- `hbdisplay` sent its swap interval at 0x24 (the sticky transform) and
+  now sends it at 0x2c; it also asks five QUERYs, waits on the vsync
+  event twice (a vsync apart), and queues two frames with swap interval
+  2 and a reached fence, then times the next free buffer (two vsyncs
+  on). Its model in `gen-expected.py` follows the rules above: frame 2
+  is still pending when frame 3 is queued.
+
+Tests: `vi_swap_intervals_fences_queries_and_the_vsync_event` (IPC);
+`hbdisplay` in the self-test, 28/28 on both backends, the same output at
+`-O3 -march=armv8.2-a`; the six examples pass, threaded too. Mutation
+checks: every swap interval taken as 1 fails hbdisplay ("woken two
+vsyncs on") and the unit test; never signalling the vsync event fails
+the unit test (and makes the self-test spin: a thread waits on an event
+that never comes, and the counted clock keeps jumping to the next vsync;
+the self-test has no wall-clock limit for that).
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| A frame's turn | from the start of the vsync period it is queued in, or the previous frame's end if later, for its swap interval in vsyncs; freed at the end (shown at once, as before) |
+| Swap interval 0 | freed at the next vsync, not waiting for its turn |
+| Fences not reached | stop, named (no GPU yet) |
+| QUERY FORMAT before buffers | RGBA 8888 (1), Android's BufferQueue default |
+| QUERY CONSUMER_RUNNING_BEHIND | more than one buffer queued and not freed, as libnx reads numPendingBuffers |
+| GetDisplayVsyncEvent | each call copies a handle to the same event; the first signal is the first vsync after the first call |
+
 #### Gaps left in 5A
 
 - The GPU's nvhost devices: `/dev/nvhost-ctrl-gpu`, `/dev/nvhost-as-gpu`
   and `/dev/nvhost-gpu` (channels): no example of 5A uses them; deko3d
-  (5B) does. With no GPU the buffer queue gives no fences, so libnx's
-  framebuffer never waits on nvhost-ctrl either.
-- The display gaps listed in "Phase 2 acceptance": GetDisplayVsyncEvent,
-  the swap interval, the QUERY transaction, CreateStrayLayer, layer
-  position and size; none of the examples calls them.
+  (5B) does.
+- Display: CreateStrayLayer, other displays, layer position and size,
+  the crop, scaling mode and transform of a queued frame (ignored),
+  QUERY's other constants.
 - Presentation with Vulkan: the window still draws with softbuffer; a
   Vulkan crate is a new dependency, for the owner to decide.
 
@@ -1605,9 +1663,9 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         SYNCPT_WAIT_EVENT, GET_SHIFT, the module ioctls and the [S2]
         ones ("Phase 5 notes"). A wait that would block stops, until
         kestrel's services can make a request wait.
-     2. The buffer queue's fences (NvMultiFence on syncpoints) and the
-        display gaps ("Phase 2 acceptance": GetDisplayVsyncEvent, the
-        swap interval, QUERY).
+     2. Done (2026-11-03): the buffer queue's swap interval (frames
+        take turns, so 60 fps at 1) and fences (reached ones; others
+        stop, named), QUERY, GetDisplayVsyncEvent ("Phase 5 notes").
      3. `/dev/nvhost-as-gpu` (AllocSpace, MapBufferEx, UnmapBuffer,
         BindChannel, GetVaRegions, InitializeEx), `/dev/nvhost-ctrl-gpu`
         (GetCharacteristics, ZcullGetInfo, GetTpcMasks; values from
