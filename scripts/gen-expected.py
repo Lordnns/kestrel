@@ -1417,7 +1417,9 @@ def hbnvgpu():
     buffer size as two regions (48); NvError 4 is BadParameter; a channel
     takes one object context. libnx's nvidia/ioctl.h: the ZCULL info a
     console answers (32, 32, 1024, 2048, 32, 32, 192, 32, 64, 16), NvError
-    13 AlreadyAllocated. Kestrel's documented choices (docs/ROADMAP.md,
+    13 AlreadyAllocated. A submitted command list runs before the
+    submission returns (kestrel's documented choice, "Phase 5 notes", like
+    the rest below). Kestrel's documented choices (docs/ROADMAP.md,
     "Phase 5 notes"): impl 0xB; ZCULL context size 0; TPC mask 0b11 for
     one GPC of two TPCs; PTIMER from the system tick; small pages from
     16 MiB to 16 GiB, big pages from there to 1 TiB; first fit, lowest
@@ -1512,6 +1514,15 @@ def hbnvgpu():
         f"  event handed out: {hex64(1)}",
         f"SET_ERROR_NOTIFIER: {ok}",
         f"SET_PRIORITY: {ok}",
+        # The command list runs at once: the semaphores hold their
+        # payloads, and the fence is the channel's syncpoint (1) after its
+        # two increments ("clb06f.h", "clb197.h": SEMAPHORED release,
+        # INCREMENT_SYNC_POINT, SET_REPORT_SEMAPHORE_D one-word release).
+        f"KickoffPb: {ok}",
+        f"  fence syncpoint: {hex64(1)}",
+        f"  fence value: {hex64(2)}",
+        f"  host semaphore: {hex64(0xABCD)}",
+        f"  report semaphore: {hex64(0x55)}",
         f"SET_ERROR_NOTIFIER off: {ok}",
         f"close the error event: {ok}",
         f"Close /dev/nvhost-gpu: {ok}",

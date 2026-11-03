@@ -4,8 +4,11 @@
 // nvMapCreate and nvGpuChannelCreate send them (`nvidia/*.c`) and so as
 // deko3d sets up a device and a queue: the GPU's description, an address
 // space with a reservation and mappings, a channel with its queue, engine
-// and error notifier. It submits no command list (phase 5B). The expected
-// output is modelled in scripts/gen-expected.py.
+// and error notifier. Then it submits one command list as libnx's
+// nvGpuChannelKickoff does (Ioctl2), which binds the 3D engine, releases a
+// host semaphore and a 3D report semaphore, and increments the channel's
+// syncpoint twice: what the GPU wrote and the fence it answers are printed.
+// The expected output is modelled in scripts/gen-expected.py.
 #include "hb.h"
 
 #define CUR_PROCESS 0xffff8001u
@@ -81,7 +84,7 @@ typedef struct {
     int pid;
     u32 ncopy, copy[2];
     u32 nx, na, nb, nc;
-    buf x[1], a[1], b[1], c[1];
+    buf x[2], a[2], b[1], c[1];
 } req;
 
 static u32 copied, moved;
@@ -185,6 +188,19 @@ static u64 nvdrv;
 
 // Ioctl as libnx's nvIoctl sends a small one: the argument in an X
 // pointer and back through a C pointer; the NvError.
+// Ioctl2 as libnx's nvIoctl2 sends it: the argument and a second input
+// (X pointers 0 and 1, the A buffers empty), the argument back through a C
+// pointer; the NvError.
+static u32 ioctl2(u32 fd, u32 code, void *arg, u32 size, const void *more, u32 more_size) {
+    u32 args[2] = {fd, code};
+    req r = {.nx = 2, .na = 2, .nb = 1, .nc = 1};
+    r.x[0] = (buf){(u64)arg, size};
+    r.x[1] = (buf){(u64)more, more_size};
+    r.c[0] = (buf){(u64)arg, size};
+    if (call_ex(nvdrv, &r, 4, 11, args, sizeof args) != 0) fail("nvdrv Ioctl2 failed");
+    return out32(0);
+}
+
 static u32 ioctl(u32 fd, u32 code, void *arg, u32 size) {
     u32 args[2] = {fd, code};
     req r = {.nx = 1, .na = 1, .nb = 1, .nc = 1};
@@ -379,6 +395,47 @@ void hb_main(const config_entry *config, u64 x1) {
     hex("SET_ERROR_NOTIFIER: ", io(ch, 0xc018480c, notifier, sizeof notifier));
     u32 prio = 0x64;
     hex("SET_PRIORITY: ", io(ch, 0x4004480d, &prio, 4));
+
+    // A command list at offset 0x1000 of the object, which the fixed
+    // mapping shows at segment + 0x20000 (`clb06f.h`'s command headers:
+    // incrementing 1 << 29, non-incrementing 3 << 29; method offsets in
+    // bytes, written divided by 4).
+#define INC(m, n) (1u << 29 | (n) << 16 | (m) >> 2)
+#define NON(m, n) (3u << 29 | (n) << 16 | (m) >> 2)
+    u64 gpu = segment + 0x20000;
+    u32 hi = (u32)(gpu >> 32), lo = (u32)gpu;
+    u32 sp_id = gpfifo[3];
+    u32 *list = (u32 *)(heap + 0x1000);
+    u32 n = 0;
+    list[n++] = INC(0x00, 1); // SET_OBJECT: 3D on subchannel 0
+    list[n++] = 0xb197;
+    list[n++] = INC(0x10, 4); // host SEMAPHOREA-D: release, 4 bytes
+    list[n++] = hi;
+    list[n++] = lo + 0x800;
+    list[n++] = 0xabcd;
+    list[n++] = 2 | 1u << 24;
+    list[n++] = NON(0x2c8, 2); // 3D INCREMENT_SYNC_POINT, twice
+    list[n++] = sp_id;
+    list[n++] = sp_id;
+    list[n++] = INC(0x1b00, 4); // 3D SET_REPORT_SEMAPHORE_A-D: one word
+    list[n++] = hi;
+    list[n++] = lo + 0x804;
+    list[n++] = 0x55;
+    list[n++] = 1u << 28;
+    list[n++] = INC(0x70, 2); // host SYNCPOINTA/B: wait for 2
+    list[n++] = 2;
+    list[n++] = sp_id << 8;
+    u64 list_va = gpu + 0x1000;
+    u64 entry = (u32)list_va | ((list_va >> 32 & 0xff) | (u64)n << 10) << 32;
+    struct {
+        u64 gpfifo;
+        u32 entries, flags, fence_id, fence_value;
+    } kick = {0, 1, 1u << 2 | 1u << 8, 0, 2};
+    hex("KickoffPb: ", ioctl2(ch, 0xc018481b, &kick, sizeof kick, &entry, sizeof entry));
+    hex("  fence syncpoint: ", kick.fence_id);
+    hex("  fence value: ", kick.fence_value);
+    hex("  host semaphore: ", *(volatile u32 *)(heap + 0x800));
+    hex("  report semaphore: ", *(volatile u32 *)(heap + 0x804));
 
     // nvGpuChannelClose, nvAddressSpaceClose, nvGpuExit, nvMapExit.
     notifier[4] = 0;
