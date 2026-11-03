@@ -1829,8 +1829,8 @@ mod tests {
             e.contains("unimplemented: nvdrv /dev/nvmap ioctl 0xc00801ff"),
             "{e}"
         );
-        let e = ioctl(&mut p, 2, 0xc008_0014, &[0; 8]).unwrap_err();
-        assert!(e.contains("/dev/nvhost-ctrl ioctl 0xc0080014"), "{e}");
+        let e = ioctl(&mut p, 2, 0x4008_0017, &[0; 8]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl ioctl 0x40080017"), "{e}");
         // A closed descriptor takes no ioctls.
         let close = hipc(false, &[], 2, &1u32.to_le_bytes(), &[], &[], &[], &[]);
         assert_eq!(send(&mut p, nv, &close), Ok(0));
@@ -1838,6 +1838,201 @@ mod tests {
         assert_eq!(ioctl(&mut p, 1, 0xc008_0101, &[0; 8]).unwrap().0, 4);
         assert_eq!(send(&mut p, nv, &close), Ok(0));
         assert_eq!(u32s(&answer(&p, false, 4).3), vec![4]);
+    }
+
+    /// nvdrv, opened and initialized as libnx's nvInitialize does it.
+    fn nvdrv_ready(p: &mut Process) -> u64 {
+        let nv = open(p, b"nvdrv");
+        let heap = p.set_heap_size(0x20_0000).unwrap();
+        let tmem = p.create_transfer_memory(heap, 0x1000, 0).unwrap();
+        let process = handle::CURRENT_PROCESS as u32;
+        let init = hipc(
+            false,
+            &[process, tmem],
+            3,
+            &0x1000u32.to_le_bytes(),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(send(p, nv, &init), Ok(0));
+        nv
+    }
+
+    /// nvdrv Open: (descriptor, NvError).
+    fn nv_open(p: &mut Process, nv: u64, path: &[u8]) -> (u32, u32) {
+        p.mem.write_bytes(STRINGS, path).unwrap();
+        let a = [(STRINGS, path.len() as u64)];
+        let msg = hipc(false, &[], 0, &[], &[], &a, &[], &[]);
+        assert_eq!(send(p, nv, &msg), Ok(0));
+        let out = u32s(&answer(p, false, 8).3);
+        (out[0], out[1])
+    }
+
+    /// nvdrv Ioctl over pointers, as libnx sends small ones: (NvError, the
+    /// argument after it), or the stop.
+    fn nv_ioctl(
+        p: &mut Process,
+        nv: u64,
+        fd: u32,
+        code: u32,
+        arg: &[u8],
+    ) -> Result<(u32, Vec<u8>), String> {
+        let (input, output) = (STRINGS + 0x200, STRINGS + 0x300);
+        p.mem.write_bytes(input, arg).unwrap();
+        p.mem.write_bytes(output, &vec![0; arg.len()]).unwrap();
+        let size = arg.len() as u64;
+        let args = [fd.to_le_bytes(), code.to_le_bytes()].concat();
+        let (x, c) = ([(input, size)], [(output, size)]);
+        let msg = hipc(false, &[], 1, &args, &x, &[(0, 0)], &[(0, 0)], &c);
+        send(p, nv, &msg)?;
+        let err = u32s(&answer(p, false, 4).3)[0];
+        Ok((err, p.mem.read_vec(output, arg.len()).unwrap()))
+    }
+
+    /// nvdrv QueryEvent: (NvError, the copied handles), or the stop.
+    fn nv_query_event(
+        p: &mut Process,
+        nv: u64,
+        fd: u32,
+        id: u32,
+    ) -> Result<(u32, Vec<u32>), String> {
+        let msg = hipc(false, &[], 4, &words(&[fd, id]), &[], &[], &[], &[]);
+        send(p, nv, &msg)?;
+        let (rc, copied, _, data, _) = answer(p, false, 4);
+        assert_eq!(rc, 0);
+        Ok((u32s(&data)[0], copied))
+    }
+
+    #[test]
+    fn nvhost_ctrl_syncpoints_and_events() {
+        let mut p = setup();
+        let nv = nvdrv_ready(&mut p);
+        let (ctrl, err) = nv_open(&mut p, nv, b"/dev/nvhost-ctrl");
+        assert_eq!(err, 0);
+        let io = |p: &mut Process, code: u32, ws: &[u32]| {
+            let (err, out) = nv_ioctl(p, nv, ctrl, code, &words(ws)).unwrap();
+            (err, u32s(&out))
+        };
+        const READ: u32 = 0xc008_0014;
+        const READ_MAX: u32 = 0xc008_001a;
+        const INCR: u32 = 0x4004_0015;
+        const WAIT: u32 = 0xc00c_0016;
+        const WAITEX: u32 = 0xc010_0019;
+        const CLEAR: u32 = 0xc004_001c;
+        const WAIT_EVENT_EX: u32 = 0xc010_001e;
+        const ALLOC: u32 = 0xc004_001f;
+        const FREE: u32 = 0xc004_0020;
+
+        // SYNCPT_READ and READ_MAX: every syncpoint starts at 0; IDs past
+        // 191 do not exist.
+        assert_eq!(io(&mut p, READ, &[5, 9]), (0, vec![5, 0]));
+        assert_eq!(io(&mut p, READ_MAX, &[191, 9]), (0, vec![191, 0]));
+        assert_eq!(io(&mut p, READ, &[192, 0]).0, 4);
+        // SYNCPT_INCR, under "NV services"' number and libnx's.
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert_eq!(io(&mut p, 0xc004_0015, &[5]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[192]).0, 4);
+        assert_eq!(io(&mut p, READ, &[5, 0]), (0, vec![5, 3]));
+        assert_eq!(io(&mut p, READ_MAX, &[5, 0]), (0, vec![5, 3]));
+        assert_eq!(io(&mut p, READ, &[6, 0]), (0, vec![6, 0]));
+
+        // SYNCPT_WAIT and WAITEX: a threshold reached answers at once
+        // (with the value for WAITEX), as does one behind the value by
+        // wrapping; one not reached with no time to wait is Timeout.
+        assert_eq!(io(&mut p, WAIT, &[5, 3, u32::MAX]).0, 0);
+        assert_eq!(io(&mut p, WAITEX, &[5, 2, 100, 0]), (0, vec![5, 2, 100, 3]));
+        assert_eq!(io(&mut p, WAIT, &[5, 0xffff_fff0, 100]).0, 0);
+        assert_eq!(io(&mut p, WAIT, &[5, 4, 0]).0, 5);
+        assert_eq!(io(&mut p, WAITEX, &[5, 4, 0, 0]), (5, vec![5, 4, 0, 0]));
+        let e = nv_ioctl(&mut p, nv, ctrl, WAIT, &words(&[5, 4, 100])).unwrap_err();
+        assert!(e.contains("a request that blocks"), "{e}");
+
+        // Event slots: QueryEvent wants an allocated one.
+        assert_eq!(
+            nv_query_event(&mut p, nv, ctrl, 0x1000_0002),
+            Ok((4, vec![]))
+        );
+        assert_eq!(io(&mut p, ALLOC, &[2]).0, 0);
+        assert_eq!(io(&mut p, ALLOC, &[2]).0, 13, "AlreadyAllocated");
+        assert_eq!(io(&mut p, ALLOC, &[64]).0, 4);
+        // QueryEvent with libnx's ID for slot 2 (valid bit set).
+        let (err, copied) = nv_query_event(&mut p, nv, ctrl, 0x1000_0002).unwrap();
+        assert_eq!((err, copied.len()), (0, 1));
+        let event = copied[0];
+        assert_eq!(
+            p.handles.get(event).map(|(k, _)| k),
+            Some(Kind::ReadableEvent)
+        );
+        let signaled = |p: &Process| match p.handles.object(p.handles.get(event).unwrap().1) {
+            Object::Event { signaled } => *signaled,
+            o => panic!("{o:?}"),
+        };
+        assert!(!signaled(&p));
+
+        // SYNCPT_WAIT_EVENT_EX on syncpoint 5 (at 3) for 5: Timeout, with
+        // slot | id << 4 out; the event fires when the syncpoint gets
+        // there.
+        assert_eq!(
+            io(&mut p, WAIT_EVENT_EX, &[5, 5, 1000, 2]),
+            (5, vec![5, 5, 1000, 0x52])
+        );
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert!(!signaled(&p), "at 4");
+        assert_eq!(io(&mut p, INCR, &[6]).0, 0);
+        assert!(!signaled(&p), "another syncpoint");
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert!(signaled(&p), "at 5");
+        assert_eq!(p.services.nv.event(2).unwrap().wait, None);
+        // Reached already: the value out, the event untouched.
+        assert_eq!(
+            io(&mut p, WAIT_EVENT_EX, &[5, 5, 1000, 2]),
+            (0, vec![5, 5, 1000, 5])
+        );
+        assert!(signaled(&p));
+        // Arming clears the event; CLEAR_EVENT_WAIT (libnx's ID) drops the
+        // wait, so reaching the threshold later signals nothing.
+        assert_eq!(io(&mut p, WAIT_EVENT_EX, &[5, 7, 1000, 2]).0, 5);
+        assert!(!signaled(&p));
+        assert_eq!(io(&mut p, CLEAR, &[0x1000_0002]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert_eq!(io(&mut p, INCR, &[5]).0, 0);
+        assert!(!signaled(&p), "cleared");
+        // A slot not allocated takes no wait.
+        assert_eq!(io(&mut p, WAIT_EVENT_EX, &[5, 9, 1000, 3]).0, 4);
+        assert_eq!(io(&mut p, WAIT_EVENT_EX, &[192, 9, 1000, 2]).0, 4);
+
+        // FREE_EVENT and FREE_EVENT_BATCH.
+        assert_eq!(io(&mut p, FREE, &[2]).0, 0);
+        assert_eq!(io(&mut p, FREE, &[2]).0, 4);
+        assert_eq!(
+            nv_query_event(&mut p, nv, ctrl, 0x1000_0002),
+            Ok((4, vec![]))
+        );
+        assert_eq!(io(&mut p, ALLOC, &[3]).0, 0);
+        assert_eq!(io(&mut p, ALLOC, &[40]).0, 0);
+        let mask = 1u64 << 3 | 1 << 40 | 1 << 9;
+        assert_eq!(
+            io(&mut p, 0x4008_0021, &[mask as u32, (mask >> 32) as u32]).0,
+            0
+        );
+        assert_eq!(p.services.nv.event(3), None);
+        assert_eq!(p.services.nv.event(40), None);
+        assert_eq!(io(&mut p, ALLOC, &[3]).0, 0);
+
+        // QueryEvent on another device stops, named; on no device it is
+        // BadParameter. Unknown ioctls stop.
+        let (map, _) = nv_open(&mut p, nv, b"/dev/nvmap");
+        let e = nv_query_event(&mut p, nv, map, 1).unwrap_err();
+        assert!(
+            e.contains("unimplemented: nvdrv QueryEvent 0x1 on /dev/nvmap"),
+            "{e}"
+        );
+        assert_eq!(nv_query_event(&mut p, nv, 99, 1), Ok((4, vec![])));
+        let e = nv_ioctl(&mut p, nv, ctrl, 0xc183_001b, &[0; 0x183]).unwrap_err();
+        assert!(e.contains("/dev/nvhost-ctrl ioctl 0xc183001b"), "{e}");
     }
 
     /// A parcel as libnx's parcelTransact sends it: the header, then

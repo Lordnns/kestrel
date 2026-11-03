@@ -4,13 +4,16 @@
 //! (`nx/source/services/nv.c`, `nx/source/nvidia/map.c`, `fence.c`) when a
 //! program sets up a framebuffer.
 //!
-//! Only memory handles exist so far: "/dev/nvmap" registers memory the
-//! program allocated, which the display then reads frames from, and
-//! "/dev/nvhost-ctrl" opens but takes no ioctls yet (libnx's fences only
-//! need it once the GPU runs, in phase 5).
+//! Two devices so far: "/dev/nvmap" registers memory the program
+//! allocated, which the display then reads frames from, and
+//! "/dev/nvhost-ctrl" keeps the syncpoints (counters the GPU and the
+//! display increment when work finishes; fences are syncpoint values)
+//! and the events a program waits on for them (libnx's nvFenceWait). No
+//! GPU runs yet, so only the program's own SYNCPT_INCR moves a
+//! syncpoint.
 
 use super::{Call, Interface, IpcError, Out};
-use crate::kernel::Kind;
+use crate::kernel::{Kind, ObjectId};
 use crate::Process;
 
 /// NvError ("NV services").
@@ -19,6 +22,70 @@ pub mod error {
     pub const NOT_SUPPORTED: u32 = 2;
     pub const NOT_INITIALIZED: u32 = 3;
     pub const BAD_PARAMETER: u32 = 4;
+    pub const TIMEOUT: u32 = 5;
+    /// libnx's nvConvertError names 13 AlreadyAllocated.
+    pub const ALREADY_ALLOCATED: u32 = 13;
+}
+
+/// The /dev/nvhost-ctrl ioctls ("NV services", "/dev/nvhost-ctrl").
+mod ctrl {
+    pub const SYNCPT_READ: u32 = 0xc008_0014;
+    pub const SYNCPT_INCR: u32 = 0x4004_0015;
+    /// SYNCPT_INCR as libnx's nvioctlNvhostCtrl_SyncptIncr numbers it,
+    /// with both direction bits (`_NV_IOWR`); "NV services" lists it as
+    /// in only. kestrel's choice: both numbers mean SYNCPT_INCR.
+    pub const SYNCPT_INCR_INOUT: u32 = 0xc004_0015;
+    pub const SYNCPT_WAIT: u32 = 0xc00c_0016;
+    pub const SYNCPT_WAITEX: u32 = 0xc010_0019;
+    pub const SYNCPT_READ_MAX: u32 = 0xc008_001a;
+    pub const SYNCPT_CLEAR_EVENT_WAIT: u32 = 0xc004_001c;
+    pub const SYNCPT_WAIT_EVENT_EX: u32 = 0xc010_001e;
+    pub const SYNCPT_ALLOC_EVENT: u32 = 0xc004_001f;
+    pub const SYNCPT_FREE_EVENT: u32 = 0xc004_0020;
+    pub const SYNCPT_FREE_EVENT_BATCH: u32 = 0x4008_0021;
+}
+
+/// How many syncpoints exist, IDs 0 to 191. "NV services" does not say;
+/// kestrel's choice: the Tegra X1's host1x count (192, as Linux's host1x
+/// driver lists for Tegra210). Other IDs get BadParameter.
+pub const SYNCPOINTS: u32 = 192;
+
+/// Syncpoint event slots, 0x00 to 0x3f ("NV services",
+/// NVHOST_IOCTL_CTRL_SYNCPT_ALLOC_EVENT).
+pub const EVENT_SLOTS: u32 = 64;
+
+/// The event slot an event ID names. QueryEvent's ID for /dev/nvhost-ctrl
+/// is `slot | (syncpoint & 0xfff) << 16 | valid << 28` ("NV services",
+/// QueryEvent), and libnx's fences send CLEAR_EVENT_WAIT the same ID
+/// (`0x10000000 | slot`). kestrel's choice: the slot is the low 16 bits;
+/// the syncpoint and valid fields are not checked.
+fn event_slot(id: u32) -> u32 {
+    id & 0xffff
+}
+
+/// Whether a syncpoint at `value` has reached `threshold`: kestrel's
+/// choice, a wrapping 32-bit compare (the value minus the threshold, as
+/// signed, is not negative), so a fence keeps working when the counter
+/// wraps.
+pub fn reached(value: u32, threshold: u32) -> bool {
+    value.wrapping_sub(threshold) as i32 >= 0
+}
+
+/// A syncpoint: its value, and the highest value work was promised for
+/// (SYNCPT_READ_MAX). Both start at 0 (kestrel's choice).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Syncpoint {
+    pub value: u32,
+    pub max: u32,
+}
+
+/// An allocated event slot: its event, and the wait it was armed with
+/// (SYNCPT_WAIT_EVENT_EX: a syncpoint and a threshold), until the
+/// syncpoint reaches it or the wait is cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncptEvent {
+    pub event: ObjectId,
+    pub wait: Option<(u32, u32)>,
 }
 
 /// The /dev/nvmap ioctls ("NV services", "/dev/nvmap").
@@ -51,6 +118,15 @@ pub enum Device {
     NvhostCtrl,
 }
 
+impl Device {
+    fn path(self) -> &'static str {
+        DEVICES
+            .iter()
+            .find(|(_, d)| *d == self)
+            .map_or("?", |(p, _)| p)
+    }
+}
+
 /// The device files kestrel has, by path.
 const DEVICES: &[(&str, Device)] = &[
     ("/dev/nvmap", Device::Nvmap),
@@ -80,9 +156,47 @@ pub struct State {
     /// nvmap objects: handle and ID n at n - 1 (kestrel's choice: one
     /// number names an object as both).
     pub maps: Vec<Option<MapObject>>,
+    /// Syncpoints by ID, grown as they are touched (unlisted ones are at
+    /// 0).
+    pub syncpts: Vec<Syncpoint>,
+    /// Syncpoint event slots, grown as they are allocated.
+    pub events: Vec<Option<SyncptEvent>>,
 }
 
 impl State {
+    /// Syncpoint `id`, if it exists.
+    pub fn syncpoint(&self, id: u32) -> Option<Syncpoint> {
+        if id >= SYNCPOINTS {
+            return None;
+        }
+        Some(self.syncpts.get(id as usize).copied().unwrap_or_default())
+    }
+
+    fn syncpoint_mut(&mut self, id: u32) -> Option<&mut Syncpoint> {
+        if id >= SYNCPOINTS {
+            return None;
+        }
+        if self.syncpts.len() <= id as usize {
+            self.syncpts.resize(id as usize + 1, Syncpoint::default());
+        }
+        Some(&mut self.syncpts[id as usize])
+    }
+
+    /// The event in slot `slot`, if allocated.
+    pub fn event(&self, slot: u32) -> Option<SyncptEvent> {
+        *self.events.get(slot as usize)?
+    }
+
+    fn event_mut(&mut self, slot: u32) -> Option<&mut Option<SyncptEvent>> {
+        if slot >= EVENT_SLOTS {
+            return None;
+        }
+        if self.events.len() <= slot as usize {
+            self.events.resize(slot as usize + 1, None);
+        }
+        Some(&mut self.events[slot as usize])
+    }
+
     /// The nvmap object with ID `id`.
     pub fn map(&self, id: u32) -> Option<&MapObject> {
         self.maps.get((id as usize).checked_sub(1)?)?.as_ref()
@@ -184,6 +298,31 @@ impl Process {
                 self.services.nv.initialized = true;
                 Ok(nv(error::SUCCESS))
             }
+            // QueryEvent: a descriptor and an event ID; an NvError and the
+            // event as a copy handle.
+            4 => {
+                let fd = u32::from_le_bytes(call.arg(0)?);
+                let id = u32::from_le_bytes(call.arg(4)?);
+                match self.services.nv.file(fd) {
+                    None => Ok(nv(error::BAD_PARAMETER)),
+                    Some(Device::NvhostCtrl) => {
+                        let Some(e) = self.services.nv.event(event_slot(id)) else {
+                            return Ok(nv(error::BAD_PARAMETER));
+                        };
+                        match self.handles.add_handle(e.event, Kind::ReadableEvent) {
+                            Ok(h) => Ok(Out {
+                                copy_handles: vec![h],
+                                ..nv(error::SUCCESS)
+                            }),
+                            Err(code) => Ok(Out::error(code as u32)),
+                        }
+                    }
+                    Some(device) => Err(IpcError::Unimplemented(format!(
+                        "nvdrv QueryEvent {id:#x} on {}",
+                        device.path()
+                    ))),
+                }
+            }
             // SetAruid: the process ID and the AppletResourceUserId.
             8 => {
                 call.u64(0)?;
@@ -219,11 +358,7 @@ impl Process {
         }
         let err = match device {
             Device::Nvmap => self.nvmap_ioctl(code, &mut arg)?,
-            Device::NvhostCtrl => {
-                return Err(IpcError::Unimplemented(format!(
-                    "nvdrv /dev/nvhost-ctrl ioctl {code:#010x}"
-                )))
-            }
+            Device::NvhostCtrl => self.nvhost_ctrl_ioctl(code, &mut arg)?,
         };
         if code & 1 << 31 != 0 && size > 0 {
             if Self::auto_room(call.req, 0)? < size as u64 {
@@ -234,6 +369,160 @@ impl Process {
             self.write_auto(call.req, 0, &arg)?;
         }
         Ok(nv(err))
+    }
+
+    /// One /dev/nvhost-ctrl ioctl on `arg`, laid out as "NV services"
+    /// shows ("Identical to Linux driver" for the syncpoint ones; the
+    /// event ones are the Switch's own).
+    fn nvhost_ctrl_ioctl(&mut self, code: u32, arg: &mut [u8]) -> Result<u32, IpcError> {
+        let s = &mut self.services.nv;
+        let id = u32_at(arg, 0);
+        Ok(match code {
+            // SYNCPT_READ and SYNCPT_READ_MAX: ID in, value out.
+            ctrl::SYNCPT_READ | ctrl::SYNCPT_READ_MAX => {
+                let Some(sp) = s.syncpoint(id) else {
+                    return Ok(error::BAD_PARAMETER);
+                };
+                let value = if code == ctrl::SYNCPT_READ {
+                    sp.value
+                } else {
+                    sp.max
+                };
+                put_u32(arg, 4, value);
+                error::SUCCESS
+            }
+            // SYNCPT_INCR: ID in. The value and the max move together;
+            // events waiting for the new value are signalled.
+            ctrl::SYNCPT_INCR | ctrl::SYNCPT_INCR_INOUT => {
+                if self.syncpoint_incr(id).is_none() {
+                    return Ok(error::BAD_PARAMETER);
+                }
+                error::SUCCESS
+            }
+            // SYNCPT_WAIT: ID, threshold and timeout in; SYNCPT_WAITEX
+            // also the value out.
+            ctrl::SYNCPT_WAIT | ctrl::SYNCPT_WAITEX => {
+                let (threshold, timeout) = (u32_at(arg, 4), u32_at(arg, 8) as i32);
+                let Some(sp) = s.syncpoint(id) else {
+                    return Ok(error::BAD_PARAMETER);
+                };
+                if reached(sp.value, threshold) {
+                    if code == ctrl::SYNCPT_WAITEX {
+                        put_u32(arg, 12, sp.value);
+                    }
+                    error::SUCCESS
+                } else if timeout == 0 {
+                    error::TIMEOUT
+                } else {
+                    // A console blocks here until the syncpoint moves or the
+                    // time runs out; kestrel's services answer at once.
+                    return Err(IpcError::Unimplemented(format!(
+                        "nvdrv /dev/nvhost-ctrl ioctl {code:#010x} waiting {timeout} for \
+                         syncpoint {id} to reach {threshold} (it is at {}): a request \
+                         that blocks",
+                        sp.value
+                    )));
+                }
+            }
+            // SYNCPT_WAIT_EVENT_EX: ID, threshold, timeout and an event slot
+            // in. Reached: the value out. Not reached: the slot's event is
+            // armed and signalled when the syncpoint gets there, and the
+            // answer is Timeout with `slot | id << 4` out ("NV services").
+            // kestrel's choice: the timeout is not used (libnx waits on the
+            // event with its own, then clears the wait).
+            ctrl::SYNCPT_WAIT_EVENT_EX => {
+                let (threshold, slot) = (u32_at(arg, 4), u32_at(arg, 12));
+                let Some(sp) = s.syncpoint(id) else {
+                    return Ok(error::BAD_PARAMETER);
+                };
+                let Some(Some(e)) = s.event_mut(slot) else {
+                    return Ok(error::BAD_PARAMETER);
+                };
+                if reached(sp.value, threshold) {
+                    put_u32(arg, 12, sp.value);
+                    return Ok(error::SUCCESS);
+                }
+                e.wait = Some((id, threshold));
+                let event = e.event;
+                self.set_event(event, false);
+                put_u32(arg, 12, slot | id << 4);
+                error::TIMEOUT
+            }
+            // SYNCPT_CLEAR_EVENT_WAIT: the slot's wait is dropped and its
+            // event cleared.
+            ctrl::SYNCPT_CLEAR_EVENT_WAIT => {
+                let Some(Some(e)) = s.event_mut(event_slot(id)) else {
+                    return Ok(error::BAD_PARAMETER);
+                };
+                e.wait = None;
+                let event = e.event;
+                self.set_event(event, false);
+                error::SUCCESS
+            }
+            // SYNCPT_ALLOC_EVENT: a slot in. kestrel's choice: a slot already
+            // allocated gives AlreadyAllocated.
+            ctrl::SYNCPT_ALLOC_EVENT => match s.event_mut(id) {
+                None => error::BAD_PARAMETER,
+                Some(Some(_)) => error::ALREADY_ALLOCATED,
+                Some(None) => {
+                    let event = self.service_event();
+                    *self.services.nv.event_mut(id).expect("checked") =
+                        Some(SyncptEvent { event, wait: None });
+                    error::SUCCESS
+                }
+            },
+            // SYNCPT_FREE_EVENT: a slot in, which must be allocated
+            // (kestrel's choice: BadParameter otherwise). Handles the
+            // program holds to its event stay valid.
+            ctrl::SYNCPT_FREE_EVENT => match s.event_mut(id) {
+                Some(e @ Some(_)) => {
+                    *e = None;
+                    error::SUCCESS
+                }
+                _ => error::BAD_PARAMETER,
+            },
+            // SYNCPT_FREE_EVENT_BATCH: a mask of slots in. kestrel's choice:
+            // bits for slots not allocated are ignored.
+            ctrl::SYNCPT_FREE_EVENT_BATCH => {
+                let mask = u64::from_le_bytes(arg[0..8].try_into().expect("eight bytes"));
+                for slot in 0..EVENT_SLOTS {
+                    if mask >> slot & 1 != 0 {
+                        if let Some(e) = s.event_mut(slot) {
+                            *e = None;
+                        }
+                    }
+                }
+                error::SUCCESS
+            }
+            _ => {
+                return Err(IpcError::Unimplemented(format!(
+                    "nvdrv /dev/nvhost-ctrl ioctl {code:#010x}"
+                )))
+            }
+        })
+    }
+
+    /// Increment syncpoint `id` (and its max), and signal the events whose
+    /// waits it reaches. None if there is no such syncpoint.
+    pub(crate) fn syncpoint_incr(&mut self, id: u32) -> Option<()> {
+        let s = &mut self.services.nv;
+        let sp = s.syncpoint_mut(id)?;
+        sp.value = sp.value.wrapping_add(1);
+        sp.max = sp.max.wrapping_add(1);
+        let value = sp.value;
+        let mut done = Vec::new();
+        for e in s.events.iter_mut().flatten() {
+            if let Some((sid, threshold)) = e.wait {
+                if sid == id && reached(value, threshold) {
+                    e.wait = None;
+                    done.push(e.event);
+                }
+            }
+        }
+        for event in done {
+            self.set_event(event, true);
+        }
+        Some(())
     }
 
     /// One /dev/nvmap ioctl on `arg`, laid out as "NV services" shows.
