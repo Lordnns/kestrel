@@ -140,8 +140,14 @@ has a commit `main` lacks). In merge order:
 | #13 | `claude/graphics-5b-draw` | graphics | 2026-11-03 | 5B step 5: draws and shaders |
 | #14 | `claude/graphics-5b-handoff` | graphics | 2026-11-04 (UTC) | the graphics track's hand-off notes |
 
-Open: `claude/eglantine-plan` (this re-plan). The merged branches can be
-deleted when the owner says so.
+Open on 2026-11-03: PR #15 `claude/ci-fix-v0.1.26` (fixes `v0.1.26`'s
+CI: Rust 1.99's clippy in `gpu/draw.rs`, spirv-val under qemu; manual
+CI run 41755050930 passed every job that had finished, the qemu job
+included, with macOS x86_64 still running when this was written) and
+PR #16
+`claude/eglantine-plan` (this re-plan, `docs/EGLANTINE.md`,
+`docs/SESSIONS.md`). The merged branches can be deleted when the owner
+says so.
 
 ### Deviations from the hard rules found in the audit
 
@@ -2176,9 +2182,10 @@ The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
 Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
 Since 2026-11-03 ("Plan changes (2026-11-03, Eglantine)") a third track,
 the boot track, comes first in priority; the CPU and graphics tracks go
-on beside it. `docs/SESSIONS.md` splits all the remaining work into
-lanes for cloud sessions and the owner's local session, with a prompt
-per task (task ids A1 to P7, L1 to L6) and the order to start them in.
+on beside it. `docs/SESSIONS.md` is meta information, not instructions:
+a proposed split of the remaining work into lanes for cloud sessions and
+the owner's local session, with draft prompts (task ids A1 to P7, L1 to
+L6). Nothing in it starts unless the owner asks.
 
 ### The boot track (first priority since 2026-11-03)
 

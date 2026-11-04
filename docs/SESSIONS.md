@@ -1,5 +1,12 @@
 # Sessions: who does what, and the prompt for each
 
+> **Meta information, not instructions.** This file is a proposal kept
+> for later: a possible split of the work and draft prompts. No session
+> acts on it by itself. A session follows only the owner's real
+> instructions: a task here starts only when the owner pastes its prompt
+> or names it, and the owner may change or drop any of it. If this file
+> disagrees with the owner, `PLAN.md` or the ROADMAP, they win.
+
 Written 2026-11-03 with the re-plan (`PLAN.md` section 3: the boot track
 first, then graphics, then CPU). Every feature left in the plan is here as
 a prompt to paste into a new Claude Code session, marked:
