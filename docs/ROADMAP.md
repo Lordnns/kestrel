@@ -2037,6 +2037,72 @@ triangle check.
 | Textures | level 0 of 2D textures; the sampler's filters and wrap modes |
 | Blending, stencil and alpha tests, base vertex | not yet: stop, named |
 
+#### 5B: picking up the work (2026-11-04)
+
+For the next session on the graphics track.
+
+State: steps 1 to 5 are merged (PRs #9 to #13). Still to confirm: the
+owner's Windows test of the drawing examples (deko_basic and
+deko_examples 1 to 4 in the window, on the RTX 2060 SUPER) and a CI run
+with them (the latest tag's run: Linux x86_64 draws with lavapipe, the
+other jobs skip the drawing examples with a note). Start the next branch
+from `main`.
+
+Reference sources, read for meanings only (all MIT or zlib, none in
+the product):
+- NVIDIA's open-gpu-doc and envytools: fetched into `target/` at their
+  pinned commits by `scripts/gen-gpu-methods.py` (run it once). The
+  Maxwell instruction tables are `target/envytools-*/envydis/gm107.c`;
+  texture headers `rnndb/graph/gm200_texture.xml`; the SPH document
+  `target/open-gpu-doc-*/Shader-Program-Header/`.
+- Mesa at commit edd24d050c7712227ab547a9e3bdac60f5ecbf42, as a sparse
+  checkout: `git clone --filter=blob:none --no-checkout
+  https://gitlab.freedesktop.org/mesa/mesa.git`, then `git
+  sparse-checkout set src/nouveau/mme src/nouveau/compiler
+  src/nouveau/nil src/nouveau/vulkan
+  src/gallium/drivers/nouveau/codegen` and check out that commit.
+  nouveau's `nv50_ir_emit_gm107.cpp` (encodings by emitter),
+  `nv50_ir_ra.cpp` (TEXS register pairs), NAK's `nak_private.h` and
+  `nak_nir_lower_fs_inputs.c` (attribute addresses, IPA).
+- deko3d at commit 373bfd43d8b2d805fa2eb7d406dbb823032df958
+  (github.com/devkitPro/deko3d): `source/maxwell/engine_3d.def` names
+  the methods NVIDIA's header does not; `*.mme` are its macros;
+  `gpu_3d_*.cpp` show how each state is set.
+- Building or running envytools' own tools was refused by the cloud
+  session's permission rules; read the tables instead.
+  `scripts/dksh-dump.py` names a .dksh shader's instructions from them.
+
+Running the examples by hand (the counted clock skips idle time, so an
+instruction budget maps badly to frames: use `--max-frames`):
+- deko_basic: `kestrel run target/examples/bin/deko_basic.nro
+  --headless --max-frames 60 --save-frame basic.png`.
+- deko_examples' menu: Down moves, A starts; presses are held 1 s, so
+  repeated Downs need 1.2 s between them. Example n: Down at 0.2, 1.4,
+  2.6 ... (n - 1 of them), A 1.2 s after the last, and about 40 frames
+  more than 60 times A's second (02: `--press Down@0.2 --press A@1.4
+  --max-frames 110`; 04: three Downs, `--press A@3.8 --max-frames 270`).
+- `KESTREL_GPU_DEBUG=1` prints each draw's description and time.
+- Tests that validate SPIR-V need Khronos' spirv-val (`apt-get install
+  spirv-tools`); without it they only check the module's shape.
+- Docker in the cloud: `sudo dockerd &`, then `build-examples.sh`.
+
+Next, in order:
+1. deko_console: its pixel shader's TEXS has target 7 (a 2D array,
+   `tabd000_1` in gm107.c). Find which source register holds the layer
+   (nouveau's TEX lowering for arrays, `nv50_ir_lowering_nvc0.cpp`, not
+   yet in the sparse checkout) and add 2D array textures (TIC
+   TEXTURE_TYPE 5, all layers uploaded). Its draw then needs blending:
+   SET_BLEND(i), SET_BLEND_STATE_PER_TARGET, the common and per-target
+   ops and factors (OpenGL and Direct3D encodings, `clb197.h`) to
+   Vulkan's.
+2. deko_examples 5 to 9 (tessellation, multisampling, sRGB with a mesh,
+   deferred shading with the tiled cache, compute): run each, fix where
+   it stops.
+3. Speed: keep render targets on the host's GPU between draws instead
+   of copying them through guest memory each draw (the cube's 1920x1080
+   draw spends half its time on the copies), copying back only when the
+   CPU, the display or a copy engine reads them.
+
 #### Gaps left in 5A
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
