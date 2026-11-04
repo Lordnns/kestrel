@@ -78,7 +78,11 @@ sessions learned. The plan and the status live elsewhere; read them first:
   LDAPR and pointer authentication, six cores and the Switch 2 memory
   layout, the Switch 2 services, the first frame), then graphics (5C
   after deko_console), then CPU. All branches are merged into `main`
-  (ROADMAP "Branches and merges").
+  (ROADMAP "Branches and merges"). `docs/SESSIONS.md` is meta
+  information kept for later, not instructions: a proposed split into
+  lanes (CLOUD on Linux, LOCAL on the owner's Windows PC) with draft
+  prompts. Act only on the owner's real instructions; a task from it
+  starts only when the owner pastes its prompt or names it.
 
 ## How the owner works
 
