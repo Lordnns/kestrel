@@ -87,6 +87,17 @@ what changed and which tasks it affects.
   cannot enter this MIT project), with attribution in the file and in
   `docs/THIRD_PARTY.md` (created with the first reuse), and only from the
   project's own public releases.
+- Other emulators as fact sources (owner, 2026-11-03): the source and notes
+  of public emulators, GPL ones included (Eglantine, Eden, yuzu, Ryujinx),
+  may be read to learn facts (service names and command numbers, request
+  and reply layouts, GPU classes and methods, which instructions games use)
+  and design ideas. Their code is never copied or translated into kestrel,
+  which stays MIT. Each fact is first written into `docs/SWITCH2_NOTES.md`
+  with its source (project, file and row or line, commit), then implemented
+  from that entry in kestrel's own words and structure. A fact whose only
+  source is material of unknown origin (Eglantine's "changes.patch") is
+  confirmed by our own observation on software the owner has before it is
+  implemented. `docs/EGLANTINE.md` applies this to Eglantine.
 - Behaviour learned by observing software (rather than from public
   documentation) is first written down as a behaviour description in
   `docs/SWITCH2_NOTES.md` (what happens, how it was observed, on what), and
@@ -106,6 +117,12 @@ what changed and which tasks it affects.
   modes), not the host's.
 - Unsupported instructions, system calls, services and commands must stop
   with an explicit message naming them. Never guess or silently ignore.
+  One exception for exploration (owner, 2026-11-03): `--auto-stub`, off by
+  default and never used by the self-test, CI or the examples, answers an
+  unknown service command with an empty success and logs it with its
+  identifiers to `user/logs/unimplemented.log`, so one run of a title finds
+  many blockers. Nothing is implemented from an auto-stubbed reply; each
+  stubbed command still gets its own implementation and entry.
 - Every fast backend is differentially tested against the interpreter.
 
 ### Portability
@@ -164,6 +181,23 @@ CI's hosted runners until the owner has ARM hardware.
   tester, then the x86_64 recompiler of phase 4) and the graphics track
   (phase 5A, then 5B, on Vulkan; tested with lavapipe on Linux and real
   GPUs on Windows). Phases 4 and 5 no longer wait for phase 3.
+- **Three tracks since 2026-11-03 (owner: "the most logical, the fastest
+  to a playable game"),** after Eglantine showed what a Switch 2 game needs
+  (`docs/EGLANTINE.md`). Their order of priority:
+  1. **The boot track** (phase 6A, moved forward): boot a Switch 2 title's
+     ExeFS that the owner has extracted, headless on the counted clock so
+     each run repeats, and remove its blockers in the order they come: the
+     loader, the instructions the title uses, the process (six cores,
+     memory layout), the Switch 2 services, then its first GPU submission
+     and first presented frame. Reason: a game's blockers are only known
+     by running it, and Eglantine's are mostly in the OS and GPU layers,
+     not the CPU.
+  2. **The graphics track**: after deko3d_console, the Switch 2 GPU (5C)
+     comes before the rest of the deko3d examples, so the title's first
+     submissions have something to run on.
+  3. **The CPU track**: floating point and NEON in the recompiler, then
+     the costs a game shows (the OS lock under per-frame
+     WaitForAddress/SignalToAddress, counter reads).
 - **The recompiler uses kestrel's own x86_64 encoder**, no new
   dependency. Every encoding it emits is checked against llvm-mc in the
   tests, never hand-assembled (the section 2 rule for CPU encodings,
@@ -212,7 +246,11 @@ These follow from the real-time goal in section 1.
   the self-test and the differential tester. The guest-visible core count
   moves from the current four (Switchbrew's ProcessorId 0 to 3) to six
   once the Switch 2's numbering is documented or observed (recorded in
-  `docs/SWITCH2_NOTES.md`).
+  `docs/SWITCH2_NOTES.md`). Answered 2026-11-03: Switch 2 titles' NPDM ask
+  for cores 0 to 5 (core mask 0x3f; Eglantine's NX2_NOTES, "Titles"), and
+  folding cores 4 and 5 onto 0 and 1 changed a game's timing enough to
+  crash it (rows 77 to 79). The count goes to six with the boot track
+  (task 6A.4), once recorded in `docs/SWITCH2_NOTES.md`.
 
 ---
 
@@ -457,6 +495,23 @@ Provisions:
 5C. GPU level for Switch 2 (Ampere)
 - Ampere engine classes and the Ampere shader decoder into the same
   representation; Switch 2 texture formats.
+- Provisions added 2026-11-03 (from Eglantine's notes, `docs/EGLANTINE.md`;
+  each fact recorded in `docs/SWITCH2_NOTES.md` before it is used): the
+  Ampere 3D, compute and copy classes (C797, C7C0, C7B5) run on kestrel's
+  Maxwell engines where their methods agree; Turing's MME64 macros get
+  their own interpreter, one data RAM per channel; compute through QMD
+  3.0 and its release slots; a channel suspends on an unmet semaphore
+  acquire and resumes at the same word; SM86 programs decode into the
+  shader IR the Maxwell decoder uses; ASTC with the Switch 2 GOB swizzle;
+  task and mesh programs; huge images sparse. Designed from the start for
+  the cost Eglantine measured: the GPU front end (command parsing and
+  macros) and back end (engine methods and draws) able to run on two host
+  threads joined by an ordered ring, macro calls memoised, same-value
+  register writes dropped, GPU-written buffers not downloaded at every
+  fence.
+- Since 2026-11-03 (section 3, "Platform priority"), 5C starts after
+  deko3d_console, before the rest of 5B's examples, and is driven by the
+  boot track's title (6A.6).
 - Acceptance: test software the owner has locally renders its first frames.
 
 5D. API level for commercial games
@@ -464,6 +519,9 @@ Provisions:
   observed behaviour of each call, and translate the used subset to Vulkan.
 - Acceptance: one game the owner legally has reaches its menu through the
   API path, on at least one platform.
+- Note (2026-11-03): Eglantine plays a Switch 2 game entirely at the GPU
+  level (5C), so 5D is not on the Windows milestone's path. Whether to do
+  5D at all stays the owner's decision (section 7).
 
 ### Phase 6: Commercial software (local testing only)
 Goal: the owner's own legally dumped games boot, and progress is tracked.
@@ -473,17 +531,53 @@ already extracted on their own hardware; kestrel contains no decryption and no
 keys; game files never leave the owner's machines; testing happens on the
 three physical machines in section 3.
 
-Tasks: a loader for extracted executables (compressed segments, module
-headers, relocations) and game data from a host folder; the graphics path
-from 5C or 5D, whichever gets a title further first; the remaining services
-discovered by booting titles, in order of need; a compatibility tracker in
-`docs/COMPATIBILITY.md` (title, platform, backend, status from boots to
+6A. Boot a Switch 2 ExeFS (moved forward on 2026-11-03: the boot track,
+section 3, "Platform priority"). Each task removes the blockers in the
+order the owner's title meets them; every fact is a `docs/SWITCH2_NOTES.md`
+entry first (section 2), and Eglantine's notes give the expected order
+(`docs/EGLANTINE.md`, "Facts to take").
+- 6A.1 `kestrel scan <exefs>`: list every encoding in the modules' code
+  that kestrel's decoder rejects, with counts, so the CPU work is known
+  without running the title.
+- 6A.2 ExeFS loader: NSO (header, kestrel's own LZ4 block decoder from the
+  public LZ4 format, segment hashes checked), `main.npdm` (META, ACI0 and
+  the Switch 2 ACID layout, parsed and never verified), the modules rtld,
+  main, subsdk* and sdk placed one after another, RomFS from a plain
+  sibling `romfs/` folder. Plain files only: no decryption, ever.
+- 6A.3 CPU: the instructions the scan finds (LDAPR and LDAPUR, the pointer
+  authentication family with the keys giving the identity, the memory
+  tagging instructions with tag 0, then the rare SIMD forms), each with
+  clang encodings and independent expected values, in the interpreter and
+  through the recompiler's fallback.
+- 6A.4 Process: the NPDM's cores (six), priorities and system calls; the
+  Switch 2 memory layout (total memory counting the alias region);
+  svcGetInfo 21 and 29 to 33; svc 0x80.
+- 6A.5 Services in the order the title asks for them (applet and oe,
+  filesystem registration and RomFS, the graphics system server and its
+  syncpt, GPU and vi2 sessions, nvsrv, audio, fonts, the newer SDKs'
+  chat and camera), found with `--auto-stub` (section 2) and implemented
+  one by one.
+- 6A.6 The first GPU submission and the first presented frame, with 5C.
+- Runs headless on the counted clock so each run repeats; with a window
+  once frames present.
+- Acceptance: the owner's title reaches its first presented frame,
+  headless and in a window, on Windows x86_64.
+
+Tasks after 6A: the rest of the loader for extracted game data from a
+host folder (updates, other titles' layouts); the graphics path from 5C
+(or 5D, if the owner approves it and it gets a title further first);
+the remaining services discovered by booting titles, in order of need; a
+compatibility tracker in `docs/COMPATIBILITY.md` (title, platform, backend, status from boots to
 playable, frame rate, first blocking issue).
 
 Acceptance: at least one title reaches its menu on every platform.
 
 ### Phase 7: Product polish
-Audio service and host audio output; input mapping, controllers and motion;
+Since 2026-11-03 the parts a title needs to boot or play (its audio
+service, video decoding for its movies) come with the boot track as it
+meets them; a VP9 decoder would be a dependency question (libvpx is
+BSD-3-Clause). The rest: audio service and host audio output; input
+mapping, controllers and motion;
 save data management; a graphical front end with game list, settings and
 per-game configuration; shader and pipeline caches; a performance overlay.
 
@@ -530,6 +624,22 @@ execution, OS emulated at a high level, graphics at the highest level that
 works) is the one the first working demos use. The ordering in phases 3 and 5
 reflects that.
 
+Update of 2026-11-03:
+
+- Eglantine (github.com/Djihads80/Eglantine), a public fork of Eden,
+  GPL-3.0, plays Mario Kart World on x86_64 Windows PCs (its notes' test
+  machines) with a recompiler (dynarmic), at 20 to 60 fps with stutter
+  and rendering errors, and runs Splatoon Raiders at variable speed. It
+  emulates the GPU level (Ampere commands and shaders lowered onto yuzu's
+  Maxwell path), not the NVN API. Its notes record its blockers in order and where it measured
+  the cost: the GPU thread, not the guest CPU. `docs/EGLANTINE.md` compares
+  it with kestrel and lists what kestrel takes from it (facts only,
+  section 2).
+- What this means for kestrel: a Switch 2 game is playable on x86 hosts
+  through a recompiler and GPU-level emulation, the Windows milestone's
+  path; and booting a title is the way to find its blockers, hence the
+  boot track (section 3).
+
 ---
 
 ## 7. Open decisions for the owner
@@ -542,9 +652,15 @@ date.
    GPL code, a project already under DMCA pressure, and less control. kestrel
    keeps its value either way as a clean-room, research-friendly project
    (native ARM execution, cross-platform benchmarking).
+   Answered 2026-11-03: keep building kestrel, MIT, in Rust. Public
+   emulators (Eglantine first) are read as fact sources under section 2's
+   rule; their code never enters kestrel.
 2. **API-level graphics (5D).** Approve or decline working at the NVN level,
    given that the API can only be learned from observing commercial software
    under the clean-room process in section 2.
 3. **Code reuse.** Approve or decline reusing MIT-licensed code from other
    emulators (for example a shader translator), with attribution, instead of
    writing it from scratch.
+   Answered in part 2026-11-03: no GPL code, ever (kestrel stays MIT);
+   reading any public emulator for facts is allowed (section 2). Reusing
+   MIT, BSD, Apache 2.0 or zlib code stays a case-by-case approval.
