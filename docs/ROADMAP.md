@@ -2176,7 +2176,9 @@ The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
 Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
 Since 2026-11-03 ("Plan changes (2026-11-03, Eglantine)") a third track,
 the boot track, comes first in priority; the CPU and graphics tracks go
-on beside it.
+on beside it. `docs/SESSIONS.md` splits all the remaining work into
+lanes for cloud sessions and the owner's local session, with a prompt
+per task (task ids A1 to P7, L1 to L6) and the order to start them in.
 
 ### The boot track (first priority since 2026-11-03)
 
