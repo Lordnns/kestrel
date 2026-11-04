@@ -2804,10 +2804,38 @@ mod tests {
             [0x5000, 0x5000 + 3 * 64 + 60, 0x5000 + 4 * 64].map(|a| read(&p, a)),
             [0xf81f_f81f, 0xf81f_f81f, 0]
         );
-        // A depth clear; a colour format kestrel does not write.
-        let e = submit(&mut p, 0x300, &[imm(0, 0x19d0, 1)]).unwrap_err();
+        // A depth and stencil clear: a Z24S8 (0x14) depth target of 8x2 at
+        // +0x6000 (SET_ZT_A-ARRAY_PITCH, SIZE_A-C, SELECT), depth 0.5 and
+        // stencil 0x5a: 0.5 of 2^24 - 1 rounds to 0x800000, in bits 31:8,
+        // the stencil in 7:0. Pixel (7, 1) is byte 28 of row 1: sector 1's
+        // second row, +0x3c.
+        let list = [
+            inc(0, 0xfe0, 5),
+            hi,
+            lo + 0x6000,
+            0x14,
+            0,
+            0,
+            inc(0, 0x1228, 3),
+            8,
+            2,
+            1,
+            imm(0, 0x1538, 1),
+            inc(0, 0xd90, 1),
+            f(0.5),
+            imm(0, 0xda0, 0x5a),
+            imm(0, 0x19d0, 3),
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        assert_eq!(
+            [0x6000, 0x603c, 0x6040].map(|a| read(&p, a)),
+            [0x8000_005a, 0x8000_005a, 0]
+        );
+        // A stencil clear of ZF32 (no stencil); a colour format kestrel
+        // does not write.
+        let e = submit(&mut p, 0x300, &[imm(0, 0xfe8, 0x0a), imm(0, 0x19d0, 2)]).unwrap_err();
         assert!(
-            e.contains("CLEAR_SURFACE = 0x1: a depth or stencil clear"),
+            e.contains("a stencil clear of a format without stencil"),
             "{e}"
         );
         let e = submit(
@@ -2817,6 +2845,174 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("colour format 0xc1"), "{e}");
+
+        // A draw (`gpu/draw.rs`): deko_examples' triangle shaders (the
+        // words `gpu::shader::maxwell`'s tests decode) at +0x7000 and
+        // +0x7400 (SET_PROGRAM_REGION_A-B, SET_PIPELINE_SHADER(1) VERTEX
+        // and (5) PIXEL, SET_PIPELINE_PROGRAM); attribute 0 three floats
+        // and 1 four (SET_VERTEX_ATTRIBUTE_A: widths 2 and 1, type 7
+        // FLOAT) from stream 0, 28 bytes a vertex, three vertices at
+        // +0x7800 (SET_VERTEX_STREAM_A_*, LIMIT_A the last byte); a
+        // viewport of 32x32 with Y flipped (scale -16) and depth 0 to 1;
+        // colour target 0 and scissor 0 from above, all channels written; three
+        // vertices as triangles (BEGIN 4, DRAW_VERTEX_ARRAY 3, END). A
+        // recording renderer keeps the draw and marks pixel (0, 0).
+        struct Recorder(Arc<Mutex<Option<crate::gpu::draw::Draw>>>);
+        impl crate::gpu::draw::Renderer for Recorder {
+            fn draw(&mut self, d: &mut crate::gpu::draw::Draw) -> Result<(), String> {
+                if let Some(c) = d.colors[0].as_mut() {
+                    c.pixels[..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+                }
+                *self.0.lock().unwrap() = Some(d.clone());
+                Ok(())
+            }
+        }
+        let program = |header0: u32, target: u32, insns: &[u64]| {
+            let mut w = vec![0u32; 20];
+            w[0] = header0;
+            w[18] = target;
+            for chunk in insns.chunks(3) {
+                w.extend([0, 0]);
+                for &i in chunk {
+                    w.extend([i as u32, (i >> 32) as u32]);
+                }
+            }
+            words(&w)
+        };
+        let vs = program(
+            1 | 1 << 10,
+            0,
+            &[
+                0xefd8ff800807ff00,
+                0xefd87f800887ff02,
+                0x0103f8000007f003,
+                0xeff1ff800707ff00,
+                0xefd9ff800907ff00,
+                0xeff1ff800807ff00,
+                0xe30000000007000f,
+            ],
+        );
+        let fs = program(
+            2 | 5 << 10,
+            0xf,
+            &[
+                0xe003ff87cff7ff00,
+                0x5080000000470002,
+                0x0103f8000007f003,
+                0xe043ff880027ff00,
+                0xe043ff884027ff01,
+                0xe043ff888027ff02,
+                0xe30000000007000f,
+            ],
+        );
+        p.mem.write_bytes(mem + 0x7000, &vs).unwrap();
+        p.mem.write_bytes(mem + 0x7400, &fs).unwrap();
+        let vertices: Vec<u32> = [
+            [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            [-1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+            [1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+        ]
+        .iter()
+        .flatten()
+        .map(|&v: &f32| v.to_bits())
+        .collect();
+        p.mem.write_bytes(mem + 0x7800, &words(&vertices)).unwrap();
+        let recorded = Arc::new(Mutex::new(None));
+        p.renderer = Some(Box::new(Recorder(recorded.clone())));
+        let list = [
+            // Target 0 back to A8B8G8R8 (the stop above set 0xc1).
+            inc(0, 0x810, 1),
+            0xd5,
+            inc(0, 0x1608, 2),
+            hi,
+            lo + 0x7000,
+            inc(0, 0x2000 + 64, 2),
+            1 | 1 << 4,
+            0,
+            inc(0, 0x2000 + 5 * 64, 2),
+            1 | 5 << 4,
+            0x400,
+            inc(0, 0x1160, 2),
+            2 << 21 | 7 << 27,
+            12 << 7 | 1 << 21 | 7 << 27,
+            inc(0, 0x1c00, 3),
+            28 | 1 << 12,
+            hi,
+            lo + 0x7800,
+            inc(0, 0x1f00, 2),
+            hi,
+            lo + 0x7800 + 3 * 28 - 1,
+            inc(0, 0xa00, 6),
+            f(16.0),
+            f(-16.0),
+            f(1.0),
+            f(16.0),
+            f(16.0),
+            f(0.0),
+            imm(0, 0x192c, 1),
+            imm(0, 0xd7c, 1),
+            inc(0, 0xc00, 2),
+            32 << 16,
+            32 << 16,
+            inc(0, 0x1a00, 1),
+            0x1111,
+            imm(0, 0x1618, 4),
+            inc(0, 0xd74, 1),
+            0,
+            imm(0, 0xd78, 3),
+            imm(0, 0x1614, 0),
+        ];
+        assert_eq!(submit(&mut p, 0x300, &list), Ok((0, vec![syncpt, 2])));
+        let d = recorded.lock().unwrap().take().expect("a draw");
+        use crate::gpu::draw::{Topology, Vertices};
+        assert_eq!(
+            (d.topology, &d.vertices, d.instance),
+            (
+                Topology::Triangles,
+                &Vertices::Array { first: 0, count: 3 },
+                0
+            )
+        );
+        assert_eq!(
+            (
+                d.buffers.len(),
+                d.buffers[0].stride,
+                d.buffers[0].data.len()
+            ),
+            (1, 28, 84)
+        );
+        let attrs: Vec<_> = d
+            .attributes
+            .iter()
+            .map(|a| (a.location, a.buffer, a.offset, a.widths, a.numerical))
+            .collect();
+        assert_eq!(attrs, [(0, 0, 0, 2, 7), (1, 0, 12, 1, 7)]);
+        let v = d.viewport;
+        assert_eq!(
+            (v.x, v.y, v.width, v.height, v.min_depth, v.max_depth),
+            (0.0, 32.0, 32.0, -32.0, 0.0, 1.0)
+        );
+        // Scissor 0 is still enabled from the clears above: x 4 to 12, y 9
+        // to 11, within the viewport's clip and the surface clip.
+        assert_eq!(d.scissor, [4, 9, 8, 2]);
+        let c = d.colors[0].as_ref().expect("colour target 0");
+        assert_eq!(
+            (c.format, c.width, c.height, c.write_mask),
+            (0xd5, 32, 16, 0xf)
+        );
+        assert!(d.depth.is_none() && d.colors[1..].iter().all(Option::is_none));
+        assert_eq!(&d.vertex_spirv[..1], &[0x0723_0203]);
+        // The marked pixel is written back to the target, block linear.
+        assert_eq!(read(&p, 0x4000), 0x4433_2211);
+        // Without a renderer, a draw stops, named.
+        p.renderer = None;
+        let e = submit(
+            &mut p,
+            0x300,
+            &[imm(0, 0x1618, 4), imm(0, 0xd78, 3), imm(0, 0x1614, 0)],
+        )
+        .unwrap_err();
+        assert!(e.contains("with no renderer here"), "{e}");
 
         // What does not run yet stops, named: a macro whose start was
         // never loaded; a method on a subchannel with no object; one

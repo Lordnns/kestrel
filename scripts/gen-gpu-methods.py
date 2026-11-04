@@ -7,8 +7,8 @@ compute 0xB1C0, inline-to-memory 0xA140, DMA copy 0xB0B5), every method
 NVIDIA's open-gpu-doc header defines (`classes/<engine>/cl<class>.h`, MIT):
 its byte offset, name and, for arrays, its strides and counts.
 
-A method is "state" when its name starts with SET_ (NVIDIA's naming: SET_
-methods set a register), except those listed in TRIGGERS below, which act
+A method is "state" when its name starts with SET_, OGL_SET_ or D3D_SET_
+(NVIDIA's naming: SET_ methods set a register), except those listed in TRIGGERS below, which act
 when written, and the transfer parameters in PARAMETERS, which are state;
 every other method acts (LAUNCH_DMA, DRAW_*, CLEAR_SURFACE,
 WAIT_FOR_IDLE...). The command processor records state and must execute an
@@ -76,8 +76,10 @@ EXTRA_STATE_3D = {
 # 3D methods NVIDIA's header does not name that act, from the same reviewed
 # sources: deko3d's tiled cache barrier and flush (engine_3d.def's
 # TiledCacheBarrier and TiledCacheFlush; deko3d writes the flush between
-# render passes and at a queue's flush).
+# render passes and at a queue's flush), and its DiscardRenderTarget (a
+# target's contents no longer needed: DepthStencil 0, Color 6:4).
 EXTRA_ACTION_3D = {
+    0x0F78: "DEKO3D_DISCARD_RENDER_TARGET",
     0x0F7C: "DEKO3D_TILED_CACHE_BARRIER",
     0x0F80: "DEKO3D_TILED_CACHE_FLUSH",
 }
@@ -297,7 +299,9 @@ def kind(name):
         return "Action"
     if name.startswith(("ENVYTOOLS_", "DEKO3D_")) or name in PARAMETERS:
         return "State"
-    if name.startswith("SET_") and name not in TRIGGERS:
+    # OGL_SET_ and D3D_SET_ are SET_ methods named for the API whose
+    # encoding they take (OGL_SET_CULL, D3D_SET_CULL_MODE).
+    if name.startswith(("SET_", "OGL_SET_", "D3D_SET_")) and name not in TRIGGERS:
         return "State"
     return "Action"
 

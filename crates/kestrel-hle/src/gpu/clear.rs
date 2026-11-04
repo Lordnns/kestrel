@@ -208,10 +208,13 @@ mod m {
     pub const SURFACE_CLIP_VERTICAL: u32 = 0xff8;
     pub const CLEAR_SURFACE_CONTROL: u32 = 0x10f8;
     pub const CT_SELECT: u32 = 0x121c;
+    pub const Z_CLEAR_VALUE: u32 = 0xd90;
+    pub const STENCIL_CLEAR_VALUE: u32 = 0xda0;
+    pub const STENCIL_MASK: u32 = 0x139c;
 }
 
 /// Colour target `n`'s registers, or what kestrel does not read in them.
-fn color_target(e: &Engine, n: u32) -> Result<Option<ColorTarget>, String> {
+pub(super) fn color_target(e: &Engine, n: u32) -> Result<Option<ColorTarget>, String> {
     let r = |i: u32| e.reg(m::COLOR_TARGET + n * 64 + i * 4);
     let code = r(4) & 0xff;
     if code == 0 {
@@ -247,6 +250,44 @@ fn color_target(e: &Engine, n: u32) -> Result<Option<ColorTarget>, String> {
     }))
 }
 
+/// The area a clear fills in a target `width` by `height`: within the
+/// surface clip; with SET_CLEAR_SURFACE_CONTROL's USE_CLEAR_RECT (4) the
+/// clear rectangle, USE_SCISSOR0 (8) scissor 0 if enabled. USE_VIEWPORT_
+/// CLIP0 (12) and window offsets are not read yet. (x0, y0, x1, y1).
+fn clear_area(e: &Engine, width: u32, height: u32) -> Result<(u32, u32, u32, u32), String> {
+    let control = e.reg(m::CLEAR_SURFACE_CONTROL);
+    if control >> 12 & 1 == 1 {
+        return Err("a clear limited by viewport 0".into());
+    }
+    if e.reg(m::WINDOW_OFFSET_X) != 0 || e.reg(m::WINDOW_OFFSET_Y) != 0 {
+        return Err("a window offset".into());
+    }
+    let (mut x0, mut x1) = (0, width);
+    let (mut y0, mut y1) = (0, height);
+    let mut limit = |(a0, a1): (u32, u32), (b0, b1): (u32, u32)| {
+        x0 = x0.max(a0);
+        x1 = x1.min(a1);
+        y0 = y0.max(b0);
+        y1 = y1.min(b1);
+    };
+    let (cx, cw) = span(e.reg(m::SURFACE_CLIP_HORIZONTAL));
+    let (cy, ch) = span(e.reg(m::SURFACE_CLIP_VERTICAL));
+    limit((cx, cx + cw), (cy, cy + ch));
+    if control >> 4 & 1 == 1 {
+        limit(
+            span(e.reg(m::CLEAR_RECT_HORIZONTAL)),
+            span(e.reg(m::CLEAR_RECT_VERTICAL)),
+        );
+    }
+    if control >> 8 & 1 == 1 && e.reg(m::SCISSOR_ENABLE) & 1 == 1 {
+        limit(
+            span(e.reg(m::SCISSOR_HORIZONTAL)),
+            span(e.reg(m::SCISSOR_VERTICAL)),
+        );
+    }
+    Ok((x0, y0, x1, y1))
+}
+
 /// A rectangle, minimum inclusive, maximum exclusive, from a register
 /// with the minimum in 15:0 and the maximum in 31:16.
 fn span(v: u32) -> (u32, u32) {
@@ -254,6 +295,53 @@ fn span(v: u32) -> (u32, u32) {
 }
 
 impl Process {
+    /// CLEAR_SURFACE's Z (0) and STENCIL (1): the depth target's depth
+    /// to SET_Z_CLEAR_VALUE (a float), its stencil to
+    /// SET_STENCIL_CLEAR_VALUE (7:0), within SET_STENCIL_MASK if
+    /// SET_CLEAR_SURFACE_CONTROL's RESPECT_STENCIL_MASK (0) is set; no
+    /// depth target, nothing. Depth surfaces are kept in the colour GOB
+    /// layout (kestrel's choice: the Fermi depth GOB's byte arrangement is
+    /// not documented; only kestrel reads them).
+    fn clear_depth_stencil(&mut self, fd: u32, value: u32) -> Result<(), IpcError> {
+        let named = |what: &str| {
+            IpcError::Unimplemented(format!("GPU 3D method CLEAR_SURFACE = {value:#x}: {what}"))
+        };
+        let e = self.channel_state(fd).engines[&class::THREED].clone();
+        let Some(z) = super::draw::depth_target(&e).map_err(|w| named(&w))? else {
+            return Ok(());
+        };
+        if value >> 10 & 0xffff != 0 {
+            return Err(named("a layer of the depth target past the first"));
+        }
+        let (x0, y0, x1, y1) =
+            clear_area(&e, z.image.width, z.image.height).map_err(|w| named(&w))?;
+        if x0 >= x1 || y0 >= y1 {
+            return Ok(());
+        }
+        let depth = f32::from_bits(e.reg(m::Z_CLEAR_VALUE));
+        let stencil = e.reg(m::STENCIL_CLEAR_VALUE) as u8;
+        let mask = if e.reg(m::CLEAR_SURFACE_CONTROL) & 1 == 1 {
+            e.reg(m::STENCIL_MASK) as u8
+        } else {
+            0xff
+        };
+        let mut raw = self.read_image(fd, &z.image)?;
+        let bytes = z.image.bytes as usize;
+        let width = z.image.width as usize;
+        for y in y0 as usize..y1 as usize {
+            for x in x0 as usize..x1 as usize {
+                let px = &mut raw[(y * width + x) * bytes..(y * width + x + 1) * bytes];
+                if value & 1 == 1 {
+                    super::draw::set_depth(z.format, px, depth);
+                }
+                if value & 2 == 2 && !super::draw::set_stencil(z.format, px, stencil, mask) {
+                    return Err(named("a stencil clear of a format without stencil"));
+                }
+            }
+        }
+        self.write_image(fd, &z.image, &raw)
+    }
+
     /// CLEAR_SURFACE (`clb197.h`): fill the colour target MRT_SELECT
     /// (9:6) names, its layer RT_ARRAY_INDEX (25:10), in the channels R-A
     /// (2-5) enable, with SET_COLOR_CLEAR_VALUE(0-3). Z (0) and STENCIL
@@ -263,9 +351,12 @@ impl Process {
             IpcError::Unimplemented(format!("GPU 3D method CLEAR_SURFACE = {value:#x}: {what}"))
         };
         if value & 3 != 0 {
-            return Err(named("a depth or stencil clear"));
+            self.clear_depth_stencil(fd, value)?;
         }
         let enables = value >> 2 & 0xf;
+        if enables == 0 {
+            return Ok(());
+        }
         let state = self.channel_state(fd);
         let e = &state.engines[&class::THREED];
         // MRT_SELECT picks one of the targets SET_CT_SELECT lists:
@@ -284,40 +375,7 @@ impl Process {
         let Some(target) = color_target(e, n).map_err(|w| named(&w))? else {
             return Ok(());
         };
-        // The area: the target, within the surface clip; with
-        // SET_CLEAR_SURFACE_CONTROL's USE_CLEAR_RECT (4) the clear
-        // rectangle, USE_SCISSOR0 (8) scissor 0 if enabled. USE_VIEWPORT_
-        // CLIP0 (12) and window offsets are not read yet.
-        let control = e.reg(m::CLEAR_SURFACE_CONTROL);
-        if control >> 12 & 1 == 1 {
-            return Err(named("a clear limited by viewport 0"));
-        }
-        if e.reg(m::WINDOW_OFFSET_X) != 0 || e.reg(m::WINDOW_OFFSET_Y) != 0 {
-            return Err(named("a window offset"));
-        }
-        let (mut x0, mut x1) = (0, target.width);
-        let (mut y0, mut y1) = (0, target.height);
-        let mut limit = |(a0, a1): (u32, u32), (b0, b1): (u32, u32)| {
-            x0 = x0.max(a0);
-            x1 = x1.min(a1);
-            y0 = y0.max(b0);
-            y1 = y1.min(b1);
-        };
-        let (cx, cw) = span(e.reg(m::SURFACE_CLIP_HORIZONTAL));
-        let (cy, ch) = span(e.reg(m::SURFACE_CLIP_VERTICAL));
-        limit((cx, cx + cw), (cy, cy + ch));
-        if control >> 4 & 1 == 1 {
-            limit(
-                span(e.reg(m::CLEAR_RECT_HORIZONTAL)),
-                span(e.reg(m::CLEAR_RECT_VERTICAL)),
-            );
-        }
-        if control >> 8 & 1 == 1 && e.reg(m::SCISSOR_ENABLE) & 1 == 1 {
-            limit(
-                span(e.reg(m::SCISSOR_HORIZONTAL)),
-                span(e.reg(m::SCISSOR_VERTICAL)),
-            );
-        }
+        let (x0, y0, x1, y1) = clear_area(e, target.width, target.height).map_err(|w| named(&w))?;
         let layer = (value >> 10 & 0xffff) + target.first_layer;
         if layer >= target.layers.max(1) {
             return Err(named(&format!(
@@ -326,7 +384,7 @@ impl Process {
             )));
         }
         let rgba = [0, 1, 2, 3].map(|i| f32::from_bits(e.reg(m::COLOR_CLEAR_VALUE + i * 4)));
-        if x0 >= x1 || y0 >= y1 || enables == 0 {
+        if x0 >= x1 || y0 >= y1 {
             return Ok(());
         }
         let f = target.format;

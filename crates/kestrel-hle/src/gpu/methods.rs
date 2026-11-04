@@ -217,7 +217,7 @@ pub static TWOD: &[Method] = &[
 
 // Arrays of the 3D class whose length envytools does not give
 // (inferred from the next method): SET_TIR_MODULATION_COEFFICIENT_TABLE 5, SET_DA_OUTPUT_ATTRIBUTE_SKIP_MASK_B 2, SET_VERTEX_ATTRIBUTE_B 16, SET_ITERATED_BLEND_CONSTANT_RED 8, SET_ITERATED_BLEND_CONSTANT_GREEN 8, SET_ITERATED_BLEND_CONSTANT_BLUE 8, SET_VERTEX_STREAM_INSTANCE_B 20, SET_VERTEX_STREAM_B_FORMAT 16, SET_VERTEX_STREAM_B_LOCATION_A 16, SET_VERTEX_STREAM_B_LOCATION_B 16, SET_VERTEX_STREAM_B_FREQUENCY 16, SET_VERTEX_STREAM_LIMIT_B_A 16, SET_VERTEX_STREAM_LIMIT_B_B 16, SET_PIPELINE_RESERVED_C 12, SET_PIPELINE_RESERVED_D 12, SET_PIPELINE_RESERVED_E 12, SET_SHADER_PERFORMANCE_COUNTER_VALUE_UPPER 8, SET_MME_SHADOW_SCRATCH 256, CALL_MME_MACRO 256, CALL_MME_DATA 256.
-/// Class 0xb197 (clb197.h): 608 methods.
+/// Class 0xb197 (clb197.h): 609 methods.
 #[rustfmt::skip]
 pub static THREED: &[Method] = &[
     Method { name: "SET_OBJECT", base: 0x0000, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
@@ -429,6 +429,7 @@ pub static THREED: &[Method] = &[
     Method { name: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG0", base: 0x0f68, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG1", base: 0x0f6c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "DEKO3D_TILED_CACHE_UNKNOWN_CONFIG3", base: 0x0f70, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
+    Method { name: "DEKO3D_DISCARD_RENDER_TARGET", base: 0x0f78, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
     Method { name: "DEKO3D_TILED_CACHE_BARRIER", base: 0x0f7c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
     Method { name: "DEKO3D_TILED_CACHE_FLUSH", base: 0x0f80, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
     Method { name: "SET_VERTEX_STREAM_SUBSTITUTE_A", base: 0x0f84, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
@@ -565,7 +566,7 @@ pub static THREED: &[Method] = &[
     Method { name: "SET_ALPHA_TEST", base: 0x12ec, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_INLINE_INDEX4X8_ALIGN", base: 0x1300, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "DRAW_INLINE_INDEX4X8", base: 0x1304, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
-    Method { name: "D3D_SET_CULL_MODE", base: 0x1308, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
+    Method { name: "D3D_SET_CULL_MODE", base: 0x1308, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_DEPTH_FUNC", base: 0x130c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_ALPHA_REF", base: 0x1310, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_ALPHA_FUNC", base: 0x1314, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
@@ -706,9 +707,9 @@ pub static THREED: &[Method] = &[
     Method { name: "SET_VERTEX_STREAM_INSTANCE_A", base: 0x1880, stride: 4, count: 16, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_VERTEX_STREAM_INSTANCE_B", base: 0x18c0, stride: 4, count: 20, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_ATTRIBUTE_POINT_SIZE", base: 0x1910, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
-    Method { name: "OGL_SET_CULL", base: 0x1918, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
-    Method { name: "OGL_SET_FRONT_FACE", base: 0x191c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
-    Method { name: "OGL_SET_CULL_FACE", base: 0x1920, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::Action },
+    Method { name: "OGL_SET_CULL", base: 0x1918, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
+    Method { name: "OGL_SET_FRONT_FACE", base: 0x191c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
+    Method { name: "OGL_SET_CULL_FACE", base: 0x1920, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_VIEWPORT_PIXEL", base: 0x1924, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_VIEWPORT_SCALE_OFFSET", base: 0x192c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },
     Method { name: "SET_VIEWPORT_CLIP_CONTROL", base: 0x193c, stride: 0, count: 1, inner: 0, inner_count: 1, kind: Kind::State },

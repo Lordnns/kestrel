@@ -409,7 +409,9 @@ method; the methods live next to the state they change:
   (`--save-frame`); `scripts/run-examples.sh` uses both to run the
   standard homebrew examples, and `check-examples.py` reads the frames
   back as text with libnx's font, or compares them pixel for pixel with
-  a model (vt52-demo, simplegfx, deko_examples' first example).
+  a model (vt52-demo, simplegfx, deko3d's triangles and cubes, its
+  first example's clears); `--max-frames` ends a run after a number of
+  frames.
 - Whatever kestrel does not implement (an SVC, a named port, a service,
   a command or a CMIF control command) stops the program with
   `Stop::Unimplemented`, which names it with its identifiers; services
@@ -536,4 +538,11 @@ engines are `gpu/transfer.rs`; both read and write pitch and
 block-linear surfaces, the layout `display::Blocks` gives for the
 display and the GPU alike. Render targets and clears are
 `gpu/clear.rs`; the 3D engine keeps the MME shadow RAM beside its
-registers (`Engine::shadow`), which its macros read.
+registers (`Engine::shadow`), which its macros read. A draw (`gpu/draw.rs`)
+gathers the 3D state into a `Draw`: the Maxwell shaders decoded into
+kestrel's shader IR and translated to SPIR-V (`gpu/shader/`), vertices,
+constant buffers, textures (`gpu/texture.rs`) and the render targets'
+pixels (`gpu/surface.rs` copies them out of and back into guest memory).
+The frontend gives the process a `Renderer` (`Process::renderer`):
+kestrel-cli's `render.rs` runs each draw with Vulkan on the host's GPU,
+the core crates staying free of it.

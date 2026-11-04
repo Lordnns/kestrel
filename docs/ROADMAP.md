@@ -1922,6 +1922,121 @@ rounded fail hbnvgpu, the format test and the deko_examples check.
 | MME shadow RAM | tracked in METHOD_TRACK and _WITH_FILTER (no source gives the filter), not in PASSTHROUGH; REPLAY runs the method with the shadow's value; macros read the shadow; a method's own side effects (the constant buffer offset, the firmware's scratch) set both |
 | A buffer's pixel format | the NvGraphicBuffer's own, not the header's |
 
+#### 5B, step 5: draws and shaders (2026-11-03)
+
+What it is for: drawing. A program's draw names its shaders (small
+programs in the GPU's own instruction set), its vertices, its textures
+and its state; the GPU runs the shaders and fills the render target.
+kestrel reads the Maxwell shaders, translates them into SPIR-V, the
+shader language of Vulkan, and has the host's GPU draw with them, as
+Dolphin translates the GameCube's shaders for the host's GPU. With it,
+deko3d's triangle (deko_basic and deko_examples' second example), its
+coloured cube and its textured cube draw in kestrel's window.
+
+Sources:
+- NVIDIA's open-gpu-doc (MIT): `clb197.h` for the draw methods and the
+  state they read; the "Shader Program Header Specification" for the
+  header of each shader program.
+- envytools (MIT): the Maxwell disassembler's tables (`envydis/gm107.c`)
+  for each instruction's encoding; rnndb's `graph/gm200_texture.xml`
+  and `graph/g80_texture.xml` for texture headers and samplers;
+  "Blocklinear surfaces" for the layouts.
+- Mesa (MIT, commit edd24d0): nouveau's Maxwell code generator
+  (`nv50_ir_emit_gm107.cpp`, `nv50_ir_ra.cpp`) for what fields mean
+  (how TEXS spreads its results over register pairs); NAK
+  (`nak_private.h`, `nak/from_nir.rs`, `nak_nir_lower_fs_inputs.c`) for
+  the attribute addresses, where a pixel shader leaves its outputs, and
+  what IPA's modes return (a[0x7c] linear is gl_FragCoord.w, 1/w); nil
+  (`nil_formats.csv`, `tiling.rs`) for the depth formats and GOB types.
+- deko3d (zlib): how a program drives it all (its draw macros, its
+  texture handles and constant buffers, its viewport and window origin
+  defaults, its register list for the methods NVIDIA does not name).
+- The SPIR-V specification and GLSL.std.450 (Khronos) for the module.
+
+Implemented:
+- `gpu/shader/`: the shader program header; a decoder for the Maxwell
+  instructions the examples use (attribute loads and stores, MOV,
+  MOV32I, constant buffer loads including indexed ones, FADD, FMUL,
+  FFMA with their modifiers, MUFU's reciprocal, square roots, exponent
+  and logarithm, SHL, I2F, F2I to 8, 16 and 32 bits, F2F, IPA in its
+  linear, perspective and flat modes, TEXS of 2D textures, NOP, EXIT)
+  into kestrel's shader IR; the IR's translation to SPIR-V 1.0, checked
+  with Khronos' spirv-val in the tests where it is installed.
+- `gpu/draw.rs`: BEGIN, DRAW_VERTEX_ARRAY, DRAW_INDEX_BUFFER, END; at
+  END the state becomes a `Draw` for the frontend's `Renderer`: the
+  shaders (pipeline slots 1 and 5), the vertex streams and attributes,
+  indices, quads as triangles, the constant buffers each stage reads,
+  the textures (handles from the constant buffer SET_BINDLESS_TEXTURE
+  names, headers and samplers from their pools), viewport, scissor,
+  culling, depth test and write, colour write masks, the render targets'
+  pixels and the depth buffer as floats. Decoded programs are kept,
+  compared with memory on each use.
+- `gpu/texture.rs`: texture headers (pitch and block linear; A8B8G8R8,
+  R8, G8R8, B5G6R5, A2B10G10R10, RGBA16F, RGBA32F, BC1-3) and samplers
+  (filters, wrap modes).
+- Depth and stencil clears (Z16, Z24S8, X8Z24, S8Z24, ZF32,
+  ZF32_X24S8); the Z cull unit's operations do nothing (kestrel has no
+  Z cull data); PIXEL_SHADER_BARRIER and deko3d's DiscardRenderTarget
+  do nothing.
+- `gen-gpu-methods.py`: OGL_SET_ and D3D_SET_ methods are state.
+- kestrel-cli's `render.rs`: the Vulkan renderer (ash), its own device
+  without a window, made on the first draw ("note: GPU draws: Vulkan on
+  ..."): each draw uploads the attachments, runs one render pass with a
+  pipeline kept by a hash of what made it, and reads them back.
+  `KESTREL_GPU_DEBUG` prints each draw's description and time.
+- `--max-frames <n>`: a run stops after the program has shown n frames
+  (the examples check uses it to look at a frame a little after a
+  press).
+- The display: `Blocks::offset` by shifts, GOB rows copied four runs at
+  a time; a draw keeps the memory it read to write back over.
+
+Where the deko3d examples stop now: deko_basic and deko_examples'
+examples 1 to 4 run and draw; deko_console stops at its text's texture
+sample (TEXS of a 2D array texture); examples 5 to 9 are not tried yet
+(tessellation, multisampling, sRGB meshes, deferred shading, compute).
+
+Speed: a draw costs the guest its render targets copied out of and back
+into guest memory. On the cloud machine with lavapipe (Mesa's software
+Vulkan) a 1280x720 triangle takes about 16 ms, the 1920x1080 cube with
+depth about 57 ms, half of it lavapipe's. Keeping render targets on the
+host's GPU between draws is the way to real time (a later step).
+
+Acceptance (`run-examples.sh`, with `check-examples.py`): deko_basic and
+example 2's triangle checked against a model of the triangle from the
+examples' sources (barycentric colours within 2 inside, the clear colour
+exactly outside); examples 3 and 4, which turn with time, checked for
+what every frame shows (black around, the cube in the middle, its share
+of the frame, its colours). Where kestrel cannot draw (no Vulkan) the
+drawing examples are skipped with a note, unless KESTREL_REQUIRE_VULKAN
+is set (CI's Linux x86_64 job, with lavapipe).
+
+Tests: the decoder (the examples' own instruction words, fields read
+from envytools' table lines), the SPIR-V (validated by spirv-val), the
+IPC test (a whole draw's state gathered, the result written back; depth
+and stencil clears; a draw with no renderer stops), the renderer (a
+triangle drawn with lavapipe, write masks). Mutation check: the
+viewport's Y offset with the wrong sign fails the IPC test and the
+triangle check.
+
+| Choice (kestrel's) | Value |
+|--------------------|-------|
+| Shader control flow | straight-line programs only: a branch or a predicated instruction before the EXIT stops, named |
+| ftz, fmz | the host's float behaviour (no flush to zero) |
+| FMUL's scale | a multiplication by its power of two after |
+| F2I | rounded, saturated to the integer's range, NaN 0, then widened (sign-extended if signed) |
+| IPA perspective | the host's perspective-correct value times the multiplier times FragCoord.w (Maxwell interpolates value / w and programs multiply by w) |
+| Constant buffer reads | 64 KiB uniform blocks; words past a buffer's end read 0 |
+| Pipeline | slots 1 (vertex) and 5 (pixel) only; others stop |
+| Window origin | upper left only; lower left or a flipped Y stops |
+| Viewport | Vulkan's from SET_VIEWPORT_SCALE and OFFSET (a negative height for a negative Y scale); depth range from the Z scale and offset and SET_VIEWPORT_Z_CLIP (-w..w clips by moving z to (z + w) / 2) |
+| Scissor | scissor 0 if enabled, within viewport 0's clip and the surface clip |
+| Front face | OGL_SET_FRONT_FACE as Vulkan's, the viewport's flip included (deko3d's triangle and cube show their front faces) |
+| Quads, quad strips, polygons | triangles (0 1 2, 0 2 3) and fans |
+| Instances | one per BEGIN/END pair, as deko3d draws them: BEGIN's INSTANCE_ID counts them |
+| Depth surfaces | in the colour GOB layout (the Fermi depth GOB's byte arrangement is not documented); depth handed to the host as floats, pixels that did not change keep their bits |
+| Textures | level 0 of 2D textures; the sampler's filters and wrap modes |
+| Blending, stencil and alpha tests, base vertex | not yet: stop, named |
+
 #### Gaps left in 5A
 - Display: CreateStrayLayer, other displays, layer position and size,
   the crop, scaling mode and transform of a queued frame (ignored),
@@ -2165,7 +2280,16 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         `run-examples.sh`); deko_basic and deko_console stop at
         `OGL_SET_CULL`, their first draw ("Phase 5 notes"). Depth and
         stencil clears are left for step 5, which needs them.
-     5. Draws: vertex fetch, Maxwell shader decoding to SPIR-V, textures.
+     5. Done in part (2026-11-03): draws and shaders: the Maxwell
+        instructions deko3d's examples use, decoded and translated to
+        SPIR-V, drawn with Vulkan on the host's GPU; vertex fetch, indices,
+        constant buffers, 2D textures (BC1-3 among them), depth. deko_basic
+        and deko_examples 1 to 4 draw, checked by `run-examples.sh`
+        ("Phase 5 notes"). Confirmation on the owner's Windows PC pending.
+     6. Next: deko_console (2D array textures, blending), then deko_examples
+        5 to 9 (tessellation, multisampling, sRGB, deferred shading with
+        the tiled cache, compute); render targets kept on the host's GPU
+        between draws, for speed.
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,

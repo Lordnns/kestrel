@@ -162,6 +162,9 @@ pub struct Process {
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Where the frames the program queues go: the window, or a test.
     pub screen: Option<Box<dyn display::Screen>>,
+    /// Where GPU draws run: the host's GPU (the frontend's Vulkan
+    /// renderer); None: draws stop, named.
+    pub renderer: Option<Box<dyn gpu::draw::Renderer>>,
     pub svc_count: u64,
 }
 
@@ -226,6 +229,7 @@ impl Process {
             input: None,
             interrupt: None,
             screen: None,
+            renderer: None,
             svc_count: 0,
         };
         p.main_thread = p

@@ -84,6 +84,30 @@ impl Screen for Keep {
     }
 }
 
+/// A screen that counts the frames shown and asks the run to stop (the
+/// interrupt a closed window raises) at the `limit`th (`--max-frames`).
+pub struct Count {
+    pub shown: Arc<std::sync::atomic::AtomicU64>,
+    pub limit: u64,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+    pub inner: Option<Box<dyn Screen>>,
+}
+
+impl Screen for Count {
+    fn present(&mut self, frame: &Frame) {
+        if let Some(s) = self.inner.as_mut() {
+            s.present(frame);
+        }
+        let n = self
+            .shown
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if n >= self.limit {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// `frame` as a PNG file: 8-bit RGB, the image data in stored (not
 /// compressed) deflate blocks, as the PNG and zlib specifications allow.
 pub fn png(frame: &Frame) -> Vec<u8> {

@@ -19,9 +19,13 @@
 //! that act are executed or stop the program, named.
 
 pub mod clear;
+pub mod draw;
 pub mod methods;
 pub mod mme;
 mod run;
+pub mod shader;
+pub mod surface;
+pub mod texture;
 pub mod transfer;
 
 use std::collections::BTreeMap;
@@ -255,6 +259,8 @@ pub struct Engine {
     /// An inline-to-memory transfer waiting for its data (3D, compute and
     /// inline-to-memory classes).
     pub inline: Option<transfer::Inline>,
+    /// The 3D engine's draw in progress (BEGIN ... END).
+    pub pending: draw::Pending,
 }
 
 impl Engine {
@@ -269,6 +275,7 @@ impl Engine {
             mme_start_pointer: 0,
             constant_buffers: BTreeMap::new(),
             inline: None,
+            pending: draw::Pending::default(),
         }
     }
 
@@ -302,6 +309,8 @@ pub struct ChannelState {
     /// Privileged GPU registers the firmware calls wrote, by address
     /// (SET_FALCON04, `gpu/run.rs`).
     pub hw_regs: BTreeMap<u32, u32>,
+    /// Shader programs decoded for draws, by address.
+    pub programs: draw::ProgramCache,
 }
 
 #[cfg(test)]

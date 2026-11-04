@@ -283,7 +283,8 @@ impl Process {
         match (class, m.name) {
             // Nothing to do: kestrel runs every method in order, at once,
             // so there is never work to wait for.
-            (_, "NO_OPERATION") | (class::THREED, "WAIT_FOR_IDLE" | "PIPE_NOP") => Ok(()),
+            (_, "NO_OPERATION")
+            | (class::THREED, "WAIT_FOR_IDLE" | "PIPE_NOP" | "PIXEL_SHADER_BARRIER") => Ok(()),
             // Cache invalidations and flushes (shader, texture, sampler,
             // constant buffer, ROP caches, pending writes, ZCULL): kestrel
             // has no GPU caches, its memory is always current (kestrel's
@@ -301,6 +302,10 @@ impl Process {
             // kestrel renders to memory directly (kestrel's choice: nothing
             // to do).
             (class::THREED, "DEKO3D_TILED_CACHE_BARRIER" | "DEKO3D_TILED_CACHE_FLUSH") => Ok(()),
+            // deko3d's DiscardRenderTarget: the contents may be dropped;
+            // keeping them is always right (kestrel's choice: nothing to
+            // do).
+            (class::THREED, "DEKO3D_DISCARD_RENDER_TARGET") => Ok(()),
             // The macro memories: a pointer, then words stored from it.
             (class::THREED, "LOAD_MME_INSTRUCTION_RAM_POINTER") => {
                 e.mme_code_pointer = call.value;
@@ -412,6 +417,16 @@ impl Process {
             (class::DMA_COPY, "NOP") => Ok(()),
             // A clear of a colour target (`gpu/clear.rs`).
             (class::THREED, "CLEAR_SURFACE") => self.clear_surface(fd, call.value),
+            // Draws (`gpu/draw.rs`).
+            (class::THREED, "BEGIN" | "END" | "DRAW_VERTEX_ARRAY" | "DRAW_INDEX_BUFFER") => {
+                self.draw_method(fd, m.name, call.value)
+            }
+            // The Z cull unit's region clears, saves, loads and syncs:
+            // kestrel tests depth per pixel and keeps no Z cull data
+            // (kestrel's choice: nothing to do).
+            (class::THREED, "CLEAR_ZCULL_REGION" | "STORE_ZCULL" | "LOAD_ZCULL" | "ZCULL_SYNC") => {
+                Ok(())
+            }
             (class::THREED, "SET_REPORT_SEMAPHORE_D") => {
                 let abc = [e.reg(0x1b00), e.reg(0x1b04), e.reg(0x1b08)];
                 self.report_semaphore(fd, abc, call.value)
