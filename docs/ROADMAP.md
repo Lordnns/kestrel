@@ -140,13 +140,13 @@ has a commit `main` lacks). In merge order:
 | #13 | `claude/graphics-5b-draw` | graphics | 2026-11-03 | 5B step 5: draws and shaders |
 | #14 | `claude/graphics-5b-handoff` | graphics | 2026-11-04 (UTC) | the graphics track's hand-off notes |
 
-Open on 2026-11-03: PR #15 `claude/ci-fix-v0.1.26` (fixes `v0.1.26`'s
-CI: Rust 1.99's clippy in `gpu/draw.rs`, spirv-val under qemu; manual
-CI run 41755050930 passed every job that had finished, the qemu job
-included, with macOS x86_64 still running when this was written) and
-PR #16
-`claude/eglantine-plan` (this re-plan, `docs/EGLANTINE.md`,
-`docs/SESSIONS.md`). The merged branches can be deleted when the owner
+Merged after these, on 2026-11-04 (UTC): PR #15 `claude/ci-fix-v0.1.26`
+(fixes `v0.1.26`'s CI: Rust 1.99's clippy in `gpu/draw.rs`, spirv-val
+under qemu; manual CI run 41755050930 passed every job that had
+finished, the qemu job included, with macOS x86_64 still running when
+this was written) and PR #16 `claude/eglantine-plan` (this re-plan and
+`docs/EGLANTINE.md`). Open: `claude/sessions-doc` (`docs/SESSIONS.md`,
+meta information). The merged branches can be deleted when the owner
 says so.
 
 ### Deviations from the hard rules found in the audit
