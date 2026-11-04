@@ -67,8 +67,11 @@ sessions learned. The plan and the status live elsewhere; read them first:
   the upload and copy engines, clears), and draws run on the host's GPU:
   Maxwell shaders translated to SPIR-V and drawn with Vulkan. deko_basic
   and deko_examples 1 to 4 (a triangle, a cube, a textured cube) draw and
-  are checked by the examples; next deko_console and the other examples
-  (ROADMAP "Next task" item 2).
+  are checked by the examples (PR #13, merged; the owner's Windows test
+  and a CI run still to confirm); next deko_console and the other
+  examples. The
+  ROADMAP's "5B: picking up the work" says where the reference sources
+  are and how to run and debug the examples.
 
 ## How the owner works
 
