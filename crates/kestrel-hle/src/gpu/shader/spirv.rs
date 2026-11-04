@@ -1085,14 +1085,17 @@ mod tests {
     /// dependency: without it, only the module's shape is checked).
     fn validate(m: &Module) {
         assert_eq!(m.words[0], 0x0723_0203, "the SPIR-V magic");
-        let Ok(out) = std::process::Command::new("spirv-val")
+        // Under qemu-user a missing program is not a spawn error: the child
+        // exits with 127 (CI's cross + qemu job, v0.1.26). A spirv-val that
+        // cannot answer --version is treated as not installed.
+        let usable = std::process::Command::new("spirv-val")
             .arg("--version")
             .output()
-        else {
+            .is_ok_and(|out| out.status.success());
+        if !usable {
             eprintln!("spirv-val not installed: SPIR-V not validated");
             return;
-        };
-        assert!(out.status.success());
+        }
         let dir = std::env::temp_dir().join(format!("kestrel-spirv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{:08x}.spv", m.words.len() as u32 ^ m.words[3]));

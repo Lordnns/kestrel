@@ -158,6 +158,9 @@ Each is also recorded in the ROADMAP's phase notes.
 
 ## Checks before every commit
 
+- first `rustup update stable`: CI installs the newest stable Rust
+  (`dtolnay/rust-toolchain@stable`), and a newer clippy's lints failed
+  every native job of `v0.1.26` that a 1.93 toolchain passed
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`, and also with
   `--no-default-features` for `kestrel-cli`

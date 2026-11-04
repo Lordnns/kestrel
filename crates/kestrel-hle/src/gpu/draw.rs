@@ -607,7 +607,7 @@ impl Process {
                     )));
                 };
                 let h = u32::from_le_bytes(h.try_into().unwrap());
-                let t = self.texture(fd, &e, h).map_err(&named)?;
+                let t = self.texture(fd, &e, h).map_err(named)?;
                 textures.push((binding, t));
             }
         }
@@ -720,7 +720,7 @@ impl Process {
                 return Err(named(format!("blending on target {t}")));
             }
             let n = ct >> (4 + 3 * t) & 7;
-            let Some(target) = clear::color_target(&e, n).map_err(&named)? else {
+            let Some(target) = clear::color_target(&e, n).map_err(named)? else {
                 colors.push(None);
                 continue;
             };
@@ -738,7 +738,7 @@ impl Process {
             }));
             targets.push((t, image, kept));
         }
-        let zt = depth_target(&e).map_err(&named)?;
+        let zt = depth_target(&e).map_err(named)?;
         let (depth, depth_raw) = match (&zt, depth_test.is_some() || depth_write) {
             (Some(z), true) => {
                 let (raw, kept) = self.read_image_kept(fd, &z.image)?;
