@@ -72,6 +72,13 @@ sessions learned. The plan and the status live elsewhere; read them first:
   examples. The
   ROADMAP's "5B: picking up the work" says where the reference sources
   are and how to run and debug the examples.
+- The re-plan of 2026-11-03 (owner, after Eglantine, a GPL-3.0 Eden fork
+  that plays Mario Kart World; `docs/EGLANTINE.md`): three tracks, the
+  boot track first (PLAN phase 6A: `kestrel scan`, the ExeFS loader,
+  LDAPR and pointer authentication, six cores and the Switch 2 memory
+  layout, the Switch 2 services, the first frame), then graphics (5C
+  after deko_console), then CPU. All branches are merged into `main`
+  (ROADMAP "Branches and merges").
 
 ## How the owner works
 
@@ -137,6 +144,19 @@ Each is also recorded in the ROADMAP's phase notes.
   queue), not a text hook.
 - Docker Desktop on the owner's PC, with the same pinned devkitPro image
   as CI, to build the libnx examples.
+
+- Other emulators are fact sources only (2026-11-03, `PLAN.md` section
+  2): Eglantine, Eden, yuzu and Ryujinx may be read, notes and source,
+  but their code is never copied or translated (kestrel stays MIT). Each
+  fact goes into `docs/SWITCH2_NOTES.md` with project, file, row or line
+  and commit before it is implemented. Facts that only Eglantine's
+  "changes.patch" rows give need our own observation first.
+- `--auto-stub` (2026-11-03) is for exploring a title only: never in the
+  self-test, CI or the examples, and nothing is implemented from a
+  stubbed reply.
+- A Switch 2 title's files stay on the owner's machine: steps that need
+  them run there, and nothing from them enters the repository, logs or
+  tests (NSO fixtures are built from source with `elf2nso`).
 
 ## Rules that are easy to forget
 

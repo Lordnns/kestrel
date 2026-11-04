@@ -98,10 +98,50 @@ moved to the CPU track, for the recompiler first.
 | Phase 4 acceptance | self-test 27/27 and zero divergences on Linux x86_64 and Windows x86_64 (CI run 9, 2026-10-31); floating point and NEON still go through the interpreter | "Phase 4 notes" |
 | The recompiler as the default | done (owner, 2026-10-31, after CI run 9) | `auto` picks it on Windows and Linux x86_64 |
 
-### Phases 5 to 7: **not started**
+### Phase 5: Graphics: **in progress** (5A done, 5B in progress)
 
-- Phase 5 graphics (5A display, 5B Maxwell GPU level, 5C Ampere GPU level,
-  5D NVN API level), phase 6 commercial software, phase 7 polish: no code.
+Corrected 2026-11-03: this table said "not started" while the graphics
+track ran; the detail is in "Phase 5 notes".
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| 5A Display and framebuffer | done (2026-11-03, PR #8) | vt52-demo and simplegfx display and are checked with the examples; nvhost-ctrl syncpoints and events, the buffer queue's swap interval and fences, QUERY, the vsync event; Vulkan presentation with `ash`, confirmed on the owner's Windows PC |
+| 5B Maxwell GPU level for homebrew | in progress (PRs #9 to #13) | command processor, MME, upload and copy engines, clears and render targets, draws with Maxwell shaders to SPIR-V; deko_basic and deko_examples 1 to 4 draw; next deko_console |
+| 5C Ampere GPU level | not started | after deko_console ("Plan changes (2026-11-03, Eglantine)") |
+| 5D NVN API level | not started | owner's decision, not on the milestone's path |
+
+### Phase 6: Commercial software: **not started**
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| 6A Boot a Switch 2 ExeFS | not started; first priority since 2026-11-03 | "Next task", the boot track |
+
+### Phase 7: Product polish: **not started**
+
+### Branches and merges (2026-11-03)
+
+Every branch is merged: `main` at `5436fa9` contains all of them (none
+has a commit `main` lacks). In merge order:
+
+| PR | Branch | Track | Merged | What |
+|----|--------|-------|--------|------|
+| #1 | `claude/funny-darwin-gaoytq` | CPU | 2026-10-31 | phase 3's memory arena |
+| #2 | `claude/bold-euler-pjl3cr` | CPU | 2026-10-31 | the CPU gaps (per-instruction tests, FP16, dot product, crypto, CRC32, CASP) |
+| #3 | `claude/modest-albattani-tr25g6` | CPU | 2026-10-31 | the Windows-first decisions, the differential tester, the first x86_64 recompiler |
+| #4 | `claude/dazzling-gates-ecemqi` | CPU | 2026-10-31 | each guest core on its own host thread |
+| #5 | `claude/modest-albattani-tr25g6` | CPU | 2026-10-31 | the recompiler on threaded cores; system instructions and exclusives |
+| #6 | `claude/rev-clz-rbit` | CPU | 2026-11-03 | the recompiler: RBIT, REV*, CLZ, CLS |
+| #7 | `claude/dc-zva-counters` | CPU | 2026-11-03 | the recompiler: DC ZVA, the counters, SIMD and FP loads, stores, moves and logic |
+| #8 | `claude/graphics-5a` | graphics | 2026-11-03 | 5A: display, the GPU's nvdrv devices, Vulkan presentation |
+| #9 | `claude/graphics-5a` | graphics | 2026-11-03 | 5B step 1: the command processor |
+| #10 | `claude/graphics-5b-mme` | graphics | 2026-11-03 | 5B step 2: the MME |
+| #11 | `claude/graphics-5b-copy` | graphics | 2026-11-03 | 5B step 3: the upload and copy engines |
+| #12 | `claude/graphics-5b-clear` | graphics | 2026-11-03 | 5B step 4: clears and render targets |
+| #13 | `claude/graphics-5b-draw` | graphics | 2026-11-03 | 5B step 5: draws and shaders |
+| #14 | `claude/graphics-5b-handoff` | graphics | 2026-11-04 (UTC) | the graphics track's hand-off notes |
+
+Open: `claude/eglantine-plan` (this re-plan). The merged branches can be
+deleted when the owner says so.
 
 ### Deviations from the hard rules found in the audit
 
@@ -183,6 +223,26 @@ it affects:
 | Section 3's machine table corrected: the owner has no ARM machine; their machines are x86_64 (a Windows PC, a Windows bare-metal server, Debian bare metal, Proxmox) | gameplay testing; ARM hosts tested only on CI |
 | Phase 4 provisions: kestrel's own x86_64 encoder (no new dependency), every encoding checked against llvm-mc; the Windows x64 calling convention first, System V for Linux testing; executable memory never writable and executable at once; an interpreter fallback for anything not translated; integer, branches, loads and stores first, then floating point and NEON through the interpreter's routines where simpler; zero divergences at every step. Acceptance is now Windows x86_64 (and Linux x86_64 for testing) | the recompiler |
 | Phase 5: 5A then 5B in parallel with phase 4 | the graphics track |
+
+### Plan changes (2026-11-03, Eglantine)
+
+Eglantine, a public GPL-3.0 fork of Eden, plays Mario Kart World with
+glitches (`docs/EGLANTINE.md` compares it with kestrel). The owner's
+decisions of 2026-11-03: kestrel stays MIT and takes facts from it, not
+code; the order of work is the one that gets a game playable soonest.
+What changed in `PLAN.md` and what it affects:
+
+| Change in `PLAN.md` | Affects |
+|---------------------|---------|
+| Section 2: "Other emulators as fact sources": public emulators, GPL ones included, may be read (notes and source) for facts and design ideas; never copied or translated; each fact recorded in `docs/SWITCH2_NOTES.md` with its source first; facts whose only source is Eglantine's "changes.patch" (unknown origin) confirmed by our own observation first | every Switch 2 task; `docs/SWITCH2_NOTES.md` |
+| Section 2: `--auto-stub`, exploration only (off by default, never in the self-test, CI or examples): an unknown service command answers an empty success and is logged | 6A.5; `kestrel run` |
+| Section 3: three tracks, the boot track (phase 6A) first in priority, then graphics, then CPU | the "Next task" below |
+| Section 3, "Time and cores": six cores answered (Switch 2 titles' NPDM ask for cores 0 to 5) | `thread::CORES` in 6A.4 |
+| Phase 5C: provisions from Eglantine's notes (Ampere classes on the Maxwell engines, MME64, QMD 3.0, SM86 into the same IR, ASTC with the Switch 2 GOB swizzle, task/mesh, sparse images) and a design for the GPU thread's cost (front and back threads, macro memo); 5C starts after deko_console | the graphics track |
+| Phase 5D: not on the milestone's path (Eglantine plays at the GPU level); the decision stays the owner's | 5D |
+| Phase 6A, new: boot a Switch 2 ExeFS (scan, loader, instructions, process, services, first frame) | the boot track |
+| Phase 7: audio and video decoding come with the boot track as a title needs them | phase 7 |
+| Sections 6 and 7: Eglantine in the landscape; decision 1 answered (keep building kestrel, MIT), decision 3 answered in part (no GPL code) | section 7 |
 
 ### CPU gaps before phase 3 (owner, 2026-10-30)
 
@@ -2114,6 +2174,39 @@ Next, in order:
 
 The owner's decisions of 2026-10-31 ("Plan changes (2026-10-31, the
 Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
+Since 2026-11-03 ("Plan changes (2026-11-03, Eglantine)") a third track,
+the boot track, comes first in priority; the CPU and graphics tracks go
+on beside it.
+
+### The boot track (first priority since 2026-11-03)
+
+`PLAN.md` phase 6A. Boot the owner's Switch 2 title from an ExeFS the
+owner has extracted, headless on the counted clock, and remove its
+blockers in the order they come. Eglantine's notes give the order to
+expect (`docs/EGLANTINE.md`, "Facts to take"); each fact becomes a
+`docs/SWITCH2_NOTES.md` entry before it is implemented. Game files stay
+on the owner's machine: steps that need the title are run by the owner
+or in a session on the owner's PC, and nothing from the title enters the
+repository, logs or tests.
+
+1. Next: `kestrel scan <exefs>` (6A.1): the encodings in the modules'
+   code that kestrel's decoder rejects, with counts. Its NSO reading is
+   the start of 6A.2; its test fixtures are NSOs built from source (the
+   devkitPro container's `elf2nso`), never a title's.
+2. The ExeFS loader (6A.2): NSO with kestrel's own LZ4 block decoder,
+   `main.npdm` with the Switch 2 ACID layout, the modules' placement, a
+   plain `romfs/` beside the ExeFS.
+3. The instructions the scan finds (6A.3): LDAPR/LDAPUR and the pointer
+   authentication family first (Eglantine counted 37,000 to 100,000 LDAPR
+   and over 100,000 RETAA/RETAB in each title), with clang encodings and
+   independent expected values.
+4. The process (6A.4): six cores, the Switch 2 memory layout, svcGetInfo
+   21 and 29 to 33, svc 0x80.
+5. `--auto-stub` (`PLAN.md` section 2, exploration only), then the
+   services in the order the title asks for them (6A.5).
+6. The first GPU submission and presented frame (6A.6), with 5C.
+
+### The CPU and graphics tracks
 
 1. The CPU track, in this order:
    - A. Done (2026-10-31, "Phase 4 notes"): the differential tester,
@@ -2356,18 +2449,24 @@ Windows milestone)"): Windows x86_64 first, with two tracks in parallel.
         5 to 9 (tessellation, multisampling, sRGB, deferred shading with
         the tiled cache, compute); render targets kept on the host's GPU
         between draws, for speed.
+     Since 2026-11-03 ("Plan changes (2026-11-03, Eglantine)"): after
+     deko_console, 5C (the Switch 2 GPU: Ampere classes, Turing MME64,
+     QMD 3.0, SM86 shaders into the same IR, ASTC) comes before
+     deko_examples 5 to 9, driven by the boot track's title once it
+     submits GPU work (`PLAN.md` phase 5C, and its provisions for the GPU
+     thread's cost).
 
 Other candidates, when the owner asks for them: a licence-notices file in
 the release packages (they bundle MIT/Apache crates: winit, softbuffer,
 gilrs and their dependencies); more homebrew, fixing what
 `user/logs/unimplemented.log` names; the later input tasks (other
 NpadStyleTag controllers, several players, real Joy-Con motion, rumble
-and pairing). CPU features left for the owner to decide: LDAPR
-(FEAT_LRCPC), the non-hint pointer authentication instructions (PACIA,
-AUTIA, RETAA, LDRAA; FEAT_PAuth) and FMLAL/FMLSL (FEAT_FHM) stop as
-undefined; check them against the Cortex-A78C's documentation before
-adding. The hint-space PAC instructions (PACIASP and the like) already
-run as NOP.
+and pairing). CPU features: LDAPR (FEAT_LRCPC) and the non-hint pointer
+authentication instructions (PACIA, AUTIA, RETAA, LDRAA; FEAT_PAuth)
+come with the boot track (6A.3, decided 2026-11-03: Switch 2 titles use
+them); FMLAL/FMLSL (FEAT_FHM) wait until `kestrel scan` finds them in a
+title. Check each against the Cortex-A78C's documentation first. The
+hint-space PAC instructions (PACIASP and the like) already run as NOP.
 
 Each service so far followed the same steps; keep them:
 
@@ -2555,11 +2654,13 @@ differential tester; the memory arena is done.
 
 ### Order after that
 
-1. The Windows x86_64 milestone (the two tracks above, then phase 6 on
-   the owner's Windows machines).
+1. The Windows x86_64 milestone (the three tracks above, then the rest
+   of phase 6 on the owner's Windows machines).
 2. Then the other platforms, in the owner's order: macOS ARM, Linux
    x86_64, Windows ARM, macOS x86_64, Linux ARM; ARM hosts with phase 3's
    in-process fallback first.
 
-Owner decisions pending in `PLAN.md` section 7 (strategy, API-level
-graphics, code reuse) do not block any of the above; ask before phase 5.
+Owner decisions in `PLAN.md` section 7: strategy answered and code reuse
+answered in part (2026-11-03: kestrel stays MIT; public emulators are
+fact sources only); API-level graphics (5D) still open, and not on the
+milestone's path.
